@@ -2,6 +2,7 @@
 #ifdef HFV_TESTING
 #include "stdafx.h"
 #include "HfsPlusDialogs.h"
+#include "InterruptedMoveReport.h"
 #include "LauncherWriteBack.h"
 #include "ApfsFormat.h"
 #include "ApfsVolume.h"
@@ -843,6 +844,67 @@ Storage::Result WindowsReportedMove(const CString& root,Storage::Job& job)
         std::move(sources),std::move(target)},job,completion);
 }
 
+void WindowsMoveReportFailures(const CString& root,FILE* report)
+{
+    using FileOperations::MoveReportFault;
+    for(bool late:{false,true})for(auto failure:{MoveReportFault::ShortWrite,MoveReportFault::Flush}){
+        CString folder;
+        folder.Format("%s\\report-io-%u-%u",root.GetString(),unsigned(late),unsigned(failure));
+        const auto from=folder+"\\Source",to=folder+"\\Destination",reports=folder+"\\Reports";
+        Check(CreateDirectoryA(folder,nullptr)&&CreateDirectoryA(from,nullptr)&&
+              CreateDirectoryA(to,nullptr),"create move report failure fixture");
+        {
+            auto source=MacBrowser::OpenWindows(VolumeCoord::Wide(from.GetString()));
+            auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(to.GetString()));
+            Put(*source,false,false,2,u"First");
+            Put(*source,true,false,2,u"Second");
+            Put(*target,true,false,2,u"Neighbor");
+        }
+        Check(SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",VolumeCoord::Wide(reports.GetString()).c_str())!=FALSE,
+              "isolate move report I/O failure");
+        {
+            struct Reset {
+                ~Reset(){
+                    FileOperations::moveReportFault={};
+                    SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",nullptr);
+                }
+            } reset;
+            bool injected=false;
+            FileOperations::moveReportFault=[&](const std::string& line){
+                if(line.rfind(late?"Source removed for item 1.":"Destination folder ",0)!=0)
+                    return MoveReportFault::None;
+                injected=true;
+                return failure;
+            };
+            Storage::Job job;
+            const auto result=WindowsReportedMove(folder,job);
+            Check(injected&&result.error==ERROR_WRITE_FAULT&&!result.moved&&result.partial==late&&
+                  result.message.find("Could not update the interrupted move report")!=result.message.npos,
+                  "move did not correctly report a failed recovery record write");
+        }
+        auto source=MacBrowser::OpenWindows(VolumeCoord::Wide(from.GetString()));
+        auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(to.GetString()));
+        MacBrowser::Entry found;
+        Check(source->FindChild(2,u"First",found)==!late,"report failure removed the wrong first source");
+        if(!late)VerifyFile(*source,2,u"First",false);
+        VerifyFile(*source,2,u"Second",true);
+        VerifyFile(*target,2,u"Neighbor",true);
+        Check(target->FindChild(2,u"First",found)==late&&target->FindChild(2,u"Second",found)==late,
+              "move report failure did not stop at the expected publication boundary");
+        if(late){
+            VerifyFile(*target,2,u"First",false);
+            VerifyFile(*target,2,u"Second",true);
+        }
+        const auto text=ReadInterruptedMoveReport(reports);
+        Check((text.find("\r\nDestination published.\r\n")!=text.npos)==late&&
+              (text.find("\r\nSource removal started for item 1.")!=text.npos)==late&&
+              text.find("\r\nSource removal started for item 2.")==text.npos&&
+              text.find("\r\nMove complete.")==text.npos,
+              "failed report write misrepresented the last completed move stage");
+    }
+    fprintf(report,"PASS: short report writes and flush failures before publication and after first removal preserve both forks, remaining sources and the partial report.\n");
+}
+
 void WindowsMoveReports(const CString& root,FILE* report)
 {
     for(unsigned phase:{17u,18u,0u,1u}){
@@ -974,6 +1036,7 @@ void CrossFormatMoveRecovery(const CString& root,FILE* report)
         }
     }
     WindowsMoveReports(root,report);
+    WindowsMoveReportFailures(root,report);
     fprintf(report,"PASS: classic HFS moves with HFS+, HFSX and APFS retain verified destination forks and unprocessed sources when interrupted before and during source cleanup in either direction.\n");
 }
 

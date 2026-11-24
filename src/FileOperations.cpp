@@ -32,6 +32,9 @@
 #include <fcntl.h>
 #include <optional>
 namespace FileOperations {
+#ifdef HFV_TESTING
+thread_local std::function<MoveReportFault(const std::string&)> moveReportFault;
+#endif
 struct Operation::State {mutable std::mutex mutex;Completion completion;};
 struct Registry {
  struct Entry{std::weak_ptr<Operation::State> state;std::weak_ptr<Storage::Job> job;};
@@ -101,8 +104,15 @@ public:
     void Append(const std::string& line)
     {
         DWORD written=0;
-        if(line.size()>MAXDWORD||!WriteFile(file_,line.data(),DWORD(line.size()),&written,nullptr)||written!=line.size()||
-           !FlushFileBuffers(file_))
+        size_t requested=line.size();
+        bool flush=true;
+#ifdef HFV_TESTING
+        const auto injected=moveReportFault?moveReportFault(line):MoveReportFault::None;
+        if(injected==MoveReportFault::ShortWrite&&requested)--requested;
+        flush=injected!=MoveReportFault::Flush;
+#endif
+        if(line.size()>MAXDWORD||!WriteFile(file_,line.data(),DWORD(requested),&written,nullptr)||written!=line.size()||
+           !flush||!FlushFileBuffers(file_))
             throw OperationError(ERROR_WRITE_FAULT,"Could not update the interrupted move report. Check both volumes. "+Path());
     }
     static std::string Describe(const Volume& volume,const Entry& entry)

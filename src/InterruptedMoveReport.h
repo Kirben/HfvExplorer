@@ -3,8 +3,15 @@
 
 #include <ShlObj.h>
 #include <string>
+#ifdef HFV_TESTING
+#include <functional>
+#endif
 
 namespace FileOperations {
+#ifdef HFV_TESTING
+enum class MoveReportFault { None, ShortWrite, Flush };
+extern thread_local std::function<MoveReportFault(const std::string&)> moveReportFault;
+#endif
 inline std::wstring InterruptedMoveFolder()
 {
 #ifdef HFV_TESTING
