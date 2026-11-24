@@ -1612,7 +1612,9 @@ static void RunLauncherInterruptionTests(const CString& root,FILE* report)
         CrashChild(folder,phase,L"launcher-write-back");
         {
             auto recovered=LauncherWriteBack::LoadPending(folder);
-            Check(phase==10?recovered.empty():(recovered.size()==1&&recovered.front()->Committed()==(phase==9)),
+            bool committed=false;
+            Check(phase==10?recovered.empty():(recovered.size()==1&&
+                  !recovered.front()->CheckCommitStatus(committed).code&&committed==(phase==9)),
                   "reopened launcher record has the wrong commit status");
             if(phase==9||phase==10) {
                 auto volume=MacBrowser::OpenImage(imagePath);

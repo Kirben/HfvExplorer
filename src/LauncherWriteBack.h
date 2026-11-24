@@ -43,9 +43,9 @@ public:
     ~LauncherWriteBack();
     bool CaptureBaseline(CWnd* owner);
     bool SavePending();
-    bool Committed() const;
+    Storage::Result CheckCommitStatus(bool& committed) const;
     Storage::Result ApplyPending(const LauncherTemporaryDocument&,Storage::Job&);
-    bool RetireCommitted() { return Committed()&&Forget(); }
+    bool RetireCommitted();
     static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root);
     const CString& TemporaryPath() const { return temporary_; }
     bool Complete(BrowserSession&);

@@ -255,9 +255,21 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
     return edits;
 }
 
-bool LauncherWriteBack::Committed() const
+Storage::Result LauncherWriteBack::CheckCommitStatus(bool& committed) const
 {
-    return !decisionId_.empty()&&ClassicHfsRecovery::MoveIsCommitted(decisionId_);
+    committed=false;
+    try{
+        committed=!decisionId_.empty()&&ClassicHfsRecovery::MoveIsCommitted(decisionId_);
+        return {};
+    }catch(const std::exception& error){
+        return {1,ERROR_INVALID_DATA,std::string("Cannot verify the pending edit's commit status. ")+error.what()};
+    }
+}
+
+bool LauncherWriteBack::RetireCommitted()
+{
+    bool committed=false;
+    return !CheckCommitStatus(committed).code&&committed&&Forget();
 }
 
 Storage::Result LauncherWriteBack::ApplyPending(const LauncherTemporaryDocument& document,Storage::Job& job)
@@ -267,7 +279,10 @@ Storage::Result LauncherWriteBack::ApplyPending(const LauncherTemporaryDocument&
     const auto file=document.Handle();
     if(original_.IsPhysical())
         return FileOperations::ApplyLaunchEdit(original_,version_,file,job);
-    if(Committed())return {1,ERROR_ALREADY_EXISTS,"The Mac document was already updated."};
+    bool committed=false;
+    const auto status=CheckCommitStatus(committed);
+    if(status.code)return status;
+    if(committed)return {1,ERROR_ALREADY_EXISTS,"The Mac document was already updated."};
     if(pending_==INVALID_HANDLE_VALUE||!decisionOffset_)
         return {1,ERROR_INVALID_DATA,"The pending edit has no recovery record."};
     ClassicHfsRecovery::MoveDecision decision;
@@ -298,8 +313,14 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
         owner->MessageBox(reason+" The temporary document is still available at "+temporary_,
                           "HFVExplorer",MB_OK|MB_ICONWARNING);
     };
-    if(Committed()){
-        if(!RetireCommitted()){retain("The Mac document was already updated. Could not retire the pending edit record.");return false;}
+    bool committed=false;
+    const auto status=CheckCommitStatus(committed);
+    if(status.code){
+        retain(CString(status.message.c_str()));
+        return false;
+    }
+    if(committed){
+        if(!Forget()){retain("The Mac document was already updated. Could not retire the pending edit record.");return false;}
         // Recovery of the Mac image can still need the shared commit marker.
         retain("The Mac document was already updated.");
         return true;

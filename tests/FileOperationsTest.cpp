@@ -460,6 +460,28 @@ int RunFileOperationsTest(const char* directory){
            "pending edit did not survive reopening");
     }
     const auto record=folder+"\\.hfv-pending-edit";
+    {
+     const auto handle=CreateFileA(record.c_str(),FILE_APPEND_DATA,0,nullptr,OPEN_EXISTING,0,nullptr);
+     Check(handle!=INVALID_HANDLE_VALUE,"open pending record for missing-marker test");
+     const std::string missingMarker(32,'0');
+     DWORD written=0;
+     const bool wrote=WriteFile(handle,missingMarker.data(),DWORD(missingMarker.size()),&written,nullptr)!=FALSE;
+     CloseHandle(handle);
+     Check(wrote&&written==missingMarker.size(),"bind pending record to a missing marker");
+     auto recovered=LauncherWriteBack::LoadPending(CString(pendingRoot.c_str()));
+     Check(recovered.size()==1,"recover edit with a missing marker");
+     bool committed=true;
+     LauncherTemporaryDocument inspected;
+     Storage::Job retry;
+     Check(!inspected.Open(W(pending).c_str(),true).code&&
+           recovered.front()->CheckCommitStatus(committed).code&&!committed&&
+           !recovered.front()->RetireCommitted()&&recovered.front()->ApplyPending(inspected,retry).code,
+           "missing decision marker escaped as an exception or permitted a write");
+    }
+    Check(GetFileAttributesA(record.c_str())!=INVALID_FILE_ATTRIBUTES&&
+          GetFileAttributesA(pending.c_str())!=INVALID_FILE_ATTRIBUTES,
+          "missing decision marker lost the pending edit or temporary document");
+    fprintf(report,"PASS: an unavailable launcher commit marker blocks write-back and preserves the recovery record and copy.\n");
     Check(SetFileAttributesA(record.c_str(),FILE_ATTRIBUTE_NORMAL)!=FALSE,"prepare malformed recovery record");
     Save(record,"TRUNCATED");
     Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str())).empty()&&
