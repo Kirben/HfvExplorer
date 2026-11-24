@@ -125,15 +125,12 @@ public:
 };
 
 void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<std::string>& snapshots,
-                        Storage::Job& job,Completion& completion,bool windowsDestination,bool batchActive=false,InterruptedMoveReport* report=nullptr){
+                        const std::vector<WindowsCutPlan>& windowsPlans,Storage::Job& job,Completion& completion,
+                        bool windowsDestination,bool batchActive=false,InterruptedMoveReport* report=nullptr){
  std::vector<StorageLocation::ResolvedEntry> checked(sources.size());
- std::vector<WindowsCutPlan> windowsPlans(sources.size());
  for(size_t i=0;i<sources.size();++i)
   if(sources[i].cut){
-   checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job,[&](Volume& volume,const Entry& entry){
-    if(ExecutionFor(volume).windowsPaths)
-     windowsPlans[i].push_back({volume.HostPath(entry.id),entry.identity,entry.directory});
-   });
+   checked[i]=StorageLocation::PrepareCutSource(sources[i],snapshots[i],job);
    if(ExecutionFor(*checked[i].volume).windowsPaths)
     ValidateWindowsCut(*checked[i].volume,checked[i].id,job,windowsDestination);
   }
@@ -480,6 +477,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
  Check(!request.sources.empty(),"Select a source file or folder");
  const bool moving=std::any_of(request.sources.begin(),request.sources.end(),[](const Location& item){return item.cut;});
  std::vector<std::string> snapshots;
+ std::vector<WindowsCutPlan> windowsPlans(request.sources.size());
  const auto driveMove=FloppyMoveEndpoints(request);
  const auto classicSources=transfer.adapter?std::vector<std::shared_ptr<Volume>>{}:ClassicMoveSources(request);
  bool coordinated=driveMove.floppy||!classicSources.empty();
@@ -526,7 +524,19 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     if(item.cut&&item.Volume())Check(opened[i].first->Writable(),"This cut source requires an in-place move");
     if(item.cut&&ExecutionFor(*opened[i].first).windowsPaths)
      ValidateWindowsCut(*opened[i].first,opened[i].second,job,windowsDestination);
-    snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume())):std::string());
+    SnapshotVisitor inventory;
+    if(item.cut&&ExecutionFor(*opened[i].first).windowsPaths)
+     inventory=[&](Volume& volume,const Entry& entry){
+      WindowsCutEntry file{volume.HostPath(entry.id),entry.identity,entry.directory};
+      file.primaryStreams=WindowsMoveUndo::CaptureNamedStreams(file.path);
+      if(!entry.identity.companion.key.empty()){
+       const auto separator=file.path.find_last_of(L'\\');
+       file.companionStreams=WindowsMoveUndo::CaptureNamedStreams(
+           file.path.substr(0,separator+1)+L"%"+file.path.substr(separator+1));
+      }
+      windowsPlans[i].push_back(std::move(file));
+     };
+    snapshots.push_back(item.cut?MacBrowser::Snapshot(*opened[i].first,opened[i].second,job,bool(item.Volume()),inventory):std::string());
    }
    const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
    coordinated=coordinated||windows;
@@ -559,7 +569,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     // read mounts before reopening the floppy source for its final deletion.
     complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,true,true);
     for(size_t i=0;i<opened.size();++i)if(!request.sources[i].Volume())opened[i].first->Close();
-    if(complete)DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,true);
+    if(complete)DeleteMovedSources(request.sources,snapshots,windowsPlans,job,completion,windowsDestination,true);
    }else if(coordinated){
     auto& source=*opened.front().first;
     auto& dest=*destination.first;
@@ -569,7 +579,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      complete=CopyMany(opened,dest,destination.second,job,transfer.adapter,routes,true,true);
      if(complete){
       if(windowsSource)for(const auto& entry:opened)entry.first->Close();
-      DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,true);
+      DeleteMovedSources(request.sources,snapshots,windowsPlans,job,completion,windowsDestination,true);
      }
     },nullptr,classicSources);
    }else if(target.IsWindows()&&
@@ -637,7 +647,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     }
     report.Append(verified);
    }
-   DeleteMovedSources(request.sources,snapshots,job,completion,windowsDestination,false,report?&report:nullptr);
+   DeleteMovedSources(request.sources,snapshots,windowsPlans,job,completion,windowsDestination,false,report?&report:nullptr);
    if(report)report.Complete();
   }else if(report)report.Append("Transfer incomplete. Source cleanup did not start.\r\n");
  }

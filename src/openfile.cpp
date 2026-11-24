@@ -22,6 +22,7 @@
 #include "BrowserPresentation.h"
 #include "StorageWorker.h"
 #include "WindowsEntryIdentity.h"
+#include "WindowsMoveUndo.h"
 #include "MacBrowserModel.h"
 #include <set>
 
@@ -181,7 +182,7 @@ int DeleteHostDirectory(const std::wstring& path,Storage::Job* job,const MacBrow
 }
 enum class DeleteMode { Selection, CutEntry };
 int DeleteHostEntry(const std::wstring& path,bool directory,const MacBrowser::EntryIdentity& expected,
-                    Storage::Job* job,DeleteMode mode)
+                    Storage::Job* job,DeleteMode mode,const MacBrowser::WindowsCutEntry* cut=nullptr)
 {
  if(job&&job->cancelled()){SetLastError(ERROR_CANCELLED);return 0;}
  if(path.empty()||expected.empty()){SetLastError(ERROR_FILE_INVALID);return 0;}
@@ -220,7 +221,14 @@ int DeleteHostEntry(const std::wstring& path,bool directory,const MacBrowser::En
  DeleteHandle primary;
  if(directory&&mode==DeleteMode::Selection){
   if(!DeleteHostDirectory(full,job,&expected.primary))return 0;
- }else if(!pin(primary,full,expected.primary,directory)||!remove(primary.value))return 0;
+ }else{
+  if(!pin(primary,full,expected.primary,directory))return 0;
+  if(cut&&cut->primaryStreams&&WindowsMoveUndo::CaptureNamedStreams(full)!=*cut->primaryStreams){
+   SetLastError(ERROR_FILE_INVALID);
+   return 0;
+  }
+  if(!remove(primary.value))return 0;
+ }
  Storage::OutcomeEvidence::NoteRetainedChange();
  return companion.value==INVALID_HANDLE_VALUE||remove(companion.value);
 }
@@ -235,5 +243,5 @@ int DeleteHostCutEntry(const MacBrowser::WindowsCutEntry& entry,Storage::Job& jo
 {
  // The OS refuses to remove a directory with children. A recursive Cut must
  // never acquire permission over an entry that was absent from its snapshot.
- return DeleteHostEntry(entry.path,entry.directory,entry.identity,&job,DeleteMode::CutEntry);
+ return DeleteHostEntry(entry.path,entry.directory,entry.identity,&job,DeleteMode::CutEntry,&entry);
 }

@@ -12,6 +12,7 @@ namespace WindowsMoveUndo {
 extern thread_local bool forceUnsupportedForTest;
 #endif
 bool Supported(const std::wstring& folder);
+std::string CaptureNamedStreams(const std::wstring& path);
 void Recover(const std::string& decision,bool committed);
 void RecoverExports(const std::wstring& folder);
 void RunExport(const std::wstring& folder,const std::function<void()>& work);
@@ -21,7 +22,8 @@ class Session {
     std::unique_ptr<State> state_;
     void RenameChecked(const std::wstring& from,const std::wstring& to,
                        const MacBrowser::ObjectIdentity* expected,
-                       const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree,bool relabel=false);
+                       const std::map<std::wstring,MacBrowser::WindowsCutEntry>* tree,bool relabel=false,
+                       const std::optional<std::string>& expectedStreams={});
 public:
     Session(const std::wstring& folder,const std::string& decision,bool exportOnly=false);
     ~Session();

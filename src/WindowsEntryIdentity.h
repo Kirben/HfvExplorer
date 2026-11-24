@@ -20,6 +20,7 @@ struct WindowsCutEntry {
     std::wstring path;
     EntryIdentity identity;
     bool directory;
+    std::optional<std::string> primaryStreams,companionStreams;
 };
 using WindowsCutPlan=std::vector<WindowsCutEntry>;
 using WindowsPublications=std::map<std::wstring,EntryIdentity>;

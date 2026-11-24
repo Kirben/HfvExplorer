@@ -248,6 +248,41 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
    }
   }
  }
+ for(bool paired:{false,true}){
+  const auto folder=root+(paired?"\\late-stream-pair":"\\late-stream-file");
+  Check(CreateDirectoryA(folder.c_str(),nullptr)!=FALSE,"create late source stream fixture");
+  const auto file=folder+"\\Document",stream=file+":Late";
+  if(paired){
+   auto host=OpenWindows(W(folder));
+   Put(*host,u"Document");
+  }else Save(file,"ORIGINAL");
+  const auto original=Load(file);
+  WIN32_FILE_ATTRIBUTE_DATA info{};
+  Check(GetFileAttributesExA(file.c_str(),GetFileExInfoStandard,&info)!=FALSE,"capture Cut source timestamp");
+  auto source=Host(file,false);
+  source.cut=true;
+  const auto destination=native->MakeDirectory(2,paired?u"Late pair":u"Late file");
+  bool injected=false;
+  struct Reset{~Reset(){windowsPublicationFault={};}} reset;
+  windowsPublicationFault=[&](const char* phase){
+   if(strcmp(phase,"cut-source-verified"))return;
+   Save(stream,"LATE");
+   const auto handle=CreateFileA(file.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
+   Check(handle!=INVALID_HANDLE_VALUE,"open source attribute fixture");
+   const bool restored=SetFileTime(handle,nullptr,nullptr,&info.ftLastWriteTime)!=FALSE;
+   CloseHandle(handle);
+   Check(restored,"restore original primary timestamp");
+   injected=true;
+  };
+  Storage::Job job;
+  Completion completion;
+  const auto result=ExecuteInWorker(OrdinaryCopy{{source},Native(native,destination)},job,completion);
+  Check(injected&&result.code&&!result.moved&&Load(file)==original&&
+        Load(stream)==std::vector<BYTE>({'L','A','T','E'})&&
+        (!paired||GetFileAttributesA((folder+"\\%Document").c_str())!=INVALID_FILE_ATTRIBUTES),
+        "Cut removed a source with a late stream or split its AppleDouble pair");
+ }
+ fprintf(report,"PASS: Cut preserves newly added source streams with unchanged primary timestamps, including AppleDouble pairs.\n");
  for(unsigned scenario:{0u,1u,2u}){
   const bool replaceDestination=scenario!=0;
   const auto folder=root+(scenario==0?"\\destination-removed":

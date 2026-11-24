@@ -291,8 +291,15 @@ std::string NamedStreamDigest(const std::wstring& path)
     WIN32_FIND_STREAM_DATA entry{};
     const auto search=FindFirstStreamW(path.c_str(),FindStreamInfoStandard,&entry,0);
     if(search==INVALID_HANDLE_VALUE){
-        Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot inspect the Windows output streams");
-        return {};
+        const auto error=GetLastError();
+        if(error==ERROR_HANDLE_EOF)return {};
+        if(error==ERROR_INVALID_PARAMETER||error==ERROR_NOT_SUPPORTED||error==ERROR_INVALID_FUNCTION){
+            auto file=Open(path,FILE_READ_ATTRIBUTES);
+            DWORD flags=0;
+            if(file&&GetVolumeInformationByHandleW(file.value,nullptr,0,nullptr,nullptr,&flags,nullptr,0)&&
+               !(flags&FILE_NAMED_STREAMS))return {};
+        }
+        throw HfsPlus::Error("Cannot inspect the Windows alternate streams");
     }
     {
         struct Search {HANDLE handle;~Search(){FindClose(handle);}} guard{search};
@@ -428,7 +435,7 @@ void ClearStagedEntries(const Loaded& log,const std::wstring& folder,bool commit
     }
 }
 size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,
-                        const std::map<std::wstring,MacBrowser::ObjectIdentity>& expected,unsigned depth=0)
+                        const std::map<std::wstring,MacBrowser::WindowsCutEntry>& expected,unsigned depth=0)
 {
     Check(depth<=128,"Windows staging tree is too deep");
     const bool recording=journal!=INVALID_HANDLE_VALUE;
@@ -441,11 +448,16 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
         const auto info=Info(file.value);
         const auto known=expected.find(path);
         Check(!(info.dwFileAttributes&FILE_ATTRIBUTE_READONLY),"The Windows source contains a read-only entry; it was retained");
-        Check(known!=expected.end()&&MacBrowser::WindowsIdentity(info)==known->second,
+        Check(known!=expected.end()&&MacBrowser::WindowsIdentity(info)==known->second.identity.primary,
               recording?"The Windows source folder changed after copying; it was retained":
                         "The Windows source folder changed while staging; it was retained");
         ++inspected;
         const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
+        std::string streams;
+        if(recording||known->second.primaryStreams)
+            streams=NamedStreamDigest(recording?path:staged);
+        Check(!known->second.primaryStreams||streams==*known->second.primaryStreams,
+              "A Windows Cut source has changed alternate streams; it was retained");
         if(recording){
             Data record;
             record.put(uint64_t(Op::TreeEntryWithStreams));
@@ -456,7 +468,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
                 record.put(Date(info.ftLastWriteTime));
                 record.put(FileLength(info));
             }
-            record.put(NamedStreamDigest(path));
+            record.put(streams);
             // The rename frame flushes the full inventory before the folder moves.
             WriteFrame(journal,record);
         }
@@ -471,6 +483,11 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
 #ifdef HFV_TESTING
 thread_local bool forceUnsupportedForTest=false;
 #endif
+
+std::string CaptureNamedStreams(const std::wstring& path)
+{
+    return NamedStreamDigest(path);
+}
 
 bool Supported(const std::wstring& folder)
 {
@@ -580,25 +597,29 @@ void Session::StageCut(const MacBrowser::WindowsCutPlan& plan)
     const auto companion=[](const std::wstring& path){
         return Child(Parent(path),L"%"+path.substr(path.find_last_of(L'\\')+1));
     };
-    std::map<std::wstring,MacBrowser::ObjectIdentity> tree;
+    std::map<std::wstring,MacBrowser::WindowsCutEntry> tree;
     for(auto i=plan.begin()+1;i!=plan.end();++i){
-        Check(Under(i->path,root.path)&&tree.emplace(i->path,i->identity.primary).second,
+        Check(Under(i->path,root.path)&&tree.emplace(i->path,*i).second,
               "Invalid Windows cut source snapshot");
-        if(!i->identity.companion.key.empty())
-            Check(tree.emplace(companion(i->path),i->identity.companion).second,"Conflicting Windows cut companion");
+        if(!i->identity.companion.key.empty()){
+            MacBrowser::WindowsCutEntry sidecar{companion(i->path),{},false,i->companionStreams};
+            sidecar.identity.primary=i->identity.companion;
+            Check(tree.emplace(sidecar.path,sidecar).second,"Conflicting Windows cut companion");
+        }
     }
     if(!root.identity.companion.key.empty()){
-        Rename(companion(root.path),Slot(),&root.identity.companion);
+        RenameChecked(companion(root.path),Slot(),&root.identity.companion,nullptr,false,root.companionStreams);
 #ifdef HFV_TESTING
         if(state_->exportOnly&&MacBrowser::windowsPublicationFault)
             MacBrowser::windowsPublicationFault("delete-companion-staged");
 #endif
     }
-    RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr);
+    RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr,false,root.primaryStreams);
 }
 void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
                             const MacBrowser::ObjectIdentity* expected,
-                            const std::map<std::wstring,MacBrowser::ObjectIdentity>* tree,bool relabel)
+                            const std::map<std::wstring,MacBrowser::WindowsCutEntry>* tree,bool relabel,
+                            const std::optional<std::string>& expectedStreams)
 {
     if(relabel)RelabelPaths(state_->root,state_->stage,from,to);
     else Paths(state_->root,state_->stage,from,to);
@@ -621,6 +642,8 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
     const bool staging=!relabel&&Under(to,state_->stage);
     const auto streams=staging||(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(from,state_->stage))?
                        NamedStreamDigest(from):std::string{};
+    Check(!expectedStreams||streams==*expectedStreams,
+          "A Windows Cut source has changed alternate streams; it was retained");
     record.put(uint64_t(relabel?Op::Relabel:staging?Op::StageRename:streams.empty()?Op::Rename:Op::RenameWithStreams));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
@@ -633,6 +656,8 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
 #endif
     Move(handle.value,to);
     Check(Identify(to)==id,"Windows move did not preserve entry identity");
+    Check(!expectedStreams||NamedStreamDigest(to)==*expectedStreams,
+          "A Windows Cut source changed alternate streams during staging; it was retained");
     // Renaming pins the directory entry, not its children. Verify the actual
     // staged tree before permitting the caller to commit the decision.
     if(stagingTree)
