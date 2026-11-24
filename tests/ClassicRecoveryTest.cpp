@@ -1751,6 +1751,40 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
         }else VerifyFile(*host,2,u"Document",false);
         Check(host->List(2).size()==(phase==9?1:2),"paired delete left unexpected files");
     }
+    for(bool tree:{false,true}){
+        const auto folder=root+(tree?"\\changed-tree-stream":"\\changed-file-stream");
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create staged stream verification fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            auto parent=tree?host->MakeDirectory(2,u"Tree"):2;
+            if(tree)parent=host->MakeDirectory(parent,u"Nested");
+            Put(*host,false,false,parent);
+            Put(*host,false,false,2,u"Neighbor");
+        }
+        CrashChild(folder,9,tree?L"recursive-windows-delete":L"paired-windows-delete");
+        WIN32_FIND_DATAA data{};
+        const auto search=FindFirstFileA(folder+"\\.hfv-export-*",&data);
+        Check(search!=INVALID_HANDLE_VALUE,"find committed Windows staging directory");
+        FindClose(search);
+        const auto staged=folder+"\\"+data.cFileName+(tree?"\\1\\Nested\\Document":"\\2");
+        const auto stream=staged+":Late";
+        auto file=CreateFileA(staged,FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+        Check(file!=INVALID_HANDLE_VALUE,"open staged original");
+        FILETIME modified{};
+        Check(GetFileTime(file,nullptr,nullptr,&modified)!=FALSE,"capture staged original timestamp");
+        Save(stream,Bytes{23,45,67});
+        Check(SetFileTime(file,nullptr,nullptr,&modified)!=FALSE,"restore primary timestamp after stream change");
+        CloseHandle(file);
+        bool rejected=false;
+        try{MacBrowser::OpenWindows(path);}
+        catch(const HfsPlus::Error& error){rejected=std::string(error.what()).find("alternate streams")!=std::string::npos;}
+        Check(rejected&&Load(stream)==Bytes({23,45,67})&&
+              GetFileAttributesA(folder+"\\Neighbor")!=INVALID_FILE_ATTRIBUTES,
+              "committed Windows recovery deleted a changed named stream");
+    }
+    fprintf(report,"PASS: committed Windows recovery keeps newly added streams on staged files and nested originals.\n");
     fprintf(report,"PASS: paired NTFS Delete restores both forks on cancellation and interruption, completes after commit, and waits for an exclusive folder lease before recovery.\n");
     for(unsigned phase:{0u,8u,9u}){
         CString folder;

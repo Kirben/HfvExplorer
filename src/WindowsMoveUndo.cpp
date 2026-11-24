@@ -155,7 +155,7 @@ void Frame(HANDLE handle,const Data& data)
     WriteFrame(handle,data);
     Flush(handle);
 }
-enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel,RenameWithStreams};
+enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel,RenameWithStreams,StageRename,TreeEntryWithStreams};
 uint64_t FileLength(const BY_HANDLE_FILE_INFORMATION& info)
 {
     return (uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
@@ -172,6 +172,7 @@ struct StagedEntry {
     Identity identity;
     std::optional<uint64_t> modified;
     std::optional<uint64_t> length;
+    std::optional<std::string> namedStreams;
 };
 struct Loaded {
     std::wstring root;
@@ -226,7 +227,8 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                 record.from=data.wide();
                 record.object=Identity::Decode(data);
                 Check(record.object.file!=0,"Invalid Windows move file identity");
-                if(record.op==Op::Rename||record.op==Op::Relabel||record.op==Op::RenameWithStreams){
+                if(record.op==Op::Rename||record.op==Op::Relabel||
+                   record.op==Op::RenameWithStreams||record.op==Op::StageRename){
                     record.to=data.wide();
                     record.fromParent=Identity::Decode(data);
                     record.toParent=Identity::Decode(data);
@@ -238,18 +240,36 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                         Check(!record.directory&&Under(record.from,stage)&&record.namedStreams.size()==32,
                               "Invalid Windows alternate stream recovery record");
                     }
+                    if(record.op==Op::StageRename){
+                        record.namedStreams=data.text();
+                        Check(Under(record.to,stage)&&(record.namedStreams.empty()||record.namedStreams.size()==32),
+                              "Invalid Windows staged stream recovery record");
+                    }
                     if(record.op==Op::Relabel)RelabelPaths(log.root,stage,record.from,record.to);
                     else {
                         Paths(log.root,stage,record.from,record.to);
-                        AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,{record.object});
+                        StagedEntry owned{record.object};
+                        if(record.op==Op::StageRename){
+                            owned.namedStreams=record.namedStreams;
+                            if(!record.directory){
+                                owned.modified=record.modified;
+                                owned.length=record.length;
+                            }
+                        }
+                        AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,std::move(owned));
                     }
                 }else if(record.op==Op::Owned){
                     AddOwned(log,stage,record.from,{record.object});
-                }else if(record.op==Op::TreeEntry){
+                }else if(record.op==Op::TreeEntry||record.op==Op::TreeEntryWithStreams){
                     StagedEntry entry{record.object};
                     if(!data.flag()){
                         entry.modified=data.get();
                         entry.length=data.get();
+                    }
+                    if(record.op==Op::TreeEntryWithStreams){
+                        entry.namedStreams=data.text();
+                        Check(entry.namedStreams->empty()||entry.namedStreams->size()==32,
+                              "Invalid Windows staged tree stream recovery record");
                     }
                     AddOwned(log,stage,record.from,entry,true);
                 }else if(record.op==Op::Dates){
@@ -374,24 +394,27 @@ std::vector<std::wstring> Children(const std::wstring& folder)
     return names;
 }
 void CheckStagedEntry(const Loaded& log,const std::wstring& path,
-                      const BY_HANDLE_FILE_INFORMATION& info)
+                      const BY_HANDLE_FILE_INFORMATION& info,bool committed)
 {
     const auto known=log.owned.find(path);
     Check(known!=log.owned.end()&&known->second.identity==IdentityOf(info)&&
           (!known->second.modified||*known->second.modified==Date(info.ftLastWriteTime))&&
           (!known->second.length||*known->second.length==FileLength(info)),
           "Windows move staging contains an unrelated or changed entry; it was retained");
+    if(committed&&known->second.namedStreams)
+        Check(NamedStreamDigest(path)==*known->second.namedStreams,
+              "Windows move staging contains changed alternate streams; they were retained");
 }
-void CheckStage(const std::wstring& stage,const Loaded& log)
+void CheckStage(const std::wstring& stage,const Loaded& log,bool committed)
 {
     for(const auto& name:Children(stage)){
         const auto path=Child(stage,name);
         auto file=Open(path,FILE_READ_ATTRIBUTES);
         Check(bool(file),"Cannot inspect a Windows staging entry");
-        CheckStagedEntry(log,path,Info(file.value));
+        CheckStagedEntry(log,path,Info(file.value),committed);
     }
 }
-void ClearStagedEntries(const Loaded& log,const std::wstring& folder,unsigned depth=0)
+void ClearStagedEntries(const Loaded& log,const std::wstring& folder,bool committed,unsigned depth=0)
 {
     Check(depth<=128,"Windows staging tree is too deep");
     for(const auto& name:Children(folder)){
@@ -399,8 +422,8 @@ void ClearStagedEntries(const Loaded& log,const std::wstring& folder,unsigned de
         auto file=Open(path,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
         if(!file){Check(Missing(GetLastError()),"Cannot protect a Windows staging entry");continue;}
         const auto info=Info(file.value);
-        CheckStagedEntry(log,path,info);
-        if(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ClearStagedEntries(log,path,depth+1);
+        CheckStagedEntry(log,path,info,committed);
+        if(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ClearStagedEntries(log,path,committed,depth+1);
         Remove(file.value,"Cannot remove Windows staging entry; remaining contents were retained");
     }
 }
@@ -425,7 +448,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
         const bool directory=(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0;
         if(recording){
             Data record;
-            record.put(uint64_t(Op::TreeEntry));
+            record.put(uint64_t(Op::TreeEntryWithStreams));
             record.wide(staged);
             IdentityOf(info).Encode(record);
             record.put(uint64_t(directory));
@@ -433,6 +456,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
                 record.put(Date(info.ftLastWriteTime));
                 record.put(FileLength(info));
             }
+            record.put(NamedStreamDigest(path));
             // The rename frame flushes the full inventory before the folder moves.
             WriteFrame(journal,record);
         }
@@ -594,13 +618,14 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
         Check(tree&&InspectStagedTree(state_->journal.value,from,to,*tree)==tree->size(),
               "The Windows source folder changed after copying; it was retained");
     Data record;
-    const auto streams=!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(from,state_->stage)?
+    const bool staging=!relabel&&Under(to,state_->stage);
+    const auto streams=staging||(!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&Under(from,state_->stage))?
                        NamedStreamDigest(from):std::string{};
-    record.put(uint64_t(relabel?Op::Relabel:streams.empty()?Op::Rename:Op::RenameWithStreams));
+    record.put(uint64_t(relabel?Op::Relabel:staging?Op::StageRename:streams.empty()?Op::Rename:Op::RenameWithStreams));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
     record.put(Date(info.ftLastWriteTime));record.put(FileLength(info));
-    if(!streams.empty())record.put(streams);
+    if(staging||!streams.empty())record.put(streams);
     Frame(state_->journal.value,record);
 #ifdef HFV_TESTING
     if(stagingTree&&MacBrowser::windowsPublicationFault)
@@ -671,12 +696,13 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                 else {
                     Check(IdentityOf(Info(directory.value))==log.stageIdentity,
                           "The Windows move staging folder was replaced");
-                    CheckStage(stage,log);
+                    CheckStage(stage,log,committed);
                 }
                 if(!log.done){
                     if(!committed){
                         for(auto i=log.records.rbegin();i!=log.records.rend();++i){
-                            if(i->op==Op::Rename||i->op==Op::Relabel||i->op==Op::RenameWithStreams)UndoRename(stage,*i);
+                            if(i->op==Op::Rename||i->op==Op::Relabel||
+                               i->op==Op::RenameWithStreams||i->op==Op::StageRename)UndoRename(stage,*i);
                         }
                     }
                     LARGE_INTEGER at{};at.QuadPart=LONGLONG(log.end);
@@ -700,7 +726,7 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                     auto cleanup=Open(stage,FILE_READ_ATTRIBUTES|DELETE,FILE_SHARE_READ);
                     Check(cleanup&&IdentityOf(Info(cleanup.value))==log.stageIdentity,
                           "The Windows move staging folder was replaced before cleanup");
-                    ClearStagedEntries(log,stage);
+                    ClearStagedEntries(log,stage,committed);
                     Remove(cleanup.value,"Windows move staging is not empty; unrelated files were retained");
                 }
             }
