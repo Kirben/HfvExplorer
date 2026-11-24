@@ -3,6 +3,8 @@
 #include <windows.h>
 #include "EntryIdentity.h"
 #include <vector>
+#include <functional>
+#include <map>
 
 namespace Storage { class Job; }
 
@@ -20,6 +22,8 @@ struct WindowsCutEntry {
     bool directory;
 };
 using WindowsCutPlan=std::vector<WindowsCutEntry>;
+using WindowsPublications=std::map<std::wstring,EntryIdentity>;
+void TrackWindowsPublications(WindowsPublications&,const std::function<void()>&);
 class Volume;
 void FinishWindowsCut(Volume&,const WindowsCutPlan&,Storage::Job&);
 }

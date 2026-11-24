@@ -248,8 +248,10 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
    }
   }
  }
- for(bool replaceDestination:{false,true}){
-  const auto folder=root+(replaceDestination?"\\destination-replaced":"\\destination-removed");
+ for(unsigned scenario:{0u,1u,2u}){
+  const bool replaceDestination=scenario!=0;
+  const auto folder=root+(scenario==0?"\\destination-removed":
+                          scenario==1?"\\destination-replaced":"\\destination-replaced-before-receipt");
   Check(CreateDirectoryA(folder.c_str(),nullptr)!=FALSE,"create Windows move destination fixture");
   const auto sourcePath=root+"\\Cut original",copied=folder+"\\Cut original";
   Save(sourcePath,"ORIGINAL");
@@ -258,7 +260,8 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
   bool injected=false;
   Storage::Job job;
   job.transport([&](const Storage::Progress& progress){
-   if(injected||progress.phase!="Verifying Windows destination before Cut cleanup")return;
+   if(injected||!(scenario==2?(progress.phase=="Copying"&&progress.files==1):
+                  progress.phase=="Verifying Windows destination before Cut cleanup"))return;
    injected=true;
    Check(DeleteFileA(copied.c_str())!=FALSE,"remove published Windows copy");
    if(replaceDestination)Save(copied,"REPLACEMENT");
@@ -273,7 +276,7 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
          "Cut cleanup modified the replacement destination");
  }
  fprintf(report,"PASS: coordinated and ordinary Windows cuts retain new and replaced files at source cleanup.\n");
- fprintf(report,"PASS: ordinary Cut retains the original when a published Windows destination is removed or replaced.\n");
+ fprintf(report,"PASS: ordinary Cut retains the original when a Windows destination changes before receipt capture or final verification.\n");
 }
 void WindowsStreamSafety(const std::string& root,const std::shared_ptr<Volume>& mac,FILE* report)
 {

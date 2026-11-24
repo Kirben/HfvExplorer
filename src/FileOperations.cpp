@@ -418,15 +418,33 @@ class WindowsCutDestination {
 public:
     ~WindowsCutDestination(){for(auto handle:pins_)CloseHandle(handle);}
 
-    void Capture(Volume& volume,uint32_t parent,const std::vector<std::u16string>& names,Storage::Job& job)
+    void Begin(const Entry& folder)
     {
-        folder_=volume.Stat(parent).identity.primary;
+        folder_=folder.identity.primary;
         Check(!folder_.key.empty(),"Cannot identify the Windows Cut destination folder");
+    }
+
+    void Capture(Volume& volume,uint32_t parent,const std::vector<std::u16string>& names,
+                 WindowsPublications& publications,Storage::Job& job)
+    {
+        if(volume.Stat(parent).identity.primary.key!=folder_.key)
+            throw Storage::MediaChanged("Windows destination folder was replaced; Cut sources were retained");
         for(const auto& name:names){
             Entry entry;
             Check(volume.FindChild(parent,name,entry),"Cannot identify a published Windows Cut destination");
-            entries_.emplace_back(name,Snapshot(volume,entry.id,job));
+            Check(entry.directory||publications.count(volume.HostPath(entry.id)),
+                  "The Windows Cut destination has no publication receipt");
+            auto snapshot=Snapshot(volume,entry.id,job,false,[&](Volume& host,const Entry& actual){
+                const auto published=publications.find(host.HostPath(actual.id));
+                if(published==publications.end())return;
+                if(actual.identity.primary!=published->second.primary||actual.identity.companion!=published->second.companion)
+                    throw Storage::MediaChanged("A published Windows file changed; Cut sources were retained");
+                publications.erase(published);
+            });
+            entries_.emplace_back(name,std::move(snapshot));
         }
+        if(!publications.empty())
+            throw Storage::MediaChanged("A published Windows file is missing; Cut sources were retained");
     }
 
     void Verify(const Location& target,Storage::Job& job)
@@ -522,10 +540,18 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     report.Append(planned);
    }
    const bool verifyWindows=moving&&windowsDestination&&!coordinated;
-   const auto captureWindows=[&]{
+   WindowsPublications publications;
+   if(verifyWindows)windowsReceipt.Begin(folder);
+   const auto copy=[&](bool batch){
+    const auto transferFiles=[&]{
+     complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
+                       batch,(report||verifyWindows)?&publishedNames:nullptr);
+    };
+    if(verifyWindows)TrackWindowsPublications(publications,transferFiles);
+    else transferFiles();
     if(complete&&verifyWindows){
      Check(publishedNames.size()==opened.size(),"Cannot identify all published Windows Cut destinations");
-     windowsReceipt.Capture(*destination.first,destination.second,publishedNames,job);
+     windowsReceipt.Capture(*destination.first,destination.second,publishedNames,publications,job);
     }
    };
    if(driveMove.floppy){
@@ -557,9 +583,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      Storage::OutcomeEvidence evidence;
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
-       complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true,
-                         (report||verifyWindows)?&publishedNames:nullptr);
-       captureWindows();
+       copy(true);
        destination.first->Close();
        Cancel(job);
       });
@@ -572,10 +596,8 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
     if(failure)std::rethrow_exception(failure);
    }else{
-    const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
-                                        false,(report||verifyWindows)?&publishedNames:nullptr);captureWindows();};
-    if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);
-    else copy();
+    if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,[&]{copy(false);});
+    else copy(false);
    }
   }
   if(complete&&reportExport)exported=destination.first->LastHostPublication();

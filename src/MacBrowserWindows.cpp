@@ -453,6 +453,8 @@ void PublishRename(const FileVersion& ver,const std::wstring& from,const std::ws
         move->Rename(from,to,&expected);
     }else Check(ver.MoveTo(from,to),message);
 }
+thread_local WindowsPublications* activePublications=nullptr;
+
 class Windows final : public Volume, public WorkerEndpoint {
     mutable std::recursive_mutex mutex_;
     std::map<uint32_t,std::wstring> paths_;
@@ -856,6 +858,12 @@ private:
         }
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         lastPublication_={path,newData->Identity()};
+        if(activePublications){
+            EntryIdentity identity;
+            identity.primary=lastPublication_.second;
+            if(newResource)identity.companion=newResource->Identity();
+            (*activePublications)[path]=std::move(identity);
+        }
         return Id(path);
     }
     void Rename(uint32_t id, uint32_t parent, const std::u16string &name) override {
@@ -901,6 +909,15 @@ private:
     }
 };
 }
+void TrackWindowsPublications(WindowsPublications& publications,const std::function<void()>& work)
+{
+    struct Restore {
+        WindowsPublications* previous;
+        ~Restore(){activePublications=previous;}
+    } restore{std::exchange(activePublications,&publications)};
+    work();
+}
+
 void ValidateWindowsCut(Volume& volume,uint32_t id,Storage::Job& job,bool windowsDestination)
 {
     const auto validate=[](const std::wstring& path,bool transfersStreams){
