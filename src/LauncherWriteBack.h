@@ -13,7 +13,7 @@ public:
     Storage::Result Open(const wchar_t* path,bool cleanup);
     Storage::Result ReadVersion(uint64_t& result,Storage::Job& job) const;
     Storage::Result CheckWriteBackStreams() const;
-    bool Remove() const;
+    bool Remove(const std::function<bool()>& finish={}) const;
     HANDLE Handle() const { return file_; }
 
 private:
@@ -46,6 +46,7 @@ public:
     Storage::Result CheckCommitStatus(bool& committed) const;
     Storage::Result ApplyPending(const LauncherTemporaryDocument&,Storage::Job&);
     bool RetireCommitted();
+    bool FinishUnchanged(const LauncherTemporaryDocument&);
     static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root);
     const CString& TemporaryPath() const { return temporary_; }
     bool Complete(BrowserSession&);

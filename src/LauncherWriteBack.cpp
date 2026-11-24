@@ -88,7 +88,7 @@ Storage::Result LauncherTemporaryDocument::CheckWriteBackStreams() const
     return {1,ERROR_INVALID_DATA,"Cannot verify the temporary document's named streams."};
 }
 
-bool LauncherTemporaryDocument::Remove() const
+bool LauncherTemporaryDocument::Remove(const std::function<bool()>& finish) const
 {
     BY_HANDLE_FILE_INFORMATION file{};
     if(!GetFileInformationByHandle(file_,&file)||file.nNumberOfLinks!=1||CheckWriteBackStreams().code)
@@ -102,7 +102,12 @@ bool LauncherTemporaryDocument::Remove() const
         if(!SetFileInformationByHandle(file_,FileBasicInfo,&writable,sizeof(writable)))return false;
     }
     FILE_DISPOSITION_INFO remove{TRUE};
-    if(SetFileInformationByHandle(file_,FileDispositionInfo,&remove,sizeof(remove)))return true;
+    if(SetFileInformationByHandle(file_,FileDispositionInfo,&remove,sizeof(remove))){
+        if(!finish||finish())return true;
+        // The file is still open, so a failed record retirement can cancel deletion.
+        remove.DeleteFile=FALSE;
+        SetFileInformationByHandle(file_,FileDispositionInfo,&remove,sizeof(remove));
+    }
     if(original.FileAttributes&FILE_ATTRIBUTE_READONLY)
         SetFileInformationByHandle(file_,FileBasicInfo,&original,sizeof(original));
     return false;
@@ -306,6 +311,11 @@ bool LauncherWriteBack::Forget()
     return true;
 }
 
+bool LauncherWriteBack::FinishUnchanged(const LauncherTemporaryDocument& document)
+{
+    return document.Remove([this]{return Forget();});
+}
+
 bool LauncherWriteBack::Complete(BrowserSession& session)
 {
     auto owner=session.Owner();
@@ -339,9 +349,8 @@ bool LauncherWriteBack::Complete(BrowserSession& session)
         return false;
     }
     if(current==baseline_){
-        if(!Forget()){retain("Could not retire the pending edit record.");return false;}
-        if(document.Remove())return true;
-        retain("Could not remove the temporary copy.");
+        if(FinishUnchanged(document))return true;
+        retain("Could not complete temporary document cleanup.");
         return false;
     }
     if(version_.empty()){

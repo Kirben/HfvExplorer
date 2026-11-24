@@ -460,6 +460,44 @@ int RunFileOperationsTest(const char* directory){
            "pending edit did not survive reopening");
     }
     const auto record=folder+"\\.hfv-pending-edit";
+    const auto stream=pending+":CleanupState";
+    Save(stream,"KEEP");
+    {
+     auto recovered=LauncherWriteBack::LoadPending(CString(pendingRoot.c_str()));
+     LauncherTemporaryDocument inspected;
+     Check(recovered.size()==1&&!inspected.Open(W(pending).c_str(),true).code&&
+           !recovered.front()->FinishUnchanged(inspected),
+           "unchanged edit cleaned up despite a pending stream");
+    }
+    Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str())).size()==1&&
+          Load(stream)==std::vector<BYTE>({'K','E','E','P'}),
+          "failed cleanup no longer appears as a pending edit after reopening");
+    Check(DeleteFileA(stream.c_str())!=FALSE,"remove regression fixture stream");
+    {
+     LauncherTemporaryDocument inspected;
+     Check(!inspected.Open(W(pending).c_str(),true).code&&!inspected.Remove([]{return false;}),
+           "simulated record retirement failure unexpectedly finished cleanup");
+    }
+    Check(GetFileAttributesA(pending.c_str())!=INVALID_FILE_ATTRIBUTES&&
+          GetFileAttributesA(record.c_str())!=INVALID_FILE_ATTRIBUTES,
+          "failed record retirement left the staged copy marked for deletion");
+    {
+     const auto cleanFolder=pendingRoot+"\\hfv124.tmp.dir";
+     const auto cleanCopy=cleanFolder+"\\Unchanged";
+     Check(CreateDirectoryA(cleanFolder.c_str(),nullptr)!=FALSE,"create successful cleanup fixture");
+     Save(cleanCopy,"UNCHANGED");
+     LauncherWriteBack edit(location,version,CString(cleanCopy.c_str()));
+     Check(edit.SavePending(),"persist successful cleanup fixture");
+     {
+      LauncherTemporaryDocument inspected;
+      Check(!inspected.Open(W(cleanCopy).c_str(),true).code&&edit.FinishUnchanged(inspected),
+            "ordinary staged file and its record did not retire together");
+     }
+     Check(GetFileAttributesA(cleanCopy.c_str())==INVALID_FILE_ATTRIBUTES&&
+           GetFileAttributesA((cleanFolder+"\\.hfv-pending-edit").c_str())==INVALID_FILE_ATTRIBUTES,
+           "successful cleanup left the staged file or record behind");
+    }
+    fprintf(report,"PASS: launcher cleanup failures retain both the staged file and its recoverable record.\n");
     {
      const auto handle=CreateFileA(record.c_str(),FILE_APPEND_DATA,0,nullptr,OPEN_EXISTING,0,nullptr);
      Check(handle!=INVALID_HANDLE_VALUE,"open pending record for missing-marker test");
