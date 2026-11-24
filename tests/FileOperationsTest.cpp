@@ -467,6 +467,18 @@ int RunFileOperationsTest(const char* directory){
           "malformed pending record removed or claimed the staged edit");
     fprintf(report,"PASS: a saved launcher edit survives reopening, cannot be claimed twice, and malformed records keep the staged copy.\n");
    }
+   {
+    const auto originalPath=root+"\\launcher-hardlink-source",alias=root+"\\launcher-hardlink-alias";
+    Save(originalPath,"EXTERNAL");
+    Check(SetFileAttributesA(originalPath.c_str(),FILE_ATTRIBUTE_READONLY)&&
+          ::CreateHardLinkA(alias.c_str(),originalPath.c_str(),nullptr),"create read-only launcher hard-link fixture");
+    LauncherTemporaryDocument document;
+    Check(document.Open(W(alias).c_str(),true).code&&!document.Remove()&&
+          Load(alias)==Load(originalPath)&&
+          (GetFileAttributesA(originalPath.c_str())&FILE_ATTRIBUTE_READONLY),
+          "launcher accepted an alias or changed the shared file");
+    fprintf(report,"PASS: launcher refuses a hard-linked staged document and preserves the external alias and its attributes.\n");
+   }
    Save(edited,"LATE");
    Storage::Job stale;
    LauncherTemporaryDocument lateEdit;

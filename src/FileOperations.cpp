@@ -1565,7 +1565,8 @@ Storage::Result ApplyLaunchEdit(const Location& item,const std::string& version,
   LARGE_INTEGER size{};
   Check(GetFileInformationByHandle(file,&info)&&
         !(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))&&
-        GetFileSizeEx(file,&size)&&size.QuadPart>=0,"Invalid edited temporary document");
+        info.nNumberOfLinks==1&&GetFileSizeEx(file,&size)&&size.QuadPart>=0,
+        "The edited document must be an ordinary file with a single link");
   StorageLocation::WithVerifiedWrite(item,[&]{
    auto original=Source(item,true);
    auto& volume=*original.first;

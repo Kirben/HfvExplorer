@@ -45,8 +45,12 @@ Storage::Result LauncherTemporaryDocument::Open(const wchar_t* path,bool cleanup
                       FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr);
     if(file_==INVALID_HANDLE_VALUE)return {1,GetLastError(),"Cannot protect the temporary document"};
     BY_HANDLE_FILE_INFORMATION info{};
-    if(!GetFileInformationByHandle(file_,&info)||(info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)))
-        return {1,ERROR_INVALID_DATA,"Invalid temporary document"};
+    if(!GetFileInformationByHandle(file_,&info)||
+       (info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY))||
+       info.nNumberOfLinks!=1){
+        CloseHandle(std::exchange(file_,INVALID_HANDLE_VALUE));
+        return {1,ERROR_INVALID_DATA,"The temporary document must be an ordinary file with a single link."};
+    }
     return {};
 }
 
@@ -86,7 +90,9 @@ Storage::Result LauncherTemporaryDocument::CheckWriteBackStreams() const
 
 bool LauncherTemporaryDocument::Remove() const
 {
-    if(CheckWriteBackStreams().code)return false;
+    BY_HANDLE_FILE_INFORMATION file{};
+    if(!GetFileInformationByHandle(file_,&file)||file.nNumberOfLinks!=1||CheckWriteBackStreams().code)
+        return false;
     FILE_BASIC_INFO original{};
     if(!GetFileInformationByHandleEx(file_,FileBasicInfo,&original,sizeof(original)))return false;
     if(original.FileAttributes&FILE_ATTRIBUTE_READONLY){
