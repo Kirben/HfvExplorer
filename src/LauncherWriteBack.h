@@ -47,7 +47,7 @@ public:
     Storage::Result ApplyPending(const LauncherTemporaryDocument&,Storage::Job&);
     bool RetireCommitted();
     bool FinishUnchanged(const LauncherTemporaryDocument&);
-    static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root);
+    static std::vector<std::unique_ptr<LauncherWriteBack>> LoadPending(const CString& root, std::vector<CString>* preserved=nullptr);
     const CString& TemporaryPath() const { return temporary_; }
     bool Complete(BrowserSession&);
 

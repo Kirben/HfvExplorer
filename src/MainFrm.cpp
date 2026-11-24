@@ -717,9 +717,16 @@ void CMainFrame::OnUpdateFinishWindowsEdit(CCmdUI* ui)
 void CMainFrame::OnFinishWindowsEdit()
 {
  if(StorageUi::busy())return;
- auto recovered=LauncherWriteBack::LoadPending(LauncherPendingRoot());
+ std::vector<CString> preserved;
+ auto recovered=LauncherWriteBack::LoadPending(LauncherPendingRoot(),&preserved);
+ if(!preserved.empty()){
+  CString message="Some pending edit records could not be read. Inspect the preserved copies in these folders:";
+  for(const auto& folder:preserved)message+="\r\n"+folder;
+  MessageBox(message,"Finish editing Windows document",MB_OK|MB_ICONWARNING);
+ }
  for(auto& edit:recovered)m_launchedDocuments.push_back(std::move(edit));
  if(m_launchedDocuments.empty()){
+  if(!preserved.empty())return;
   MessageBox("There are no pending Windows document edits available in this window.",
              "Finish editing Windows document",MB_OK|MB_ICONINFORMATION);
   return;

@@ -522,9 +522,12 @@ int RunFileOperationsTest(const char* directory){
     fprintf(report,"PASS: an unavailable launcher commit marker blocks write-back and preserves the recovery record and copy.\n");
     Check(SetFileAttributesA(record.c_str(),FILE_ATTRIBUTE_NORMAL)!=FALSE,"prepare malformed recovery record");
     Save(record,"TRUNCATED");
-    Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str())).empty()&&
+    std::vector<CString> preserved;
+    Check(LauncherWriteBack::LoadPending(CString(pendingRoot.c_str()),&preserved).empty()&&
+          preserved.size()==1&&preserved.front()==folder.c_str()&&
+          GetFileAttributesA(record.c_str())!=INVALID_FILE_ATTRIBUTES&&
           GetFileAttributesA(pending.c_str())!=INVALID_FILE_ATTRIBUTES,
-          "malformed pending record removed or claimed the staged edit");
+          "malformed pending record was hidden or the staged edit was removed or claimed");
     fprintf(report,"PASS: a saved launcher edit survives reopening, cannot be claimed twice, and malformed records keep the staged copy.\n");
    }
    {

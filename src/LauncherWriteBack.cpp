@@ -199,7 +199,7 @@ bool LauncherWriteBack::SavePending()
     return false;
 }
 
-std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(const CString& root)
+std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(const CString& root,std::vector<CString>* preserved)
 {
     std::vector<std::unique_ptr<LauncherWriteBack>> edits;
     if(root.IsEmpty()||!PlainDirectory(root))return edits;
@@ -213,7 +213,12 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
         const CString directory=root+"\\"+info.cFileName;
         const auto handle=CreateFile(directory+RecordName,GENERIC_READ|GENERIC_WRITE|DELETE,0,nullptr,OPEN_EXISTING,
                                      FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
-        if(handle==INVALID_HANDLE_VALUE)continue; // Another browser can already own this edit.
+        if(handle==INVALID_HANDLE_VALUE){
+            const auto error=GetLastError();
+            if(preserved&&error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND&&error!=ERROR_SHARING_VIOLATION)
+                preserved->push_back(directory);
+            continue;
+        }
         struct FileLease {
             HANDLE handle;
             ~FileLease(){if(handle!=INVALID_HANDLE_VALUE)CloseHandle(handle);}
@@ -221,28 +226,31 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
         BY_HANDLE_FILE_INFORMATION file{};
         if(!GetFileInformationByHandle(handle,&file)||
            (file.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||
-           file.nNumberOfLinks!=1||file.nFileSizeHigh||!file.nFileSizeLow||file.nFileSizeLow>MaximumRecord)
+           file.nNumberOfLinks!=1||file.nFileSizeHigh||!file.nFileSizeLow||file.nFileSizeLow>MaximumRecord){
+            if(preserved)preserved->push_back(directory);
             continue;
+        }
         try{
             CopyWorkerProtocol::Data record;
             record.bytes.resize(file.nFileSizeLow);
             DWORD received=0;
             if(!ReadFile(handle,record.bytes.data(),file.nFileSizeLow,&received,nullptr)||received!=file.nFileSizeLow||
-               record.get()!=RecordVersion)continue;
+               record.get()!=RecordVersion)throw HfsPlus::Error("Invalid pending edit record");
             auto leaf=record.text(),version=record.text();
             const auto baseline=record.get();
             auto original=CopyWorkerProtocol::ParseEndpoint(record,false).location;
             const auto decisionOffset=record.at;
             const auto tail=record.bytes.size()-decisionOffset;
-            if(tail>ClassicHfsRecovery::MoveIdSize)continue;
+            if(tail>ClassicHfsRecovery::MoveIdSize)throw HfsPlus::Error("Invalid pending edit decision");
             std::string decision;
             if(tail==ClassicHfsRecovery::MoveIdSize){
                 decision.assign(record.bytes.begin()+decisionOffset,record.bytes.end());
-                if(decision.find_first_not_of("0123456789abcdef")!=decision.npos)continue;
+                if(decision.find_first_not_of("0123456789abcdef")!=decision.npos)
+                    throw HfsPlus::Error("Invalid pending edit decision");
             }
             if(leaf.empty()||leaf=="."||leaf==".."||leaf.find_first_of("\\/:")!=leaf.npos||
                leaf.find('\0')!=leaf.npos||version.empty()||!original.IsClassic()||original.directory||original.cut)
-                continue;
+                throw HfsPlus::Error("Invalid pending edit document");
             // A physical drive generation counter cannot be trusted across sessions.
             if(original.IsPhysical())version.clear();
             auto edit=std::make_unique<LauncherWriteBack>(std::move(original),std::move(version),
@@ -254,7 +262,8 @@ std::vector<std::unique_ptr<LauncherWriteBack>> LauncherWriteBack::LoadPending(c
             lease.handle=INVALID_HANDLE_VALUE;
             edits.push_back(std::move(edit));
         }catch(const std::exception&){
-            // Preserve malformed records and the accompanying documents for manual recovery.
+            // The filename in a malformed record is untrusted. Show the containing folder.
+            if(preserved)preserved->push_back(directory);
         }
     }while(FindNextFile(search,&info));
     return edits;
