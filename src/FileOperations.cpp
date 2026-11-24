@@ -91,7 +91,7 @@ public:
         wchar_t name[40]{};
         Check(SUCCEEDED(CoCreateGuid(&id))&&StringFromGUID2(id,name,40),"Cannot name the interrupted move report");
         path_=folder+L"\\Move "+name+L".txt";
-        file_=CreateFileW(path_.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,
+        file_=CreateFileW(path_.c_str(),GENERIC_WRITE|DELETE,FILE_SHARE_READ,nullptr,CREATE_NEW,
                           FILE_ATTRIBUTE_NORMAL|FILE_FLAG_WRITE_THROUGH,nullptr);
         if(!*this)throw OperationError(GetLastError(),"Cannot create the interrupted move report");
         Append("\xef\xbb\xbf" "HFVExplorer interrupted move\r\n"
@@ -118,9 +118,13 @@ public:
     void Complete()
     {
         Append("Move complete.\r\n");
-        CloseHandle(file_);
-        file_=INVALID_HANDLE_VALUE;
-        DeleteFileW(path_.c_str());
+        FILE_DISPOSITION_INFO remove{TRUE};
+        SetFileInformationByHandle(file_,FileDispositionInfo,&remove,sizeof(remove));
+        CloseHandle(std::exchange(file_,INVALID_HANDLE_VALUE));
+#ifdef HFV_TESTING
+        if(MacBrowser::windowsPublicationFault)
+            MacBrowser::windowsPublicationFault("move-report-handle-closed");
+#endif
     }
 };
 

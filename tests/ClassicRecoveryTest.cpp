@@ -845,7 +845,8 @@ Storage::Result WindowsReportedMove(const CString& root,Storage::Job& job)
 
 void WindowsMoveReports(const CString& root,FILE* report)
 {
-    for(unsigned phase:{17u,18u,0u}){
+    for(unsigned phase:{17u,18u,0u,1u}){
+        const bool interrupted=phase>=17;
         CString folder;
         folder.Format("%s\\reported-windows-move-%u",root.GetString(),phase);
         const auto from=folder+"\\Source",to=folder+"\\Destination",reports=folder+"\\Reports";
@@ -858,9 +859,27 @@ void WindowsMoveReports(const CString& root,FILE* report)
         }
         Check(SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",VolumeCoord::Wide(reports.GetString()).c_str())!=FALSE,
               "set isolated Windows move report directory");
-        if(phase)CrashChild(folder,phase,L"reported-windows-move");
+        CString reusedReport;
+        if(interrupted)CrashChild(folder,phase,L"reported-windows-move");
         else{
             Storage::Job job;
+            if(phase==1){
+                job.transport([&](const Storage::Progress& progress){
+                    if(!reusedReport.IsEmpty()||progress.phase!="Removing moved sources")return;
+                    WIN32_FIND_DATAA find{};
+                    const auto search=FindFirstFileA(reports+"\\Move *.txt",&find);
+                    Check(search!=INVALID_HANDLE_VALUE,"find the live move report");
+                    FindClose(search);
+                    reusedReport=reports+"\\"+find.cFileName;
+                },{});
+                MacBrowser::windowsPublicationFault=[&](const char* event){
+                    if(strcmp(event,"move-report-handle-closed"))return;
+                    Check(!reusedReport.IsEmpty()&&GetFileAttributesA(reusedReport)==INVALID_FILE_ATTRIBUTES,
+                          "the original move report was not retired through its open handle");
+                    Save(reusedReport,Bytes{10,20,30});
+                };
+            }
+            struct ResetFault {~ResetFault(){MacBrowser::windowsPublicationFault={};}} reset;
             const auto result=WindowsReportedMove(folder,job);
             Check(!result.code&&result.moved,"complete Windows move with reporting");
         }
@@ -871,8 +890,8 @@ void WindowsMoveReports(const CString& root,FILE* report)
         VerifyFile(*target,2,u"Second",true);
         MacBrowser::Entry found;
         Check(source->FindChild(2,u"First",found)==(phase==17)&&
-              source->FindChild(2,u"Second",found)==(phase!=0),"Windows move removed the wrong sources");
-        if(phase){
+              source->FindChild(2,u"Second",found)==interrupted,"Windows move removed the wrong sources");
+        if(interrupted){
             const auto text=ReadInterruptedMoveReport(reports);
             Check(text.find("\r\nDestination published.\r\n")!=text.npos&&
                   text.find("Destination name for item 1: First")!=text.npos&&
@@ -880,6 +899,9 @@ void WindowsMoveReports(const CString& root,FILE* report)
                   (text.find("Source removed for item 1.")!=text.npos)==(phase==18)&&
                   text.find("Source removed for item 2.")==text.npos,
                   "Windows move report misrepresented destination or source cleanup");
+        }else if(phase==1){
+            Check(!reusedReport.IsEmpty()&&Load(reusedReport)==Bytes({10,20,30}),
+                  "cleanup deleted a new file at the completed report pathname");
         }else{
             WIN32_FIND_DATAA find{};
             const auto search=FindFirstFileA(reports+"\\Move *.txt",&find);
@@ -888,6 +910,7 @@ void WindowsMoveReports(const CString& root,FILE* report)
         }
     }
     fprintf(report,"PASS: ordinary Windows Cut reports destination publication and completed source cleanup across crashes.\n");
+    fprintf(report,"PASS: move report cleanup preserves a new file at the retired report pathname.\n");
 }
 
 void CrossFormatMoveRecovery(const CString& root,FILE* report)
