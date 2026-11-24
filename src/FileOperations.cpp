@@ -94,7 +94,7 @@ public:
         file_=CreateFileW(path_.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,
                           FILE_ATTRIBUTE_NORMAL|FILE_FLAG_WRITE_THROUGH,nullptr);
         if(!*this)throw OperationError(GetLastError(),"Cannot create the interrupted move report");
-        Append("\xef\xbb\xbf" "HFVExplorer cross-format move\r\n"
+        Append("\xef\xbb\xbf" "HFVExplorer interrupted move\r\n"
             "If the report ends before Destination published, check the destination for a partial copy. Source cleanup has not started.\r\n"
             "A removal that started without a completion record may already have finished. Inspect both volumes before retrying.\r\n");
     }
@@ -470,7 +470,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      std::all_of(request.sources.begin(),request.sources.end(),[](const Location& item){
          return item.cut&&item.IsWindows();
      });
- bool complete=false,inPlace=false,windowsDestination=false,crossFormatMove=false;
+ bool complete=false,inPlace=false,windowsDestination=false;
  InterruptedMoveReport report;
  const bool reportExport=transfer.adapter&&target.IsWindows()&&!moving&&request.sources.size()==1&&!request.sources.front().directory;
  std::pair<std::wstring,ObjectIdentity> exported;
@@ -496,19 +496,6 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
          "A cut source is read-only");
    opened.push_back(std::move(source));
   }
-  if(moving&&!transfer.adapter){
-   const auto modern=[](const Volume& volume){
-    const std::string_view kind=volume.Kind();
-    return kind=="APFS"||kind=="HFS+"||kind=="HFSX";
-   };
-   const auto& dest=*destination.first;
-   for(size_t i=0;i<opened.size();++i){
-    if(!request.sources[i].cut)continue;
-    const auto& source=*opened[i].first;
-    crossFormatMove|=(!strcmp(source.Kind(),"HFS")&&modern(dest))||
-                     (modern(source)&&!strcmp(dest.Kind(),"HFS"));
-   }
-  }
   if(transfer.adapter)Mark(completion,target);
   else for(const auto& item:opened)MarkChild(completion,target,item.first->Stat(item.second).name);
 
@@ -525,6 +512,15 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
    }
    const bool windows=CanCoordinateWindowsMove(request,opened,*destination.first);
    coordinated=coordinated||windows;
+   if(moving&&!coordinated){
+    report.Open();
+    auto planned="Destination folder "+InterruptedMoveReport::Describe(*destination.first,
+                  destination.first->Stat(destination.second))+"\r\n";
+    for(size_t i=0;i<opened.size();++i)
+     planned+="Item "+std::to_string(i+1)+(request.sources[i].cut?" to move: ":" to copy: ")+
+              InterruptedMoveReport::Describe(*opened[i].first,opened[i].first->Stat(opened[i].second))+"\r\n";
+    report.Append(planned);
+   }
    const bool verifyWindows=moving&&windowsDestination&&!coordinated;
    const auto captureWindows=[&]{
     if(complete&&verifyWindows){
@@ -562,7 +558,7 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      try{
       WindowsMoveUndo::RunExport(destination.first->HostPath(2),[&]{
        complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,true,
-                         verifyWindows?&publishedNames:nullptr);
+                         (report||verifyWindows)?&publishedNames:nullptr);
        captureWindows();
        destination.first->Close();
        Cancel(job);
@@ -576,15 +572,6 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
     else if(retained)Storage::OutcomeEvidence::NoteRetainedChange();
     if(failure)std::rethrow_exception(failure);
    }else{
-    if(crossFormatMove){
-     report.Open();
-     auto planned="Destination folder "+InterruptedMoveReport::Describe(*destination.first,
-                   destination.first->Stat(destination.second))+"\r\n";
-     for(size_t i=0;i<opened.size();++i)
-      planned+="Item "+std::to_string(i+1)+(request.sources[i].cut?" to move: ":" to copy: ")+
-               InterruptedMoveReport::Describe(*opened[i].first,opened[i].first->Stat(opened[i].second))+"\r\n";
-     report.Append(planned);
-    }
     const auto copy=[&]{complete=CopyMany(opened,*destination.first,destination.second,job,transfer.adapter,routes,moving,
                                         false,(report||verifyWindows)?&publishedNames:nullptr);captureWindows();};
     if(deferDiskScope)StorageLocation::WithVerifiedWrite(target,copy);

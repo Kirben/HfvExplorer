@@ -828,6 +828,68 @@ std::string ReadInterruptedMoveReport(const CString& path)
     return std::string(bytes.begin(),bytes.end());
 }
 
+Storage::Result WindowsReportedMove(const CString& root,Storage::Job& job)
+{
+    std::vector<FileOperations::Location> sources;
+    for(const auto* name:{"First","Second"}){
+        auto source=FileOperations::Location::Windows(VolumeCoord::Wide((root+"\\Source\\"+name).GetString()));
+        source.cut=true;
+        sources.push_back(std::move(source));
+    }
+    auto target=FileOperations::Location::Windows(VolumeCoord::Wide((root+"\\Destination").GetString()));
+    target.directory=true;
+    FileOperations::Completion completion;
+    return FileOperations::ExecuteInWorker(FileOperations::OrdinaryCopy{
+        std::move(sources),std::move(target)},job,completion);
+}
+
+void WindowsMoveReports(const CString& root,FILE* report)
+{
+    for(unsigned phase:{17u,18u,0u}){
+        CString folder;
+        folder.Format("%s\\reported-windows-move-%u",root.GetString(),phase);
+        const auto from=folder+"\\Source",to=folder+"\\Destination",reports=folder+"\\Reports";
+        Check(CreateDirectoryA(folder,nullptr)&&CreateDirectoryA(from,nullptr)&&
+              CreateDirectoryA(to,nullptr),"create Windows interrupted move fixture");
+        {
+            auto source=MacBrowser::OpenWindows(VolumeCoord::Wide(from.GetString()));
+            Put(*source,false,false,2,u"First");
+            Put(*source,true,false,2,u"Second");
+        }
+        Check(SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",VolumeCoord::Wide(reports.GetString()).c_str())!=FALSE,
+              "set isolated Windows move report directory");
+        if(phase)CrashChild(folder,phase,L"reported-windows-move");
+        else{
+            Storage::Job job;
+            const auto result=WindowsReportedMove(folder,job);
+            Check(!result.code&&result.moved,"complete Windows move with reporting");
+        }
+        SetEnvironmentVariableW(L"HFV_TEST_MOVE_REPORT_DIR",nullptr);
+        auto source=MacBrowser::OpenWindows(VolumeCoord::Wide(from.GetString()));
+        auto target=MacBrowser::OpenWindows(VolumeCoord::Wide(to.GetString()));
+        VerifyFile(*target,2,u"First",false);
+        VerifyFile(*target,2,u"Second",true);
+        MacBrowser::Entry found;
+        Check(source->FindChild(2,u"First",found)==(phase==17)&&
+              source->FindChild(2,u"Second",found)==(phase!=0),"Windows move removed the wrong sources");
+        if(phase){
+            const auto text=ReadInterruptedMoveReport(reports);
+            Check(text.find("\r\nDestination published.\r\n")!=text.npos&&
+                  text.find("Destination name for item 1: First")!=text.npos&&
+                  text.find("Destination name for item 2: Second")!=text.npos&&
+                  (text.find("Source removed for item 1.")!=text.npos)==(phase==18)&&
+                  text.find("Source removed for item 2.")==text.npos,
+                  "Windows move report misrepresented destination or source cleanup");
+        }else{
+            WIN32_FIND_DATAA find{};
+            const auto search=FindFirstFileA(reports+"\\Move *.txt",&find);
+            if(search!=INVALID_HANDLE_VALUE)FindClose(search);
+            Check(search==INVALID_HANDLE_VALUE,"completed Windows move left its report behind");
+        }
+    }
+    fprintf(report,"PASS: ordinary Windows Cut reports destination publication and completed source cleanup across crashes.\n");
+}
+
 void CrossFormatMoveRecovery(const CString& root,FILE* report)
 {
     using Kind=HfsPlus::Volume::FormatKind;
@@ -888,6 +950,7 @@ void CrossFormatMoveRecovery(const CString& root,FILE* report)
                   "interrupted move report did not distinguish verified copies from completed source removal");
         }
     }
+    WindowsMoveReports(root,report);
     fprintf(report,"PASS: classic HFS moves with HFS+, HFSX and APFS retain verified destination forks and unprocessed sources when interrupted before and during source cleanup in either direction.\n");
 }
 
@@ -2237,6 +2300,14 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
             },[](const std::string&){return Storage::ConflictChoice::Replace;});
             const auto result=TransferTree(source,target,!strcmp(action,"folder-move"),job);
             return result.code?4:3;
+        }
+        if(!strcmp(action,"reported-windows-move")){
+            Storage::Job job;
+            job.transport([&](const Storage::Progress& progress){
+                if(progress.phase=="Removing moved sources"&&progress.path==(phase==17?"First":"Second"))
+                    ExitProcess(90+phase);
+            },{});
+            return WindowsReportedMove(CString(image),job).code?4:3;
         }
         if(!strcmp(action,"cross-format-move")||!strcmp(action,"archive-merge-move")){
             Storage::Job job;
