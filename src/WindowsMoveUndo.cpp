@@ -432,6 +432,10 @@ void ClearStagedEntries(const Loaded& log,const std::wstring& folder,bool commit
         CheckStagedEntry(log,path,info,committed);
         if(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)ClearStagedEntries(log,path,committed,depth+1);
         Remove(file.value,"Cannot remove Windows staging entry; remaining contents were retained");
+#ifdef HFV_TESTING
+        if(MacBrowser::windowsPublicationFault)
+            MacBrowser::windowsPublicationFault("windows-recovery-staged-entry-removed");
+#endif
     }
 }
 size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::wstring& slot,
@@ -727,7 +731,13 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                     if(!committed){
                         for(auto i=log.records.rbegin();i!=log.records.rend();++i){
                             if(i->op==Op::Rename||i->op==Op::Relabel||
-                               i->op==Op::RenameWithStreams||i->op==Op::StageRename)UndoRename(stage,*i);
+                               i->op==Op::RenameWithStreams||i->op==Op::StageRename){
+                                UndoRename(stage,*i);
+#ifdef HFV_TESTING
+                                if(MacBrowser::windowsPublicationFault)
+                                    MacBrowser::windowsPublicationFault("windows-recovery-original-restored");
+#endif
+                            }
                         }
                     }
                     LARGE_INTEGER at{};at.QuadPart=LONGLONG(log.end);

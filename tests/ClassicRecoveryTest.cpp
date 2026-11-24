@@ -1749,6 +1749,56 @@ static void RunLauncherInterruptionTests(const CString& root,FILE* report)
     fprintf(report,"PASS: delegated editor safe-save, named stream retention, and subprocess crashes before commit, after commit and during cleanup preserve launcher data.\n");
 }
 
+static void InterruptedWindowsReplay(const CString& root,FILE* report)
+{
+    for(bool committed:{false,true}){
+        const auto folder=root+(committed?"\\restart-purge":"\\restart-restore");
+        Check(CreateDirectoryA(folder,nullptr)!=FALSE,"create interrupted Windows replay fixture");
+        const auto path=VolumeCoord::Wide(folder.GetString());
+        {
+            auto host=MacBrowser::OpenWindows(path);
+            Put(*host,false);
+            Put(*host,true,false,2,u"Neighbor");
+        }
+        CrashChild(folder,committed?9:8,L"paired-windows-delete");
+
+        WIN32_FIND_DATAA found{};
+        auto search=FindFirstFileA(folder+"\\.hfv-export-*",&found);
+        Check(search!=INVALID_HANDLE_VALUE,"find the interrupted Windows journal's staging folder");
+        FindClose(search);
+        const auto staging=folder+"\\"+found.cFileName;
+        CrashChild(folder,committed?20:21,L"interrupt-windows-replay");
+
+        unsigned remaining=0;
+        for(const auto* slot:{"1","2"})
+            if(GetFileAttributesA(staging+"\\"+slot)!=INVALID_FILE_ATTRIBUTES)++remaining;
+        const bool primary=GetFileAttributesA(folder+"\\Document")!=INVALID_FILE_ATTRIBUTES;
+        const bool companion=GetFileAttributesA(folder+"\\%Document")!=INVALID_FILE_ATTRIBUTES;
+        Check(remaining==1&&(committed?(!primary&&!companion):(primary!=companion)),
+              "replay did not stop after exactly one staged original was processed");
+
+        const auto unrelated=staging+"\\Unrelated";
+        const Bytes sentinel{11,31,71};
+        Save(unrelated,sentinel);
+        bool refused=false;
+        try{MacBrowser::OpenWindows(path);}
+        catch(const HfsPlus::Error&){refused=true;}
+        Check(refused&&Load(unrelated)==sentinel,"restarted cleanup deleted an unrelated staged file");
+        const auto preserved=folder+"\\Preserved";
+        Check(MoveFileA(unrelated,preserved)!=FALSE,"move unrelated fixture out of staging");
+        for(unsigned reopen=0;reopen<2;++reopen){
+            auto host=MacBrowser::OpenWindows(path);
+            VerifyFile(*host,2,u"Neighbor",true);
+            MacBrowser::Entry document;
+            Check(host->FindChild(2,u"Document",document)==!committed,"restarted replay changed the commit outcome");
+            if(!committed)VerifyFile(*host,2,u"Document",false);
+            Check(Load(preserved)==sentinel&&GetFileAttributesA(staging)==INVALID_FILE_ATTRIBUTES,
+                  "restart left recovery staging or changed the preserved file");
+        }
+    }
+    fprintf(report,"PASS: interrupted Windows rollback and purge replay resume safely, retain unrelated staging, and are repeatable on reopen.\n");
+}
+
 void RunDurableWindowsMutationTests(const char* directory,FILE* report)
 {
     const CString root=directory;
@@ -2099,6 +2149,7 @@ void RunDurableWindowsMutationTests(const char* directory,FILE* report)
     fprintf(report,"PASS: interrupted removable image overwrite restores the old image before commit and preserves the new image after commit.\n");
     fprintf(report,"PASS: interrupted MFS and HFSX formatting leaves final names absent; interrupted external-journal formatting recovers both outputs together.\n");
     RunLauncherInterruptionTests(root,report);
+    InterruptedWindowsReplay(root,report);
 }
 int RunMediaImageCrashChild(const char*,unsigned);
 int RunRawOpticalCrashChild(const char*,unsigned,bool);
@@ -2177,6 +2228,14 @@ int RunClassicRecoveryChild(const char* image,unsigned phase,const char* action)
         const bool opticalWave=!strcmp(action,"optical-wav-crash");
         if(opticalWave||!strcmp(action,"optical-cue-crash"))
             return RunRawOpticalCrashChild(image,phase,opticalWave);
+        if(!strcmp(action,"interrupt-windows-replay")){
+            MacBrowser::windowsPublicationFault=[phase](const char* event){
+                if(!strcmp(event,phase==20?"windows-recovery-staged-entry-removed":"windows-recovery-original-restored"))
+                    ExitProcess(90+phase);
+            };
+            MacBrowser::OpenWindows(VolumeCoord::Wide(image));
+            return 4;
+        }
         if(!strcmp(action,"recursive-windows-delete")){
             Storage::Job job;
             const auto result=DeleteWindowsFixture(VolumeCoord::Wide(image),job,L"Tree");
