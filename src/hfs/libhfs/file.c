@@ -233,32 +233,3 @@ int f_trunc(hfsfile *file)
 
   return 0;
 }
-
-/*
- * NAME:	file->flush()
- * DESCRIPTION:	flush all pending changes to an open file
- */
-int f_flush(hfsfile *file)
-{
-  hfsvol *vol = file->vol;
-
-  if (! (vol->flags & HFS_READONLY))
-    {
-      if (file->flags & HFS_UPDATE_CATREC)
-	{
-	  node n;
-
-	  file->cat.u.fil.filStBlk   = file->cat.u.fil.filExtRec[0].xdrStABN;
-	  file->cat.u.fil.filRStBlk  = file->cat.u.fil.filRExtRec[0].xdrStABN;
-	  file->cat.u.fil.filClpSize = file->clump;
-
-	  if (v_catsearch(file->vol, file->parid, file->name, 0, 0, &n) <= 0 ||
-	      v_putcatrec(&file->cat, &n) < 0)
-	    return -1;
-
-	  file->flags &= ~HFS_UPDATE_CATREC;
-	}
-    }
-
-  return 0;
-}

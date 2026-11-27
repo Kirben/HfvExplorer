@@ -71,6 +71,25 @@
 
 #include "..\..\filehook.h"
 
+static int ClassicHfsFlushOpenFile(hfsfile *file)
+{
+    if ((file->vol->flags & HFS_READONLY) || !(file->flags & HFS_UPDATE_CATREC))
+        return 0;
+    node leaf;
+    CatDataRec disk, update;
+    if (v_catsearch(file->vol, file->parid, file->name, &disk, NULL, &leaf) <= 0)
+        return -1;
+    if (!ClassicHfsPrepareFileUpdate(&disk, &file->cat, file->clump, &update)) {
+        ERROR(EIO, "classic HFS open file no longer matches its catalog entry");
+        return -1;
+    }
+    if (v_putcatrec(&update, &leaf) < 0)
+        return -1;
+    file->cat = update;
+    file->flags &= ~HFS_UPDATE_CATREC;
+    return 0;
+}
+
 /* Explicit mount/error contexts survive adapter migration between workers. */
 static HFV_THREAD_LOCAL struct hfs_engine_context fallback_context;
 static HFV_THREAD_LOCAL struct hfs_engine_context *active_context;
@@ -427,7 +446,7 @@ int hfs_flush_raw(hfsvol *vol)
 
   for (file = vol->files; file; file = file->next)
     {
-      if (f_flush(file) < 0)
+      if (ClassicHfsFlushOpenFile(file) < 0)
 	return -1;
     }
 
@@ -1304,7 +1323,7 @@ int hfs_close(hfsfile *file)
         if(!(vol->flags&HFS_WRITE_FAILED))return -1; // Keep the view for retry.
         result=-1;
       } else {
-        if(f_trunc(file)<0||f_flush(file)<0)result=-1;
+        if(f_trunc(file)<0||ClassicHfsFlushOpenFile(file)<0)result=-1;
         result=b_end_mutation(vol,result);
         if(result<0&&!(vol->flags&HFS_WRITE_FAILED))return -1;
       }
@@ -1981,7 +2000,7 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
  if(b_begin_mutation(vol)<0)return -1;
  result=hfs_truncate_impl(file,length);
  if(result==0&&f_trunc(file)<0)result=-1;
- if(result==0&&f_flush(file)<0)result=-1;
+ if(result==0&&ClassicHfsFlushOpenFile(file)<0)result=-1;
  return b_end_mutation(vol,result);
 }
 

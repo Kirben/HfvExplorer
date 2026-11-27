@@ -42,6 +42,21 @@ static inline unsigned ClassicHfsEncodeCatalogRecord(unsigned char *bytes, size_
     return size;
 }
 
+// Stage an open file's catalog update only for the same on-disk identity.
+static inline int ClassicHfsPrepareFileUpdate(const ClassicHfsCatalogRecord *disk,
+                                              const ClassicHfsCatalogRecord *opened,
+                                              unsigned long clump, ClassicHfsCatalogRecord *update)
+{
+    if (disk->cdrType != cdrFilRec || opened->cdrType != cdrFilRec ||
+        disk->u.fil.filFlNum != opened->u.fil.filFlNum)
+        return 0;
+    *update = *opened;
+    update->u.fil.filStBlk = opened->u.fil.filExtRec[0].xdrStABN;
+    update->u.fil.filRStBlk = opened->u.fil.filRExtRec[0].xdrStABN;
+    update->u.fil.filClpSize = clump;
+    return 1;
+}
+
 static inline unsigned ClassicHfsDecodeCatalogRecord(unsigned char *bytes, size_t available,
                                                      ClassicHfsCatalogRecord *record)
 {

@@ -123,6 +123,24 @@ static void verify_formatted_tree_headers(const char *image)
 }
 
 int main(int argc,char**argv){
+    {
+        ClassicHfsCatalogRecord disk = {0}, opened = {0}, staged = {0};
+        opened.cdrType = disk.cdrType = cdrFilRec;
+        opened.u.fil.filFlNum = 20;
+        disk.u.fil.filFlNum = 21;
+        must(!ClassicHfsPrepareFileUpdate(&disk, &opened, 512, &staged) && staged.cdrType == 0,
+             "reject a replacement file at the open name");
+        disk.u.fil.filFlNum = 20;
+        disk.cdrType = cdrDirRec;
+        must(!ClassicHfsPrepareFileUpdate(&disk, &opened, 512, &staged), "reject a replacement directory");
+        disk.cdrType = cdrFilRec;
+        opened.u.fil.filExtRec[0].xdrStABN = 3;
+        opened.u.fil.filRExtRec[0].xdrStABN = 9;
+        must(ClassicHfsPrepareFileUpdate(&disk, &opened, 512, &staged) &&
+             staged.u.fil.filStBlk == 3 && staged.u.fil.filRStBlk == 9 &&
+             staged.u.fil.filClpSize == 512 && opened.u.fil.filStBlk == 0,
+             "stage both fork starts without changing the open file");
+    }
     ClassicHfsFormatGeometry geometry;
     must(!ClassicHfsPlanFormat(1599, &geometry) && ClassicHfsPlanFormat(1600, &geometry) &&
          geometry.allocationBlocks == 1594 && geometry.firstAllocationSector == 4,

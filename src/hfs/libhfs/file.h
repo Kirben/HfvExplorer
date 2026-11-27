@@ -27,4 +27,3 @@ int f_doblock(hfsfile *, unsigned long, block *,
 
 int f_alloc(hfsfile *);
 int f_trunc(hfsfile *);
-int f_flush(hfsfile *);
