@@ -103,47 +103,6 @@ int v_flush(hfsvol *vol, int umounting)
 }
 
 /*
- * NAME:	vol->adjvalence()
- * DESCRIPTION:	update a volume's valence counts
- */
-int v_adjvalence(hfsvol *vol, long parid, int isdir, int adj)
-{
-  node n;
-  CatDataRec data;
-
-  if (isdir)
-    vol->mdb.drDirCnt += adj;
-  else
-    vol->mdb.drFilCnt += adj;
-
-  vol->flags |= HFS_UPDATE_MDB;
-
-  if (parid == HFS_CNID_ROOTDIR)
-    {
-      if (isdir)
-	vol->mdb.drNmRtDirs += adj;
-      else
-	vol->mdb.drNmFls    += adj;
-    }
-  else if (parid == HFS_CNID_ROOTPAR)
-    return 0;
-
-  if (v_getdthread(vol, parid, &data, 0) <= 0 ||
-      ClassicHfsFindCatalogEntry(vol, data.u.dthd.thdParID, data.u.dthd.thdCName,
-		  &data, 0, &n) <= 0 ||
-      data.cdrType != cdrDirRec)
-    {
-      ERROR(EIO, "can't find parent directory");
-      return -1;
-    }
-
-  data.u.dir.dirVal  += adj;
-  data.u.dir.dirMdDat = ClassicHfsFromUnixSeconds(time(0));
-
-  return ClassicHfsStoreCatalogEntry(&data, &n);
-}
-
-/*
  * NAME:	vol->newfolder()
  * DESCRIPTION:	create a new HFS folder
  */
@@ -211,7 +170,7 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   }
 
   if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0 ||
-      v_adjvalence(vol, parid, 1, 1) < 0)
+      ClassicHfsAdjustEntryCount(vol, parid, 1, 1) < 0)
     return -1;
 
   return 0;

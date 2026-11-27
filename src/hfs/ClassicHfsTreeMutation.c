@@ -26,6 +26,7 @@
 #include "ClassicHfsNodeIO.h"
 #include "ClassicHfsCatalogLeaf.h"
 #include "ClassicHfsPath.h"
+#include "ClassicHfsTime.h"
 #include "libhfs/volume.h"
 # include "libhfs/block.h"
 # include "libhfs/file.h"
@@ -436,4 +437,45 @@ int ClassicHfsResolvePath(hfsvol *volume, char *path, CatDataRec *record,
         }
         directory = record->u.dir.dirDirID;
     }
+}
+
+int ClassicHfsAdjustEntryCount(hfsvol *volume, long parent, int directory, int delta)
+{
+    if (delta != 1 && delta != -1) {
+        ERROR(EINVAL, "invalid classic HFS entry count adjustment");
+        return -1;
+    }
+    if (parent == HFS_CNID_ROOTPAR && directory)
+        return 0;
+
+    unsigned long *total = directory ? &volume->mdb.drDirCnt : &volume->mdb.drFilCnt;
+    uint16_t *rootCount = directory ? &volume->mdb.drNmRtDirs : &volume->mdb.drNmFls;
+    if ((delta > 0 && (*total == UINT32_MAX || (parent == HFS_CNID_ROOTDIR && *rootCount == UINT16_MAX))) ||
+        (delta < 0 && (!*total || (parent == HFS_CNID_ROOTDIR && !*rootCount)))) {
+        ERROR(EIO, "classic HFS volume entry count out of range");
+        return -1;
+    }
+
+    CatDataRec thread, entry;
+    node cursor;
+    if (ClassicHfsFindCatalogThread(volume, parent, &thread, NULL, cdrThdRec) <= 0 ||
+        ClassicHfsFindCatalogEntry(volume, thread.u.dthd.thdParID, thread.u.dthd.thdCName,
+                                   &entry, NULL, &cursor) <= 0 ||
+        entry.cdrType != cdrDirRec || entry.u.dir.dirDirID != parent) {
+        ERROR(EIO, "cannot identify classic HFS parent directory");
+        return -1;
+    }
+    if ((delta > 0 && entry.u.dir.dirVal == UINT16_MAX) || (delta < 0 && !entry.u.dir.dirVal)) {
+        ERROR(EIO, "classic HFS directory valence out of range");
+        return -1;
+    }
+    entry.u.dir.dirVal += delta;
+    entry.u.dir.dirMdDat = ClassicHfsFromUnixSeconds(time(NULL));
+    if (ClassicHfsStoreCatalogEntry(&entry, &cursor) < 0)
+        return -1;
+    *total += delta;
+    if (parent == HFS_CNID_ROOTDIR)
+        *rootCount += delta;
+    volume->flags |= HFS_UPDATE_MDB;
+    return 0;
 }

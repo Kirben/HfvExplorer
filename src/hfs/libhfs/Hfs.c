@@ -1487,7 +1487,7 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
   ClassicHfsWriteCatalogKey(pkey, data.u.dir.dirDirID, "");
 
   if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
-      v_adjvalence(vol, parid, 1, -1) < 0)
+      ClassicHfsAdjustEntryCount(vol, parid, 1, -1) < 0)
     return -1;
 
   return 0;
@@ -1587,7 +1587,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
   }
 
   if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0 ||
-      v_adjvalence(vol, parid, 0, 1) < 0)
+      ClassicHfsAdjustEntryCount(vol, parid, 0, 1) < 0)
     return -1;
 
   return 0;
@@ -1660,7 +1660,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   }
 
   if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
-      v_adjvalence(vol, file.parid, 0, -1) < 0)
+      ClassicHfsAdjustEntryCount(vol, file.parid, 0, -1) < 0)
     return -1;
 
   /* delete file thread, if any */
@@ -1875,8 +1875,8 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 
   if (moving)
     {
-      if (v_adjvalence(vol, srcid, isdir, -1) < 0 ||
-	  v_adjvalence(vol, dstid, isdir,  1) < 0)
+      if (ClassicHfsAdjustEntryCount(vol, srcid, isdir, -1) < 0 ||
+	  ClassicHfsAdjustEntryCount(vol, dstid, isdir,  1) < 0)
 	return -1;
     }
 

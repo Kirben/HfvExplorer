@@ -34,7 +34,7 @@ void v_destruct(hfsvol *);
 int v_getvol(hfsvol **);
 int v_flush(hfsvol *, int);
 
-int v_adjvalence(hfsvol *, long, int, int);
+int ClassicHfsAdjustEntryCount(hfsvol *, long, int, int);
 int v_newfolder(hfsvol *, long, char *);
 
 int v_recovery_extents_valid(const ExtDataRec *, unsigned int blocks);

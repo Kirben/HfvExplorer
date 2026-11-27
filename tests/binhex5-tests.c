@@ -200,6 +200,18 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 int main(int argc,char**argv){
     {
         hfsvol volume = {0};
+        must(ClassicHfsAdjustEntryCount(&volume, HFS_CNID_ROOTPAR, 1, 1) == 0 &&
+             !volume.mdb.drDirCnt, "root creation is excluded from volume directory count");
+        volume.mdb.drFilCnt = 7;
+        must(ClassicHfsAdjustEntryCount(&volume, HFS_CNID_ROOTDIR, 0, -1) < 0 &&
+             volume.mdb.drFilCnt == 7 && !volume.flags, "root count underflow preserves volume count");
+        volume.mdb.drNmFls = UINT16_MAX;
+        must(ClassicHfsAdjustEntryCount(&volume, HFS_CNID_ROOTDIR, 0, 1) < 0 &&
+             volume.mdb.drNmFls == UINT16_MAX && volume.mdb.drFilCnt == 7 && !volume.flags,
+             "root count overflow is rejected before catalog access");
+    }
+    {
+        hfsvol volume = {0};
         node cursor = {0}, original;
         CatDataRec record = {0};
         cursor.bt = &volume.ext;
@@ -1099,6 +1111,9 @@ int main(int argc,char**argv){
   must(ClassicHfsResolvePath(v, ":", &entry, NULL, NULL, NULL) < 0 && errno == EIO &&
        ClassicHfsResolvePath(v, "::PathOther", &entry, NULL, NULL, NULL) < 0 && errno == EIO,
        "reject misdirected thread for current and parent-relative paths");
+  unsigned long oldFiles = v->mdb.drFilCnt;
+  must(ClassicHfsAdjustEntryCount(v, v->cwd, 0, 1) < 0 && errno == EIO &&
+       v->mdb.drFilCnt == oldFiles, "misdirected thread cannot change parent or volume count");
   must(ClassicHfsStoreCatalogEntry(&saved, &slot) == 0 &&
        ClassicHfsResolvePath(v, ":", &entry, NULL, NULL, NULL) == 1 && entry.u.dir.dirDirID == v->cwd,
        "restored thread resolves the original directory");

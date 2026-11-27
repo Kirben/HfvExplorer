@@ -57,10 +57,8 @@ static inline void ClassicHfsInitMasterDirectory(ClassicHfsMasterDirectory *mdb,
     mdb->drXTClpSiz = geometry->treeClumpBytes;
     mdb->drCTClpSiz = geometry->treeClumpBytes;
     memcpy(mdb->drVN, name, nameLength);
-    // Root creation consumes CNID 2 and increments the count. The root
-    // itself is excluded from the on-disk directory total.
+    // The root consumes CNID 2 and is excluded from the directory total.
     mdb->drNxtCNID = 2;
-    mdb->drDirCnt = (unsigned long)-1;
 }
 
 static inline void ClassicHfsDecodeMasterDirectory(unsigned char bytes[512], ClassicHfsMasterDirectory *mdb)
