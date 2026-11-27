@@ -1095,6 +1095,19 @@ int RunWindowsPathCoordinationTest(const char* directory){
  SetEvent(planningGate.release);SetEvent(gate.release);for(auto& op:queued)op.Job()->cancel();BackgroundCopies::CancelAll();FileOperations::CancelPending();Until([]{return !BackgroundCopies::Active();});for(auto& op:queued)op.Job()->wait();VolumeCoord::SetPathLookupObserver({});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
 }
 
+static void DeclineArchiveMove(const std::shared_ptr<MacBrowser::Volume>& source,uint32_t file,
+                               const std::shared_ptr<MacBrowser::Volume>& target){
+  auto cut=FileOperations::Location::Mounted(source,file);
+  cut.cut=true;
+  auto moving=FileOperations::Submit(FileOperations::OrdinaryCopy{{cut},FileOperations::Location::Mounted(target,2)});
+  Until([&]{return moving.Job()->done()||!moving.Job()->conflictState().path.empty();});
+  const auto prompt=moving.Job()->conflictState();
+  Check(!prompt.path.empty()&&prompt.kind==Storage::CopyPrompt::ClassicArchiveMove,"Missing classic HFS archive move prompt");
+  moving.Job()->resolve(prompt.id,Storage::ConflictChoice::Cancel);
+  Until([&]{return moving.Job()->done();});
+  Check(moving.Job()->result().outcome==Storage::Outcome::Cancelled ,"Declining Archive Move did not cancel the transfer");
+}
+
 int RunExtendedAttributesTest(const char* directory){
  if(!CreateDirectoryA(directory,nullptr))return 2;host=directory;FILE* report=fopen(host+"\\extended-attributes-report.txt","w");if(!report)return 2;int result=0;
  auto& app=*static_cast<CHFVExplorerApp*>(AfxGetApp());InitializeStorageUi();BackgroundCopies::enabled=true;app.m_dosicons=DI_NO_ICONS;app.m_mac_window_mode=FALSE;app.m_show_invisible_mac=app.m_show_invisible_fat=TRUE;
@@ -1108,7 +1121,7 @@ int RunExtendedAttributesTest(const char* directory){
   copy(*native,folder,*pc);auto exportedFolder=Find(*pc,u"Folder");Check(pc->GetAttributes(exportedFolder)==attrs,"Folder companion lost ACL");pc->Close();copy(*pc,exportedFolder,*destination);auto nativeFolder=Find(*destination,u"Folder");Check(destination->GetAttributes(nativeFolder)==attrs,"Directory roundtrip lost attributes");auto children=destination->List(nativeFolder);Check(children.size()==1&&destination->GetAttributes(children.front().id)==attrs,"Nested file metadata lost");
   pc->Rename(exportedFolder,2,u"RenamedFolder");Check(pc->GetAttributes(exportedFolder)==attrs&&GetFileAttributesA(windows+"\\%RenamedFolder")!=INVALID_FILE_ATTRIBUTES,"Folder rename orphaned companion");Storage::Job deletion;MacBrowser::RemoveTree(*pc,exportedFolder,deletion);Check(GetFileAttributesA(windows+"\\%RenamedFolder")==INVALID_FILE_ATTRIBUTES,"Directory deletion orphaned metadata companion");
   // Refuse lossy legacy copies before producing any destination or deleting source.
-  CString classic=host+"\\classic.dsk";{CFile f;Check(f.Open(classic,CFile::modeCreate|CFile::modeWrite),"create attribute rejection image");f.SetLength(1474560);}char label[]="NoAttributes";Check(hfs_format(const_cast<char*>((LPCSTR)classic),0,label)==0,"format attribute rejection image");auto legacy=MacBrowser::OpenClassic((LPCSTR)classic,"NoAttributes:",true);bool rejected=false;try{copy(*native,file,*legacy,true);}catch(const std::exception&){rejected=true;}Check(rejected&&legacy->List().empty()&&native->GetAttributes(file)==attrs,"Lossy legacy transfer wrote destination or removed source");legacy->Close();
+  CString classic=host+"\\classic.dsk";{CFile f;Check(f.Open(classic,CFile::modeCreate|CFile::modeWrite),"create attribute rejection image");f.SetLength(1474560);}char label[]="NoAttributes";Check(hfs_format(const_cast<char*>((LPCSTR)classic),0,label)==0,"format attribute rejection image");auto legacy=MacBrowser::OpenClassic((LPCSTR)classic,"NoAttributes:",true);DeclineArchiveMove(native,file,legacy);Check(legacy->List().empty()&&native->GetAttributes(file)==attrs,"Lossy legacy transfer wrote destination or removed source");legacy->Close();
 
   // A failed replacement must leave both the old companion and data intact.
   {auto e=pc->Stat(exported);e.attributes=attrs;e.attributesKnown=true;bool failed=false;try{pc->Put(2,e,[](unsigned,uint64_t,void*,size_t){throw HfsPlus::Error("Injected attributed copy failure");},true);}catch(const std::exception&){failed=true;}Check(failed&&pc->GetAttributes(exported)==attrs&&pc->Stat(exported).forks[0].size==8192,"Failed attributed replacement lost original data/metadata");}
@@ -1363,15 +1376,8 @@ int RunOtherHfsPlusBrowserTest(const char* directory){
   MacBrowser::Entry tooLate=e;tooLate.name=u"Beyond 2106";tooLate.created=tooLate.modified=HfsPlus::Time::Maximum+100;tooLate.datesValid=true;auto lateId=pc->Put(2,tooLate,[](unsigned f,uint64_t at,void* p,size_t n){for(size_t i=0;i<n;++i)static_cast<BYTE*>(p)[i]=BYTE(f+at+i);},false);pc->Close();Check(pc->Stat(lateId).modified==tooLate.modified,"Windows source truncated a date after 2106");bool lateRefused=false;try{Storage::Job move;MacBrowser::Copy(*pc,lateId,*target,2,move,true);}catch(const std::exception&){lateRefused=true;}Check(lateRefused&&!Find(*target,u"Beyond 2106")&&pc->Stat(lateId).modified==tooLate.modified,"Out-of-range Windows timestamp was silently dropped");pc->Close();
   auto legacy=Image(host+"\\legacy.dsk");bool refused=false;try{Storage::Job move;MacBrowser::Copy(*native,file,*legacy,2,move,true);}catch(const std::exception&){refused=true;}Check(refused&&!Find(*legacy,u"Future")&&native->Stat(file).modified==dates[1],"Legacy timestamp refusal changed source or target");
   CString classic=host+"\\classic.dsk";{CFile f;Check(f.Open(classic,CFile::modeCreate|CFile::modeWrite),"create classic date image");f.SetLength(1474560);}char label[]="ClassicDates";Check(hfs_format(const_cast<char*>((LPCSTR)classic),0,label)==0,"format classic date image");auto old=MacBrowser::OpenClassic((LPCSTR)classic,"ClassicDates:",true);
-  auto cut=FileOperations::Location::Mounted(native,file);
-  cut.cut=true;
-  auto moving=FileOperations::Submit(FileOperations::OrdinaryCopy{{cut},FileOperations::Location::Mounted(old,2)});
-  Until([&]{return moving.Job()->done()||!moving.Job()->conflictState().path.empty();});
-  const auto prompt=moving.Job()->conflictState();
-  Check(!prompt.path.empty()&&prompt.kind==Storage::CopyPrompt::ClassicArchiveMove,"Missing archive move prompt for future date");
-  moving.Job()->resolve(prompt.id,Storage::ConflictChoice::Cancel);
-  Until([&]{return moving.Job()->done();});
-  Check(moving.Job()->result().outcome==Storage::Outcome::Cancelled&&old->List().empty()&&native->Stat(file).modified==dates[1],"Classic HFS date refusal lost source");
+  DeclineArchiveMove(native,file,old);
+  Check(old->List().empty()&&native->Stat(file).modified==dates[1],"Classic HFS date refusal lost source");
   old->Close();
   FileOperations::Request conversion;conversion = FileOperations::LegacyConversion{};conversion.Legacy().source=FileOperations::Location::FromLegacy((LPCSTR)windows,(LPCSTR)(windows+"\\Future"));conversion.Legacy().destination=FileOperations::Location::FromLegacy((LPCSTR)classic,"ClassicDates:Converted");conversion.Legacy().options.input=conversion.Legacy().options.output='r';conversion.Legacy().destination=FileOperations::Location::Classic((LPCSTR)classic,"ClassicDates:");conversion.Legacy().target=FileOperations::ConversionTarget::Folder;auto converted=FileOperations::Submit(conversion);Until([&]{return converted.Job()->done();});Check(converted.Job()->result().code!=0&&converted.Job()->result().message.find("dates after")!=std::string::npos,"Legacy converter truncated a future date");
   FileOperations::Location selected;selected.SetMounted(native,file);FileOperations::Request rename = FileOperations::RenameEntry{selected, u"Updated", FileOperations::Location::Mounted(native,2)};Check(BackgroundCopies::Start({rename},one,true),"start external journal rename");Until([]{return !BackgroundCopies::Active();});Check(!BackgroundCopies::LastResult().code,"external background rename failed");Until([&]{return Row(one->GetBrowserSession(),L"Updated")>=0&&Row(two->GetBrowserSession(),L"Updated")>=0;});Check(one->IsWindowEnabled()&&two->IsWindowEnabled(),"paired journal operation disabled windows");
