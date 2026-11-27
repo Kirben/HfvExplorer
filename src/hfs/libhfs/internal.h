@@ -163,6 +163,7 @@ struct _hfsdir_ {
   long dirid;			/* directory ID of interest (or 0) */
 
   node n;			/* current B*-tree node */
+  uint32_t leavesVisited;
   struct _hfsvol_ *vptr;	/* current volume pointer */
 
   struct _hfsdir_ *prev;

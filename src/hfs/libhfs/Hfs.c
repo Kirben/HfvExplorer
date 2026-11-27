@@ -116,7 +116,7 @@ int hfs_recognizes_image_fd(int fd) {
  * NAME:	hfs->mount()
  * DESCRIPTION:	open an HFS volume; return volume descriptor or 0 (error)
  */
-static int resolve_current_volume(hfsvol **volume)
+int ClassicHfsCurrentVolume(hfsvol **volume)
 {
     if (!*volume)
         *volume = hfs_curvol;
@@ -456,7 +456,7 @@ int hfs_flush_raw(hfsvol *vol)
 {
   hfsfile *file;
 
-  if (resolve_current_volume(&vol) < 0)
+  if (ClassicHfsCurrentVolume(&vol) < 0)
     return -1;
 
   if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled after rollback failure");return -1;}
@@ -494,7 +494,7 @@ int hfs_umount(hfsvol *vol)
 {
   int result = 0, saved_errno = 0;
   char *saved_error = 0;
-  if (resolve_current_volume(&vol) < 0) return -1;
+  if (ClassicHfsCurrentVolume(&vol) < 0) return -1;
   if(vol->flags&HFS_WRITE_FAILED) {
     result=-1;saved_errno=EIO;saved_error=vol->failure_message?vol->failure_message:"Classic HFS rollback failed; volume was not cleanly closed";
   }
@@ -598,7 +598,7 @@ void hfs_setvol(hfsvol *vol)
  */
 int hfs_vstat(hfsvol *vol, hfsvolent *ent)
 {
-  if (resolve_current_volume(&vol) < 0)
+  if (ClassicHfsCurrentVolume(&vol) < 0)
     return -1;
 
   strcpy(ent->name, vol->mdb.drVN);
@@ -777,348 +777,6 @@ int hfs_format(char *path, int pnum, char *vname)
   return result;
 }
 
-/* High-Level Directory Routines =========================================== */
-
-/*
- * NAME:	hfs->chdir()
- * DESCRIPTION:	change current HFS directory
- */
-int hfs_chdir(hfsvol *vol, char *path)
-{
-  CatDataRec data;
-
-  if (resolve_current_volume(&vol) < 0 ||
-      ClassicHfsResolvePath(vol, path, &data, 0, 0, 0) <= 0)
-    return -1;
-
-  if (data.cdrType != cdrDirRec)
-    {
-      ERROR(ENOTDIR, 0);
-      return -1;
-    }
-
-  vol->cwd = data.u.dir.dirDirID;
-
-  return 0;
-}
-
-/*
- * NAME:	hfs->getcwd()
- * DESCRIPTION:	return the current working directory ID
- */
-long hfs_getcwd(hfsvol *vol)
-{
-  if (resolve_current_volume(&vol) < 0)
-    return 0;
-
-  return vol->cwd;
-}
-
-/*
- * NAME:	hfs->setcwd()
- * DESCRIPTION:	set the current working directory ID
- */
-int hfs_setcwd(hfsvol *vol, long id)
-{
-  if (resolve_current_volume(&vol) < 0)
-    return -1;
-
-  if (id == vol->cwd)
-    return 0;
-
-  /* make sure the directory exists */
-
-  if (v_getdthread(vol, id, 0, 0) <= 0)
-    return -1;
-
-  vol->cwd = id;
-
-  return 0;
-}
-
-/*
- * NAME:	hfs->dirinfo()
- * DESCRIPTION:	given a directory ID, return its (name and) parent ID
- */
-int hfs_dirinfo(hfsvol *vol, long *id, char *name)
-{
-  CatDataRec thread;
-
-  if (resolve_current_volume(&vol) < 0 ||
-      v_getdthread(vol, *id, &thread, 0) <= 0)
-    return -1;
-
-  *id = thread.u.dthd.thdParID;
-
-  if (name)
-    strcpy(name, thread.u.dthd.thdCName);
-
-  return 0;
-}
-
-/*
- * NAME:	hfs->opendir()
- * DESCRIPTION:	prepare to read the contents of a directory
- */
-hfsdir *hfs_opendir(hfsvol *vol, char *path)
-{
-  hfsdir *dir;
-  CatDataRec data;
-  unsigned char pkey[HFS_CATKEYLEN];
-
-  if (resolve_current_volume(&vol) < 0)
-    return 0;
-
-  dir = ALLOC(hfsdir, 1);
-  if (dir == 0)
-    {
-      ERROR(ENOMEM, 0);
-      return 0;
-    }
-
-
-  if (*path == 0)
-    {
-      /* meta-directory containing root dirs from all mounted volumes */
-
-      dir->dirid = 0;
-      dir->vptr  = hfs_mounts;
-    }
-  else
-    {
-      if (ClassicHfsResolvePath(vol, path, &data, 0, 0, 0) <= 0)
-	{
-	  FREE(dir);
-	  return 0;
-	}
-
-      if (data.cdrType != cdrDirRec)
-	{
-	  FREE(dir);
-	  ERROR(ENOTDIR, 0);
-	  return 0;
-	}
-
-      dir->dirid = data.u.dir.dirDirID;
-      dir->vptr  = 0;
-
-      ClassicHfsWriteCatalogKey(pkey, dir->dirid, "");
-
-      if (ClassicHfsFindTreeKey(&vol->cat, pkey, &dir->n) <= 0)
-	{
-	  FREE(dir);
-	  return 0;
-	}
-    }
-
-  /* Path resolution may select another mounted volume. Link and close the
-     directory through that resolved volume, not the caller's original one. */
-  dir->vol = vol;
-  dir->prev = 0;
-  dir->next = vol->dirs;
-
-  if (vol->dirs)
-    vol->dirs->prev = dir;
-
-  vol->dirs = dir;
-
-  return dir;
-}
-
-/*
- * NAME:	hfs->readdir()
- * DESCRIPTION:	return the next entry in the directory
- */
-int hfs_readdir(hfsdir *dir, hfsdirent *ent)
-{
-  CatKeyRec key;
-  CatDataRec data;
-
-  if (dir->dirid == 0)
-    {
-      hfsvol *vol;
-      char cname[HFS_MAX_FLEN + 1];
-
-      for (vol = hfs_mounts; vol; vol = vol->next)
-	{
-	  if (vol == dir->vptr)
-	    break;
-	}
-
-      if (vol == 0)
-	{
-	  ERROR(ENOENT, "no more entries");
-	  return -1;
-	}
-
-      if (v_getdthread(vol, HFS_CNID_ROOTDIR, &data, 0) <= 0 ||
-	  ClassicHfsFindCatalogEntry(vol, HFS_CNID_ROOTPAR, data.u.dthd.thdCName,
-		      &data, cname, 0) < 0)
-	return -1;
-
-      ClassicHfsDescribeEntry(HFS_CNID_ROOTPAR, cname, &data, ent);
-
-      dir->vptr = vol->next;
-
-      return 0;
-    }
-
-  if (dir->n.rnum == -1)
-    {
-      ERROR(ENOENT, "no more entries");
-      return -1;
-    }
-
-  while (1)
-    {
-      ++dir->n.rnum;
-
-      while (dir->n.rnum >= dir->n.nd.ndNRecs)
-	{
-	  dir->n.nnum = dir->n.nd.ndFLink;
-	  if (dir->n.nnum == 0)
-	    {
-	      dir->n.rnum = -1;
-	      ERROR(ENOENT, "no more entries");
-	      return -1;
-	    }
-
-	  if (ClassicHfsReadTreeNode(&dir->n) < 0)
-	    {
-	      dir->n.rnum = -1;
-	      return -1;
-	    }
-
-	  dir->n.rnum = 0;
-	}
-
-      if (!ClassicHfsReadLeafEntry(dir->n.data, dir->n.roff, dir->n.nd.ndNRecs, dir->n.rnum, &key, &data)) {
-        ERROR(EIO, "invalid catalog key");
-        return -1;
-      }
-
-      if (key.ckrParID != dir->dirid)
-	{
-	  dir->n.rnum = -1;
-	  ERROR(ENOENT, "no more entries");
-	  return -1;
-	}
-
-      switch (data.cdrType)
-	{
-	case cdrDirRec:
-	case cdrFilRec:
-	  ClassicHfsDescribeEntry(key.ckrParID, key.ckrCName, &data, ent);
-	  return 0;
-
-	case cdrThdRec:
-	case cdrFThdRec:
-	  break;
-
-	default:
-	  dir->n.rnum = -1;
-
-	  ERROR(EIO, "unexpected directory entry found");
-	  return -1;
-	}
-    }
-}
-
-// By lp. Same as hfs_readdir, but w/ extra parameters
-int hfs_readdir2(
-	hfsdir *dir, 
-	hfsdirent *ent,
-  CatKeyRec *pkey,
-  CatDataRec *pdata
-)
-{
-
-  if (dir->dirid == 0) {
-	  hfsvol *vol;
-		char cname[HFS_MAX_FLEN + 1];
-
-    for (vol = hfs_mounts; vol; vol = vol->next) {
-			if (vol == dir->vptr) break;
-		}
-		if (vol == 0) {
-		  ERROR(ENOENT, "no more entries");
-		  return -1;
-		}
-
-    if (v_getdthread(vol, HFS_CNID_ROOTDIR, pdata, 0) <= 0 ||
-				ClassicHfsFindCatalogEntry(vol, HFS_CNID_ROOTPAR, pdata->u.dthd.thdCName,
-					  pdata, cname, 0) < 0)
-				return -1;
-
-    ClassicHfsDescribeEntry(HFS_CNID_ROOTPAR, cname, pdata, ent);
-    dir->vptr = vol->next;
-    return 0;
-  }
-  if (dir->n.rnum == -1) {
-		ERROR(ENOENT, "no more entries");
-    return -1;
-  }
-  while(1) {
-		++dir->n.rnum;
-    while (dir->n.rnum >= dir->n.nd.ndNRecs) {
-			dir->n.nnum = dir->n.nd.ndFLink;
-			if (dir->n.nnum == 0) {
-	      dir->n.rnum = -1;
-	      ERROR(ENOENT, "no more entries");
-	      return -1;
-	    }
-		  if (ClassicHfsReadTreeNode(&dir->n) < 0) {
-	      dir->n.rnum = -1;
-	      return -1;
-	    }
-		  dir->n.rnum = 0;
-		}
-    if (!ClassicHfsReadLeafEntry(dir->n.data, dir->n.roff, dir->n.nd.ndNRecs, dir->n.rnum, pkey, pdata)) {
-      ERROR(EIO, "invalid catalog key");
-      return -1;
-    }
-    if (pkey->ckrParID != dir->dirid) {
-		  dir->n.rnum = -1;
-		  ERROR(ENOENT, "no more entries");
-			return -1;
-		}
-
-    switch (pdata->cdrType) {
-			case cdrDirRec:
-			case cdrFilRec:
-				ClassicHfsDescribeEntry(pkey->ckrParID, pkey->ckrCName, pdata, ent);
-				return 0;
-			case cdrThdRec:
-			case cdrFThdRec:
-				break;
-			default:
-				dir->n.rnum = -1;
-			  ERROR(EIO, "unexpected directory entry found");
-				return -1;
-		}
-  }
-}
-
-/*
- * NAME:	hfs->closedir()
- * DESCRIPTION:	stop reading a directory
- */
-int hfs_closedir(hfsdir *dir)
-{
-  hfsvol *vol = dir->vol;
-
-  if (dir->prev)
-    dir->prev->next = dir->next;
-  if (dir->next)
-    dir->next->prev = dir->prev;
-  if (dir == vol->dirs)
-    vol->dirs = dir->next;
-
-  FREE(dir);
-
-  return 0;
-}
-
 /* High-Level File Routines ================================================ */
 
 /*
@@ -1129,7 +787,7 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
 {
   hfsfile *file;
 
-  if (resolve_current_volume(&vol) < 0)
+  if (ClassicHfsCurrentVolume(&vol) < 0)
     return 0;
 
   file = ALLOC(hfsfile, 1);
@@ -1336,7 +994,7 @@ int hfs_stat(hfsvol *vol, char *path, hfsdirent *ent)
   long parid;
   char name[HFS_MAX_FLEN + 1];
 
-  if (resolve_current_volume(&vol) < 0 ||
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
@@ -1365,7 +1023,7 @@ static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
   CatDataRec data;
   node n;
 
-  if (resolve_current_volume(&vol) < 0 ||
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, 0, 0, &n) <= 0)
     return -1;
 
@@ -1413,7 +1071,7 @@ static int hfs_mkdir_impl(hfsvol *vol, char *path)
   char name[HFS_MAX_FLEN + 1];
   int found;
 
-  if (resolve_current_volume(&vol) < 0)
+  if (ClassicHfsCurrentVolume(&vol) < 0)
     return -1;
 
   found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
@@ -1454,7 +1112,7 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
   char name[HFS_MAX_FLEN + 1];
   unsigned char pkey[HFS_CATKEYLEN];
 
-  if (resolve_current_volume(&vol) < 0 ||
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
@@ -1515,7 +1173,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
   unsigned char record[HFS_CATRECMAXLEN];
   int found, i, reclen;
 
-  if (resolve_current_volume(&vol) < 0)
+  if (ClassicHfsCurrentVolume(&vol) < 0)
     return -1;
 
   found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
@@ -1616,7 +1274,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   unsigned char pkey[HFS_CATKEYLEN];
   int found;
 
-  if (resolve_current_volume(&vol) < 0 ||
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &file.cat, &file.parid, file.name, 0) <= 0)
     return -1;
 
@@ -1706,7 +1364,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
   int found, isdir, moving, reclen;
   node n;
 
-  if (resolve_current_volume(&vol) < 0 ||
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, srcpath, &src, &srcid, srcname, 0) <= 0)
     return -1;
 
@@ -1899,7 +1557,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 /* Resolve the default mount, then validate the path before starting undo. */
 static int mutation_source(hfsvol **vol,char *path) {
  CatDataRec data;int found;
- if(resolve_current_volume(vol)<0)return -1;
+ if(ClassicHfsCurrentVolume(vol)<0)return -1;
  found=ClassicHfsResolvePath(*vol,path,&data,0,0,0);
  if(found==0)ERROR(ENOENT,"HFS entry not found");
  return found>0?0:-1;
@@ -1917,7 +1575,7 @@ int hfs_rename(hfsvol *vol,char *source,char *destination) {
 
 static int mutation_target(hfsvol **vol,char *path) {
  CatDataRec data;long parent;int found;
- if(resolve_current_volume(vol)<0)return -1;
+ if(ClassicHfsCurrentVolume(vol)<0)return -1;
  found=ClassicHfsResolvePath(*vol,path,&data,&parent,0,0);
  if(found<0)return -1;
  if(!parent){ERROR(ENOENT,"HFS parent directory not found");return -1;}
@@ -1958,7 +1616,7 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
 
 int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
  CatDataRec data;unsigned char raw[102];
- if(!finder||resolve_current_volume(&vol)<0||ClassicHfsResolvePath(vol,path,&data,0,0,0)<=0)return -1;
+ if(!finder||ClassicHfsCurrentVolume(&vol)<0||ClassicHfsResolvePath(vol,path,&data,0,0,0)<=0)return -1;
  if(data.cdrType!=cdrDirRec&&data.cdrType!=cdrFilRec){ERROR(EINVAL,"Finder information requires a file or folder");return -1;}
  ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);
  if(data.cdrType==cdrDirRec)memcpy(finder,raw+22,32);
@@ -1997,7 +1655,7 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
 }
 
 int hfs_flush(hfsvol *vol) {
- if(resolve_current_volume(&vol)<0)return -1;
+ if(ClassicHfsCurrentVolume(&vol)<0)return -1;
  if(vol->flags&HFS_READONLY)return hfs_flush_raw(vol);
  if(ClassicHfsBeginTransaction(vol)<0)return -1;
  return ClassicHfsEndTransaction(vol,0);

@@ -199,6 +199,14 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 
 int main(int argc,char**argv){
     {
+        hfsdir dir = {0};
+        hfsdirent entry;
+        dir.dirid = HFS_CNID_ROOTDIR;
+        dir.n.nnum = dir.n.nd.ndFLink = 3;
+        must(hfs_readdir(&dir, &entry) < 0 && errno == EIO && dir.n.rnum == -1,
+             "directory enumeration rejects a self-linked leaf before reading it again");
+    }
+    {
         hfsvol volume = {0};
         volume.flags = HFS_UPDATE_ALTMDB;
         volume.vlen = 4;
@@ -1145,6 +1153,10 @@ int main(int argc,char**argv){
   must(ClassicHfsResolvePath(v, ":", &entry, NULL, NULL, NULL) < 0 && errno == EIO &&
        ClassicHfsResolvePath(v, "::PathOther", &entry, NULL, NULL, NULL) < 0 && errno == EIO,
        "reject misdirected thread for current and parent-relative paths");
+  long savedId = v->cwd;
+  char unchanged[32] = "original";
+  must(hfs_dirinfo(v, &savedId, unchanged) < 0 && errno == EIO && savedId == v->cwd &&
+       !strcmp(unchanged, "original"), "directory info preserves outputs for misdirected thread");
   unsigned long oldFiles = v->mdb.drFilCnt;
   must(ClassicHfsAdjustEntryCount(v, v->cwd, 0, 1) < 0 && errno == EIO &&
        v->mdb.drFilCnt == oldFiles, "misdirected thread cannot change parent or volume count");
