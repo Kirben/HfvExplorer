@@ -681,153 +681,6 @@ int hfs_fsetattr(hfsfile *file, hfsdirent *ent)
 }
 
 /*
- * NAME:	hfs->rmdir()
- * DESCRIPTION:	delete an empty directory
- */
-static int hfs_rmdir_impl(hfsvol *vol, char *path)
-{
-  CatDataRec data;
-  long parid;
-  char name[HFS_MAX_FLEN + 1];
-  unsigned char pkey[HFS_CATKEYLEN];
-
-  if (ClassicHfsCurrentVolume(&vol) < 0 ||
-      ClassicHfsResolvePath(vol, path, &data, &parid, name, 0) <= 0)
-    return -1;
-
-  if (data.cdrType != cdrDirRec)
-    {
-      ERROR(ENOTDIR, 0);
-      return -1;
-    }
-
-  if (data.u.dir.dirVal != 0)
-    {
-      ERROR(ENOTEMPTY, 0);
-      return -1;
-    }
-
-  if (parid == HFS_CNID_ROOTPAR)
-    {
-      ERROR(EINVAL, 0);
-      return -1;
-    }
-
-  if (vol->flags & HFS_READONLY)
-    {
-      ERROR(EROFS, 0);
-      return -1;
-    }
-
-  /* delete directory record */
-
-  if (ClassicHfsWriteCatalogKey(pkey, parid, name) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-
-  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0)
-    return -1;
-
-  /* delete thread record */
-
-  ClassicHfsWriteCatalogKey(pkey, data.u.dir.dirDirID, "");
-
-  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
-      ClassicHfsAdjustEntryCount(vol, parid, 1, -1) < 0)
-    return -1;
-
-  return 0;
-}
-
-/*
- * NAME:	hfs->delete()
- * DESCRIPTION:	remove both forks of a file
- */
-static int hfs_delete_impl(hfsvol *vol, char *path)
-{
-  hfsfile file;
-  unsigned char pkey[HFS_CATKEYLEN];
-  int found;
-
-  if (ClassicHfsCurrentVolume(&vol) < 0 ||
-      ClassicHfsResolvePath(vol, path, &file.cat, &file.parid, file.name, 0) <= 0)
-    return -1;
-
-  if (file.cat.cdrType != cdrFilRec)
-    {
-      ERROR(EISDIR, 0);
-      return -1;
-    }
-
-  if (file.parid == HFS_CNID_ROOTPAR)
-    {
-      ERROR(EINVAL, 0);
-      return -1;
-    }
-
-  if (vol->flags & HFS_READONLY)
-    {
-      ERROR(EROFS, 0);
-      return -1;
-    }
-
-  /* There is no orphan-inode mechanism: freeing an open fork would let
-     later I/O overwrite blocks already reassigned to another file. */
-  {
-    hfsfile *opened;
-    for (opened = vol->files; opened; opened = opened->next)
-      if (opened->cat.u.fil.filFlNum == file.cat.u.fil.filFlNum) {
-        ERROR(EBUSY, "file is open; close it before deleting");
-        return -1;
-      }
-  }
-
-  /* free disk blocks */
-
-  file.vol   = vol;
-  file.flags = 0;
-
-  file.cat.u.fil.filLgLen  = 0;
-  file.cat.u.fil.filRLgLen = 0;
-
-  ClassicHfsSelectFork(&file, 0);
-  if (ClassicHfsTrimForkAllocation(&file) < 0)
-    return -1;
-
-  ClassicHfsSelectFork(&file, 1);
-  if (ClassicHfsTrimForkAllocation(&file) < 0)
-    return -1;
-
-  /* delete file record */
-
-  if (ClassicHfsWriteCatalogKey(pkey, file.parid, file.name) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-
-  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
-      ClassicHfsAdjustEntryCount(vol, file.parid, 0, -1) < 0)
-    return -1;
-
-  /* delete file thread, if any */
-
-  found = v_getfthread(vol, file.cat.u.fil.filFlNum, 0, 0);
-  if (found < 0)
-    return -1;
-
-  if (found)
-    {
-      ClassicHfsWriteCatalogKey(pkey, file.cat.u.fil.filFlNum, "");
-
-      if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0)
-	return -1;
-    }
-
-  return 0;
-}
-
-/*
  * NAME:	hfs->rename()
  * DESCRIPTION:	change the name of and/or move a file or directory
  */
@@ -1038,22 +891,12 @@ static int mutation_source(hfsvol **vol,char *path) {
  if(found==0)ERROR(ENOENT,"HFS entry not found");
  return found>0?0:-1;
 }
-int hfs_delete(hfsvol *vol,char *path) {
- int result;
- if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
- result=hfs_delete_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
-}
 int hfs_rename(hfsvol *vol,char *source,char *destination) {
  int result;
  if(mutation_source(&vol,source)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
  result=hfs_rename_impl(vol,source,destination);return ClassicHfsEndTransaction(vol,result);
 }
 
-int hfs_rmdir(hfsvol *vol,char *path) {
- int result;
- if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
- result=hfs_rmdir_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
-}
 int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
  int result;hfsdirent source,target;
  if(mutation_source(&vol,path)<0)return -1;

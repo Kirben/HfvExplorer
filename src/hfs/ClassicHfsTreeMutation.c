@@ -600,3 +600,117 @@ int hfs_mkdir(hfsvol *volume, char *path)
 {
     return create_catalog_path(volume, path, NULL, NULL);
 }
+
+// Children sort immediately after their directory thread. Check the first
+// successor even when the directory record claims a zero valence.
+static int verify_empty_directory(hfsvol *volume, node *leaf, long id)
+{
+    int slot = leaf->rnum + 1;
+    if (slot == leaf->nd.ndNRecs) {
+        unsigned long previous = leaf->nnum;
+        if (!leaf->nd.ndFLink && previous == volume->cat.hdr.bthLNode)
+            return 0;
+        if (!leaf->nd.ndFLink || leaf->nd.ndFLink == previous || previous == volume->cat.hdr.bthLNode)
+            goto invalid;
+        leaf->nnum = leaf->nd.ndFLink;
+        if (ClassicHfsReadTreeNode(leaf) < 0)
+            return -1;
+        if (leaf->nd.ndType != -1 || leaf->nd.ndNHeight != 1 || leaf->nd.ndBLink != previous)
+            goto invalid;
+        slot = 0;
+    }
+    CatKeyRec key;
+    if (!ClassicHfsReadLeafEntry(leaf->data, leaf->roff, leaf->nd.ndNRecs, slot, &key, NULL))
+        goto invalid;
+    if (key.ckrParID == (uint32_t)id) {
+        ERROR(ENOTEMPTY, "classic HFS catalog still contains directory children");
+        return -1;
+    }
+    if (key.ckrParID > (uint32_t)id)
+        return 0;
+invalid:
+    ERROR(EIO, "invalid classic HFS catalog order or leaf link");
+    return -1;
+}
+
+static int remove_catalog_records(hfsvol *volume, hfsfile *item, int directory, int hasThread)
+{
+    long id = directory ? item->cat.u.dir.dirDirID : item->cat.u.fil.filFlNum;
+    if (!directory) {
+        item->cat.u.fil.filLgLen = item->cat.u.fil.filRLgLen = 0;
+        for (int fork = 0; fork < 2; ++fork) {
+            ClassicHfsSelectFork(item, fork);
+            if (ClassicHfsTrimForkAllocation(item) < 0)
+                return -1;
+        }
+    }
+    unsigned char key[HFS_CATKEYLEN];
+    if (ClassicHfsWriteCatalogKey(key, item->parid, item->name) < 0 ||
+        ClassicHfsDeleteTreeKey(&volume->cat, key) < 0)
+        return -1;
+    if (hasThread) {
+        ClassicHfsWriteCatalogKey(key, id, "");
+        if (ClassicHfsDeleteTreeKey(&volume->cat, key) < 0)
+            return -1;
+    }
+    return ClassicHfsAdjustEntryCount(volume, item->parid, directory, -1);
+}
+
+static int remove_catalog_path(hfsvol *volume, char *path, int directory)
+{
+    hfsfile item = {0};
+    if (ClassicHfsCurrentVolume(&volume) < 0)
+        return -1;
+    item.vol = volume;
+    int found = ClassicHfsResolvePath(volume, path, &item.cat, &item.parid, item.name, NULL);
+    if (!found) {
+        ERROR(ENOENT, "classic HFS entry not found");
+        return -1;
+    }
+    if (found < 0)
+        return -1;
+    if (item.cat.cdrType != (directory ? cdrDirRec : cdrFilRec)) {
+        ERROR(directory ? ENOTDIR : EISDIR, "unexpected classic HFS entry type");
+        return -1;
+    }
+    if (item.parid == HFS_CNID_ROOTPAR) {
+        ERROR(EINVAL, "cannot remove classic HFS root");
+        return -1;
+    }
+    long id = directory ? item.cat.u.dir.dirDirID : item.cat.u.fil.filFlNum;
+    if (directory && item.cat.u.dir.dirVal) {
+        ERROR(ENOTEMPTY, "classic HFS directory is not empty");
+        return -1;
+    }
+    if (!directory) {
+        for (hfsfile *openFile = volume->files; openFile; openFile = openFile->next)
+            if (openFile->cat.u.fil.filFlNum == id) {
+                ERROR(EBUSY, "file is open; close it before deleting");
+                return -1;
+            }
+    }
+    CatDataRec thread;
+    node leaf;
+    int hasThread = ClassicHfsFindCatalogThread(volume, id, &thread, &leaf, directory ? cdrThdRec : cdrFThdRec);
+    if (hasThread < 0)
+        return -1;
+    if ((!hasThread && directory) || (hasThread && (thread.u.dthd.thdParID != item.parid ||
+        ClassicHfsCompareNames(thread.u.dthd.thdCName, item.name)))) {
+        ERROR(EIO, "classic HFS thread does not identify the entry being removed");
+        return -1;
+    }
+    if ((directory && verify_empty_directory(volume, &leaf, id) < 0) || ClassicHfsBeginTransaction(volume) < 0)
+        return -1;
+    int result = remove_catalog_records(volume, &item, directory, hasThread);
+    return ClassicHfsEndTransaction(volume, result);
+}
+
+int hfs_delete(hfsvol *volume, char *path)
+{
+    return remove_catalog_path(volume, path, 0);
+}
+
+int hfs_rmdir(hfsvol *volume, char *path)
+{
+    return remove_catalog_path(volume, path, 1);
+}

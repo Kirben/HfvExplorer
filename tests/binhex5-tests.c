@@ -1150,6 +1150,18 @@ int main(int argc,char**argv){
  must(hfs_format(image,-1,label)<0 && errno==EINVAL,"negative partition cannot select a whole-image format");
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  {
+  CatDataRec folder;
+  node slot;
+  must(hfs_mkdir(v, ":CountTest") == 0 && hfs_create(v, ":CountTest:Child", "TEXT", "TEST") == 0 &&
+       ClassicHfsResolvePath(v, ":CountTest", &folder, NULL, NULL, &slot) == 1, "create nonempty directory fixture");
+  folder.u.dir.dirVal = 0;
+  must(ClassicHfsStoreCatalogEntry(&folder, &slot) == 0 && hfs_rmdir(v, ":CountTest") < 0 &&
+       errno == ENOTEMPTY, "zero valence cannot orphan a live catalog child");
+  folder.u.dir.dirVal = 1;
+  must(ClassicHfsStoreCatalogEntry(&folder, &slot) == 0 && hfs_delete(v, ":CountTest:Child") == 0 &&
+       hfs_rmdir(v, ":CountTest") == 0, "child and parent remain independently removable");
+ }
+ {
   uint32_t nextId = v->mdb.drNxtCNID;
   must(hfs_mkdir(v, ":MissingParent:Nested") < 0 && errno == ENOENT &&
        hfs_create(v, ":MissingParent:Nested", "TEXT", "TEST") < 0 && errno == ENOENT &&
