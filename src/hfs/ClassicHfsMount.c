@@ -38,7 +38,7 @@
 #include "libhfs/volume.h"
 #include "libhfs/block.h"
 #include "libhfs/file.h"
-#include "libhfs/btree.h"
+#include "ClassicHfsTreeLookup.h"
 #include "ClassicHfsCatalogKey.h"
 #include "ClassicHfsExtentKey.h"
 #include "ClassicHfsGeometry.h"

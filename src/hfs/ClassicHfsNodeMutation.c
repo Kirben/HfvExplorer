@@ -23,8 +23,8 @@
 
 # include "libhfs/internal.h"
 #include "ClassicHfsBytes.h"
-# include "libhfs/btree.h"
-# include "libhfs/node.h"
+# include "ClassicHfsTreeLookup.h"
+# include "ClassicHfsTreeNodes.h"
 
 int ClassicHfsBuildSeparator(node *child, unsigned char *record, unsigned capacity, int *length)
 {

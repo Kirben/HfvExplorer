@@ -27,7 +27,7 @@
 #include "ClassicHfsNodeIO.h"
 # include "libhfs/block.h"
 # include "libhfs/file.h"
-# include "libhfs/btree.h"
+# include "ClassicHfsTreeLookup.h"
 # include "libhfs/volume.h"
 #include "ClassicHfsVolumeAllocation.h"
 

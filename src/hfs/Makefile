@@ -171,9 +171,9 @@ DIST_FILES += $(DOCDIR)/hfsutils.inf
 endif
 
 LIBHFS_SRC = ClassicHfsEntry.h ClassicHfsCatalogRecord.h ClassicHfsCatalogFile.h ClassicHfsDirectory.h ClassicHfsCatalogThread.h ClassicHfsPath.h ClassicHfsForkIO.h ClassicHfsCache.h ClassicHfsSectorIO.h ClassicHfsNodeIO.h ClassicHfsGeometry.h ClassicHfsBitmap.h ClassicHfsTreeHeader.h ClassicHfsNode.h ClassicHfsExtents.h ClassicHfsCatalogKey.h ClassicHfsExtentKey.h ClassicHfsBytes.h ClassicHfsRecordBytes.h ClassicHfsNames.h ClassicHfsTime.c ClassicHfsTime.h $(addprefix $(LIBHFS_DIR)/, \
-	../ClassicHfsVolumeIO.c block.h ../ClassicHfsMetadata.c ../ClassicHfsTreeMutation.c btree.h \
+	../ClassicHfsVolumeIO.c block.h ../ClassicHfsMetadata.c ../ClassicHfsTreeMutation.c ../ClassicHfsTreeLookup.h \
 	../ClassicHfsForkStorage.c file.h ../ClassicHfsMount.c hfs.h internal.h \
-	../ClassicHfsNodeMutation.c node.h volume.h \
+	../ClassicHfsNodeMutation.c ../ClassicHfsTreeNodes.h volume.h \
 	Makefile)
 
 DOC_SRC = $(addprefix $(DOCDIR)/, \

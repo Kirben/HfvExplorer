@@ -3,7 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include "libhfs/internal.h"
-#include "libhfs/btree.h"
+#include "ClassicHfsTreeLookup.h"
 #include "libhfs/volume.h"
 #include "ClassicHfsGeometry.h"
 

@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+int ClassicHfsTransferTreeCursor(node *, int writing);
+
+static inline int ClassicHfsReadTreeNode(node *cursor)
+{
+    return ClassicHfsTransferTreeCursor(cursor, 0);
+}
+
+static inline int ClassicHfsWriteTreeNode(node *cursor)
+{
+    return ClassicHfsTransferTreeCursor(cursor, 1);
+}
+
+
+int ClassicHfsReserveTreeSpace(btree *, unsigned int);
+
+int ClassicHfsInsertTreeRecord(btree *, const unsigned char *, int);
+
+int ClassicHfsDeleteTreeKey(btree *, unsigned char *);
+
 // Keep the last visited node and predecessor slot available to callers.
 static inline int ClassicHfsFindTreeKey(btree *tree, unsigned char *key, node *cursor)
 {

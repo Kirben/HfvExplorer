@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+
+int ClassicHfsBuildSeparator(node *, unsigned char *, unsigned, int *);
+
+int ClassicHfsInsertAtCursor(node *, unsigned char *, int *);
+
+int ClassicHfsDeleteNodeRecord(node *, unsigned char *, unsigned, int *);
 #include <string.h>
 
 static inline void ClassicHfsInitTreeNode(node *cursor, btree *tree, int type, unsigned height)

@@ -22,7 +22,7 @@
 #include "libhfs/internal.h"
 #include "libhfs/block.h"
 #include "libhfs/file.h"
-#include "libhfs/btree.h"
+#include "ClassicHfsTreeLookup.h"
 #include "libhfs/volume.h"
 #include "ClassicHfsVolumeBitmap.h"
 #include "ClassicHfsTreeFlush.h"
