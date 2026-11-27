@@ -2056,8 +2056,8 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 
       if (found)
 	{
-	  dst.u.fthd.fthdParID = dstid;
-	  strcpy(dst.u.fthd.fthdCName, dstname);
+	  dst.u.dthd.thdParID = dstid;
+	  strcpy(dst.u.dthd.thdCName, dstname);
 
 	  if (v_putcatrec(&dst, &n) < 0)
 	    return -1;

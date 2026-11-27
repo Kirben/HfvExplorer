@@ -9,6 +9,7 @@
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
+#include "hfs/ClassicHfsCatalogThread.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNodeIO.h"
 #include "hfs/ClassicHfsGeometry.h"
@@ -510,6 +511,17 @@ int main(int argc,char**argv){
   }
   record[keyBytes] = 9;
   must(!ClassicHfsCatalogPayload(record, sizeof(record), NULL), "reject unknown catalog type");
+ }
+ {
+  unsigned char body[45], encoded[45];
+  ClassicHfsCatalogThread thread;
+  for (unsigned i=0;i<sizeof(body);++i) body[i]=(unsigned char)(0x80+i);
+  body[12]=31;
+  ClassicHfsDecodeThread(body,&thread);
+  memset(encoded,0,sizeof(encoded));
+  ClassicHfsEncodeThread(encoded,&thread);
+  must(thread.thdParID==UINT32_C(0x88898a8b) && thread.thdCName[31]==0 &&
+       !memcmp(body,encoded,44) && encoded[44]==0, "thread reserved fields, parent and full MacRoman name");
  }
  {
   unsigned char source[106], output[107];

@@ -67,6 +67,8 @@ static inline int ClassicHfsCatalogPayload(const unsigned char *bytes, int avail
     }
     if (available - offset < size)
         return 0;
+    if ((bytes[offset] == 3 || bytes[offset] == 4) && bytes[offset + 14] > 31)
+        return 0;
     if (key)
         *key = decoded;
     return offset;

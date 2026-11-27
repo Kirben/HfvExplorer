@@ -34,6 +34,7 @@
     ((n) ? REALLOC(type, n) : (FREE(ptr), (type *) 0))
 
 #include "../ClassicHfsBitmap.h"
+#include "../ClassicHfsCatalogThread.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
@@ -213,16 +214,7 @@ typedef struct {
 		filRExtRec;	/* first resource fork extent record */
       LongInt	filResrv;	/* reserved */
     } fil;
-    struct {  /* cdrThdRec */
-      LongInt	thdResrv[2];	/* reserved */
-      ULongInt	thdParID;	/* parent ID for this directory */
-      Str31	thdCName;	/* name of this directory */
-    } dthd;
-    struct {  /* cdrFThdRec */
-      LongInt	fthdResrv[2];	/* reserved */
-      ULongInt	fthdParID;	/* parent ID for this file */
-      Str31	fthdCName;	/* name of this file */
-    } fthd;
+    ClassicHfsCatalogThread dthd; /* directory or file thread */
   } u;
 } CatDataRec;
 #pragma pack()

@@ -111,19 +111,9 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
       break;
 
     case cdrThdRec:
-      for (i = 0; i < 2; ++i)
-	ClassicHfsAppend32(&pdata, data->u.dthd.thdResrv[i]);
-
-      ClassicHfsAppend32(&pdata, data->u.dthd.thdParID);
-      ClassicHfsAppendName(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
-      break;
-
     case cdrFThdRec:
-      for (i = 0; i < 2; ++i)
-	ClassicHfsAppend32(&pdata, data->u.fthd.fthdResrv[i]);
-
-      ClassicHfsAppend32(&pdata, data->u.fthd.fthdParID);
-      ClassicHfsAppendName(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
+      ClassicHfsEncodeThread(pdata, &data->u.dthd);
+      pdata += ClassicHfsThreadBodySize;
       break;
 
 # ifdef DEBUG
@@ -219,19 +209,8 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
       break;
 
     case cdrThdRec:
-      for (i = 0; i < 2; ++i)
-	data->u.dthd.thdResrv[i] = ClassicHfsTake32(&pdata);
-
-      data->u.dthd.thdParID = ClassicHfsTake32(&pdata);
-      ClassicHfsTakeName(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
-      break;
-
     case cdrFThdRec:
-      for (i = 0; i < 2; ++i)
-	data->u.fthd.fthdResrv[i] = ClassicHfsTake32(&pdata);
-
-      data->u.fthd.fthdParID = ClassicHfsTake32(&pdata);
-      ClassicHfsTakeName(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
+      ClassicHfsDecodeThread(pdata, &data->u.dthd);
       break;
 
 # ifdef DEBUG
