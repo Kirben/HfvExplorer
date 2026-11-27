@@ -40,7 +40,8 @@
 # include <string.h>
 
 # include "libhfs\hfs.h"
-# include "libhfs\data.h"
+#include "ClassicHfsTime.h"
+#include "ClassicHfsBytes.h"
 # include "copyout.h"
 # include "binhex.h"
 # include "macbinary.h"
@@ -210,8 +211,8 @@ int do_macb(hfsfile *ifile, int ofile, int version, const unsigned char *finder)
   ClassicHfsWrite32(&buf[83], ent.u.file.dsize);
   ClassicHfsWrite32(&buf[87], ent.u.file.rsize);
 
-  ClassicHfsWrite32(&buf[91], d_tomtime(ent.crdate));
-  ClassicHfsWrite32(&buf[95], d_tomtime(ent.mddate));
+  ClassicHfsWrite32(&buf[91], ClassicHfsFromUnixSeconds(ent.crdate));
+  ClassicHfsWrite32(&buf[95], ClassicHfsFromUnixSeconds(ent.mddate));
 
   ClassicHfsWrite16(buf + 75, ent.fdlocation.v);
   ClassicHfsWrite16(buf + 77, ent.fdlocation.h);

@@ -16,7 +16,7 @@
   </ItemDefinitionGroup>
 <ItemGroup><ClCompile Include="..\src\hfs\libhfs\block.c" />
 <ClCompile Include="..\src\hfs\libhfs\btree.c" />
-<ClCompile Include="..\src\hfs\libhfs\data.c" />
+<ClCompile Include="..\src\hfs\ClassicHfsTime.c" />
 <ClCompile Include="..\src\hfs\libhfs\file.c" />
 <ClCompile Include="..\src\hfs\libhfs\hfs.c" />
 <ClCompile Include="..\src\hfs\libhfs\low.c" />

@@ -60,7 +60,7 @@
     <ClCompile Include="hfs\copyin.c" />
     <ClCompile Include="hfs\copyout.c" />
     <ClCompile Include="hfs\crc.c" />
-    <ClCompile Include="hfs\libhfs\data.c" />
+    <ClCompile Include="hfs\ClassicHfsTime.c" />
     <ClCompile Include="hfs\libhfs\file.c" />
     <ClCompile Include="hfs\hcopy.c" />
     <ClCompile Include="hfs\hcwd.c" />

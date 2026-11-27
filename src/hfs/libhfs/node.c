@@ -22,7 +22,7 @@
 # include <errno.h>
 
 # include "internal.h"
-# include "data.h"
+#include "../ClassicHfsBytes.h"
 # include "btree.h"
 # include "node.h"
 

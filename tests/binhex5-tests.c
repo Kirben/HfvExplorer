@@ -9,6 +9,7 @@
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsNames.h"
+#include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
 #include "hfs/crc.h"
@@ -49,6 +50,16 @@ int main(int argc,char**argv){
   must(!name[0] && cursor == fields + 4, "invalid name consumes its field");
   ClassicHfsTakeName(&cursor, name, sizeof(name));
   must(!strcmp(name, "X") && ClassicHfsTake16(&cursor) == 0xfedc, "following fields stay aligned");
+ }
+ {
+  time_t now = time(NULL);
+  struct tm utc = *gmtime(&now);
+  utc.tm_isdst = localtime(&now)->tm_isdst;
+  uint32_t epoch = (uint32_t)(INT64_C(2082844800) + now - mktime(&utc));
+  must(ClassicHfsFromUnixSeconds(0) == epoch && ClassicHfsToUnixSeconds(epoch) == 0,
+       "classic local epoch compatibility");
+  must(ClassicHfsFromUnixSeconds(ClassicHfsToUnixSeconds(UINT32_MAX)) == UINT32_MAX &&
+       ClassicHfsFromUnixSeconds(ClassicHfsToUnixSeconds(0)) == 0, "classic date limits");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

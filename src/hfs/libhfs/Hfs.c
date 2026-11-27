@@ -54,7 +54,8 @@
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
 #endif
-# include "data.h"
+#include "../ClassicHfsTime.h"
+#include "../ClassicHfsBytes.h"
 # include "block.h"
 # include "low.h"
 # include "file.h"
@@ -564,9 +565,9 @@ int hfs_vstat(hfsvol *vol, hfsvolent *ent)
   ent->numfiles  = vol->mdb.drFilCnt;
   ent->numdirs   = vol->mdb.drDirCnt;
 
-  ent->crdate    = d_toutime(vol->mdb.drCrDate);
-  ent->mddate    = d_toutime(vol->mdb.drLsMod);
-  ent->bkdate    = d_toutime(vol->mdb.drVolBkUp);
+  ent->crdate    = ClassicHfsToUnixSeconds(vol->mdb.drCrDate);
+  ent->mddate    = ClassicHfsToUnixSeconds(vol->mdb.drLsMod);
+  ent->bkdate    = ClassicHfsToUnixSeconds(vol->mdb.drVolBkUp);
 
   return 0;
 }
@@ -685,7 +686,7 @@ int hfs_format(char *path, int pnum, char *vname)
   vbmsz = (vol.vlen / vol.lpa + 4095) / 4096;
 
   vol.mdb.drSigWord  = HFS_SIGWORD;
-  vol.mdb.drCrDate   = d_tomtime(time(0));
+  vol.mdb.drCrDate   = ClassicHfsFromUnixSeconds(time(0));
   vol.mdb.drLsMod    = vol.mdb.drCrDate;
   vol.mdb.drAtrb     = 0;
   vol.mdb.drNmFls    = 0;
@@ -1447,7 +1448,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
 
   if (count)
     {
-      file->cat.u.fil.filMdDat = d_tomtime(time(0));
+      file->cat.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(0));
       file->flags |= HFS_UPDATE_CATREC;
     }
 
@@ -1520,7 +1521,7 @@ static int hfs_truncate_impl(hfsfile *file, unsigned long len)
 
       *lglen = len;
 
-      file->cat.u.fil.filMdDat = d_tomtime(time(0));
+      file->cat.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(0));
       file->flags |= HFS_UPDATE_CATREC;
 
       if (file->pos > len)
@@ -1843,7 +1844,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
   data.u.fil.filRStBlk = 0;
   data.u.fil.filRLgLen = 0;
   data.u.fil.filRPyLen = 0;
-  data.u.fil.filCrDat  = d_tomtime(time(0));
+  data.u.fil.filCrDat  = ClassicHfsFromUnixSeconds(time(0));
   data.u.fil.filMdDat  = data.u.fil.filCrDat;
   data.u.fil.filBkDat  = 0;
 
@@ -2236,7 +2237,7 @@ int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char 
  if(v_resolve(vol,path,&data,0,0,&n)<=0)goto done;
  if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
  if(finder){r_packcatdata(&data,raw,&length);memcpy(raw+22,finder,32);r_unpackcatdata(raw,&data);}
- if(dates){data.u.dir.dirCrDat=d_tomtime(dates[0]);data.u.dir.dirMdDat=d_tomtime(dates[1]);}
+ if(dates){data.u.dir.dirCrDat=ClassicHfsFromUnixSeconds(dates[0]);data.u.dir.dirMdDat=ClassicHfsFromUnixSeconds(dates[1]);}
  if(backup)data.u.dir.dirBkDat=*backup;
  result=v_putcatrec(&data,&n);
  done:return b_end_mutation(vol,result);

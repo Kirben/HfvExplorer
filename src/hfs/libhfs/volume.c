@@ -24,7 +24,7 @@
 
 # include "../ClassicHfsNames.h"
 # include "internal.h"
-# include "data.h"
+#include "../ClassicHfsTime.h"
 # include "low.h"
 # include "btree.h"
 # include "record.h"
@@ -571,7 +571,7 @@ int v_adjvalence(hfsvol *vol, long parid, int isdir, int adj)
     }
 
   data.u.dir.dirVal  += adj;
-  data.u.dir.dirMdDat = d_tomtime(time(0));
+  data.u.dir.dirMdDat = ClassicHfsFromUnixSeconds(time(0));
 
   return v_putcatrec(&data, &n);
 }
@@ -602,7 +602,7 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   data.u.dir.dirFlags = 0;
   data.u.dir.dirVal   = 0;
   data.u.dir.dirDirID = id;
-  data.u.dir.dirCrDat = d_tomtime(time(0));
+  data.u.dir.dirCrDat = ClassicHfsFromUnixSeconds(time(0));
   data.u.dir.dirMdDat = data.u.dir.dirCrDat;
   data.u.dir.dirBkDat = 0;
 

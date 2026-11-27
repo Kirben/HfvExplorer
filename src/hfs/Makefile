@@ -170,8 +170,8 @@ ifndef WIN32
 DIST_FILES += $(DOCDIR)/hfsutils.inf
 endif
 
-LIBHFS_SRC = $(addprefix $(LIBHFS_DIR)/, \
-	block.c block.h btree.c btree.h data.c data.h \
+LIBHFS_SRC = ClassicHfsBytes.h ClassicHfsRecordBytes.h ClassicHfsNames.h ClassicHfsTime.c ClassicHfsTime.h $(addprefix $(LIBHFS_DIR)/, \
+	block.c block.h btree.c btree.h \
 	file.c file.h hfs.c hfs.h internal.h low.c low.h \
 	node.c node.h record.c record.h volume.c volume.h \
 	os2open.c os2open.h \
@@ -221,8 +221,8 @@ $(DIST_ARCHIVE): $(DIST_FILES)
 ### DEPENDENCIES FOLLOW #######################################################
 
 $(BINDIR)/binhex.o: binhex.c binhex.h crc.h
-$(BINDIR)/copyin.o: copyin.c libhfs/hfs.h libhfs/data.h copyin.h binhex.h crc.h
-$(BINDIR)/copyout.o: copyout.c libhfs/hfs.h libhfs/data.h copyout.h binhex.h \
+$(BINDIR)/copyin.o: copyin.c libhfs/hfs.h ClassicHfsBytes.h ClassicHfsTime.h copyin.h binhex.h crc.h
+$(BINDIR)/copyout.o: copyout.c libhfs/hfs.h ClassicHfsBytes.h ClassicHfsTime.h copyout.h binhex.h \
  crc.h
 $(BINDIR)/crc.o: crc.c crc.h
 $(BINDIR)/darray.o: darray.c darray.h

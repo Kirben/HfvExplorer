@@ -22,7 +22,8 @@
 
 # include "../ClassicHfsNames.h"
 # include "internal.h"
-# include "data.h"
+#include "../ClassicHfsTime.h"
+#include "../ClassicHfsBytes.h"
 # include "../ClassicHfsRecordBytes.h"
 # include "record.h"
 
@@ -437,9 +438,9 @@ void r_unpackdirent(long parid, char *name, CatDataRec *data, hfsdirent *ent)
       ent->flags = HFS_ISDIR;
       ent->cnid  = data->u.dir.dirDirID;
 
-      ent->crdate = d_toutime(data->u.dir.dirCrDat);
-      ent->mddate = d_toutime(data->u.dir.dirMdDat);
-      ent->bkdate = d_toutime(data->u.dir.dirBkDat);
+      ent->crdate = ClassicHfsToUnixSeconds(data->u.dir.dirCrDat);
+      ent->mddate = ClassicHfsToUnixSeconds(data->u.dir.dirMdDat);
+      ent->bkdate = ClassicHfsToUnixSeconds(data->u.dir.dirBkDat);
 
       ent->fdflags      = data->u.dir.dirUsrInfo.frFlags;
       ent->fdlocation.v = data->u.dir.dirUsrInfo.frLocation.v;
@@ -458,9 +459,9 @@ void r_unpackdirent(long parid, char *name, CatDataRec *data, hfsdirent *ent)
       ent->flags = (data->u.fil.filFlags & (1 << 0)) ? HFS_ISLOCKED : 0;
       ent->cnid  = data->u.fil.filFlNum;
 
-      ent->crdate = d_toutime(data->u.fil.filCrDat);
-      ent->mddate = d_toutime(data->u.fil.filMdDat);
-      ent->bkdate = d_toutime(data->u.fil.filBkDat);
+      ent->crdate = ClassicHfsToUnixSeconds(data->u.fil.filCrDat);
+      ent->mddate = ClassicHfsToUnixSeconds(data->u.fil.filMdDat);
+      ent->bkdate = ClassicHfsToUnixSeconds(data->u.fil.filBkDat);
 
       ent->fdflags      = data->u.fil.filUsrWds.fdFlags;
       ent->fdlocation.v = data->u.fil.filUsrWds.fdLocation.v;
@@ -489,9 +490,9 @@ void r_packdirent(CatDataRec *data, hfsdirent *ent)
   switch (data->cdrType)
     {
     case cdrDirRec:
-      data->u.dir.dirCrDat = d_tomtime(ent->crdate);
-      data->u.dir.dirMdDat = d_tomtime(ent->mddate);
-      data->u.dir.dirBkDat = d_tomtime(ent->bkdate);
+      data->u.dir.dirCrDat = ClassicHfsFromUnixSeconds(ent->crdate);
+      data->u.dir.dirMdDat = ClassicHfsFromUnixSeconds(ent->mddate);
+      data->u.dir.dirBkDat = ClassicHfsFromUnixSeconds(ent->bkdate);
 
       data->u.dir.dirUsrInfo.frFlags      = ent->fdflags;
       data->u.dir.dirUsrInfo.frLocation.v = ent->fdlocation.v;
@@ -510,9 +511,9 @@ void r_packdirent(CatDataRec *data, hfsdirent *ent)
       else
 	data->u.fil.filFlags &= ~(1 << 0);
 
-      data->u.fil.filCrDat = d_tomtime(ent->crdate);
-      data->u.fil.filMdDat = d_tomtime(ent->mddate);
-      data->u.fil.filBkDat = d_tomtime(ent->bkdate);
+      data->u.fil.filCrDat = ClassicHfsFromUnixSeconds(ent->crdate);
+      data->u.fil.filMdDat = ClassicHfsFromUnixSeconds(ent->mddate);
+      data->u.fil.filBkDat = ClassicHfsFromUnixSeconds(ent->bkdate);
 
       data->u.fil.filUsrWds.fdFlags      = ent->fdflags;
       data->u.fil.filUsrWds.fdLocation.v = ent->fdlocation.v;

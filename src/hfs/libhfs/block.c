@@ -41,7 +41,7 @@
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
 #endif
-# include "data.h"
+#include "../ClassicHfsTime.h"
 # include "block.h"
 # include "low.h"
 
@@ -708,7 +708,7 @@ int b_writeab(hfsvol *vol,
     }
 
   vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
-  vol->mdb.drLsMod = d_tomtime(time(0));
+  vol->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));
   ++vol->mdb.drWrCnt;
 
   vol->flags |= HFS_UPDATE_MDB;

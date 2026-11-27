@@ -27,7 +27,7 @@ ARFLAGS =	rcs
 
 NAME =		libhfs
 TARGET =	$(NAME).a
-OBJS =		data.o block.o low.o file.o btree.o node.o record.o volume.o  \
+OBJS =		../ClassicHfsTime.o block.o low.o file.o btree.o node.o record.o volume.o  \
 		hfs.o os2open.o
 
 ###############################################################################
@@ -48,16 +48,16 @@ $(TARGET): $(OBJS)
 
 ### DEPENDENCIES FOLLOW #######################################################
 
-block.o: block.c internal.h hfs.h data.h block.h low.h
-btree.o: btree.c internal.h hfs.h data.h block.h file.h btree.h node.h
-data.o: data.c internal.h hfs.h data.h btree.h
-file.o: file.c internal.h hfs.h data.h block.h file.h btree.h record.h \
+block.o: block.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h low.h
+btree.o: btree.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h node.h
+../ClassicHfsTime.o: ../ClassicHfsTime.c ../ClassicHfsTime.h
+file.o: file.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h record.h \
  volume.h
-hfs.o: hfs.c internal.h hfs.h data.h block.h low.h file.h btree.h \
+hfs.o: hfs.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h low.h file.h btree.h \
  node.h record.h volume.h os2open.h
-low.o: low.c internal.h hfs.h data.h block.h low.h file.h
-node.o: node.c internal.h hfs.h data.h btree.h node.h
-record.o: record.c internal.h hfs.h data.h record.h
-volume.o: volume.c internal.h hfs.h data.h low.h btree.h record.h \
+low.o: low.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h low.h file.h
+node.o: node.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h btree.h node.h
+record.o: record.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h record.h
+volume.o: volume.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h low.h btree.h record.h \
  volume.h
 os2open.c: os2open.h

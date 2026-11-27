@@ -34,7 +34,6 @@
 # include <fcntl.h>
 
 # include "internal.h"
-# include "data.h"
 # include "../ClassicHfsRecordBytes.h"
 # include "block.h"
 # include "low.h"

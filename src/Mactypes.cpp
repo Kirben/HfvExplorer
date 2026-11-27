@@ -29,7 +29,7 @@
 #include "utils.h"
 
 extern "C" {
-#include "hfs\libhfs\data.h"
+#include "hfs/ClassicHfsTime.h"
 }
 
 #include <time.h>
@@ -339,7 +339,7 @@ void mac_date_to_string( unsigned long date, char *buf )
 	time_t crdate;
 	char *p;
 
-	crdate = d_toutime(date);
+	crdate = ClassicHfsToUnixSeconds(date);
 	p = ctime( &crdate );
 
 	if(p) {

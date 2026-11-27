@@ -36,7 +36,8 @@
 # include <string.h>
 
 # include "libhfs\hfs.h"
-# include "libhfs\data.h"
+#include "ClassicHfsTime.h"
+#include "ClassicHfsBytes.h"
 # include "copyin.h"
 # include "copyout.h"
 # include "binhex.h"
@@ -602,8 +603,8 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   else ent.flags &= ~HFS_ISLOCKED;
   ent.fdlocation.v = ClassicHfsRead16(buf + 75);
   ent.fdlocation.h = ClassicHfsRead16(buf + 77);
-  ent.crdate = d_toutime(ClassicHfsRead32(&buf[91]));
-  ent.mddate = d_toutime(ClassicHfsRead32(&buf[95]));
+  ent.crdate = ClassicHfsToUnixSeconds(ClassicHfsRead32(&buf[91]));
+  ent.mddate = ClassicHfsToUnixSeconds(ClassicHfsRead32(&buf[95]));
 
   }
 
