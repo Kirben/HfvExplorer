@@ -128,7 +128,7 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
         --level;
         node *parent = level ? &children[level - 1] : root;
         if (parent->rnum < 0) {
-            result = n_index(current, HFS_NODEREC(*parent, 0), NULL);
+            result = ClassicHfsBuildSeparator(current, HFS_NODEREC(*parent, 0), parent->roff[1] - parent->roff[0], NULL);
             if (result < 0)
                 break;
             parent->rnum = 0;
@@ -178,7 +178,7 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
         if (length) {
             unsigned char left[HFS_MAXRECLEN];
             int leftLength;
-            if (n_index(&root, left, &leftLength) < 0)
+            if (ClassicHfsBuildSeparator(&root, left, sizeof(left), &leftLength) < 0)
                 return -1;
             if (tree->hdr.bthDepth >= INT8_MAX || tree->compare(left, record) >= 0) {
                 ERROR(EIO, "invalid classic HFS root split");
@@ -217,13 +217,14 @@ static int ClassicHfsDeleteAlongPath(node *root, unsigned depth, unsigned char *
         unsigned level = depth - height;
         node *parent = level > 1 ? &children[level - 2] : root;
         unsigned char *separator = level ? HFS_NODEREC(*parent, parent->rnum) : rootSeparator;
+        unsigned capacity = level ? parent->roff[parent->rnum + 1] - parent->roff[parent->rnum] : sizeof(rootSeparator);
         int changed = 0;
         if (removeRecord) {
-            if (ClassicHfsDeleteNodeRecord(current, separator, &changed) < 0)
+            if (ClassicHfsDeleteNodeRecord(current, separator, capacity, &changed) < 0)
                 goto done;
         } else {
             if (current->rnum == 0) {
-                if (n_index(current, separator, NULL) < 0)
+                if (ClassicHfsBuildSeparator(current, separator, capacity, NULL) < 0)
                     goto done;
                 changed = 1;
             }

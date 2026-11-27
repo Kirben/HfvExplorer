@@ -198,6 +198,20 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 
 int main(int argc,char**argv){
     {
+        hfsvol volume = {0};
+        node child = {0};
+        unsigned char dest[42], original[42];
+        memset(dest, 0xaa, sizeof(dest)); memcpy(original, dest, sizeof(dest));
+        child.bt = &volume.cat; volume.cat.f.vol = &volume;
+        child.nnum = 4; child.nd.ndNRecs = 1;
+        child.roff[0] = 14; child.roff[1] = 24; child.data[14] = 6;
+        must(ClassicHfsBuildSeparator(&child, dest, 41, NULL) < 0 &&
+             !memcmp(dest, original, sizeof(dest)), "short parent slot preserves adjacent separator bytes");
+        child.roff[1] = 12;
+        must(ClassicHfsBuildSeparator(&child, dest, sizeof(dest), NULL) < 0 &&
+             !memcmp(dest, original, sizeof(dest)), "invalid child offsets reject separator publication");
+    }
+    {
         ClassicHfsSectorUndo undo = {0};
         unsigned reads = 0;
         must(ClassicHfsCaptureSector(&undo, 0, &reads, capture_test_read) == ClassicHfsCaptureReadFailed &&

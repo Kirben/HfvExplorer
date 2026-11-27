@@ -21,27 +21,27 @@
 # include <string.h>
 # include <errno.h>
 
-# include "internal.h"
-#include "../ClassicHfsBytes.h"
-# include "btree.h"
-# include "node.h"
+# include "libhfs/internal.h"
+#include "ClassicHfsBytes.h"
+# include "libhfs/btree.h"
+# include "libhfs/node.h"
 
-/*
- * NAME:	node->index()
- * DESCRIPTION:	create an index record from a key and node pointer
- */
-int n_index(node *child, unsigned char *record, int *reclen)
+int ClassicHfsBuildSeparator(node *child, unsigned char *record, unsigned capacity, int *length)
 {
-  int catalog = child->bt == &child->bt->f.vol->cat;
-  int size = child->nd.ndNRecs ? ClassicHfsWriteIndexRecord(record, catalog ? 42 : 12,
-      HFS_NODEREC(*child, 0), child->roff[1] - child->roff[0], catalog, child->nnum) : 0;
-  if (!size) {
-    ERROR(EIO, "invalid classic HFS separator key");
-    return -1;
-  }
-  if (reclen)
-    *reclen = size;
-  return 0;
+    if (!child->nd.ndNRecs || !ClassicHfsValidOffsets(child->nd.ndNRecs, child->roff)) {
+        ERROR(EIO, "invalid classic HFS separator source offsets");
+        return -1;
+    }
+    int catalog = child->bt == &child->bt->f.vol->cat;
+    int size = ClassicHfsWriteIndexRecord(record, capacity, child->data + child->roff[0],
+        child->roff[1] - child->roff[0], catalog, child->nnum);
+    if (!size) {
+        ERROR(EIO, "invalid classic HFS separator key or destination size");
+        return -1;
+    }
+    if (length)
+        *length = size;
+    return 0;
 }
 
 // Load and validate the old forward link before publishing either sibling.
@@ -91,7 +91,7 @@ int ClassicHfsInsertAtCursor(node *cursor, unsigned char *record, int *length)
     int separatorLength;
     right.nd.ndBLink = left.nnum;
     if (prepare_successor(&next, &left, right.nnum) < 0 ||
-        n_index(&right, separator, &separatorLength) < 0) {
+        ClassicHfsBuildSeparator(&right, separator, sizeof(separator), &separatorLength) < 0) {
         ClassicHfsFreeTreeNode(&right);
         return -1;
     }
@@ -134,7 +134,7 @@ static int ClassicHfsFinishNodeMerge(node *right, node *left, unsigned char *rec
     return 0;
 }
 
-int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, int *changed)
+int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, unsigned capacity, int *changed)
 {
     node remaining = *current;
     if (!ClassicHfsRemoveNodeRecord(remaining.data, remaining.roff, &remaining.nd.ndNRecs,
@@ -159,7 +159,7 @@ int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, int *cha
     }
     unsigned char replacement[HFS_MAXRECLEN];
     int length = 0;
-    if (remaining.rnum == 0 && remaining.nd.ndNRecs && n_index(&remaining, replacement, &length) < 0)
+    if (remaining.rnum == 0 && remaining.nd.ndNRecs && ClassicHfsBuildSeparator(&remaining, replacement, capacity < sizeof(replacement) ? capacity : sizeof(replacement), &length) < 0)
         return -1;
     if (ClassicHfsWriteTreeNode(&remaining) < 0)
         return -1;

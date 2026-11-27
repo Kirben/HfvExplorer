@@ -20,8 +20,8 @@
 #include "../ClassicHfsTreeNodes.h"
 
 
-int n_index(node *, unsigned char *, int *);
+int ClassicHfsBuildSeparator(node *, unsigned char *, unsigned, int *);
 
 int ClassicHfsInsertAtCursor(node *, unsigned char *, int *);
 
-int ClassicHfsDeleteNodeRecord(node *, unsigned char *, int *);
+int ClassicHfsDeleteNodeRecord(node *, unsigned char *, unsigned, int *);
