@@ -287,20 +287,8 @@ int n_insert(node *np, unsigned char *record, int *reclen)
  * NAME:	node->merge()
  * DESCRIPTION:	combine two nodes into a single node
  */
-int n_merge(node *right, node *left, unsigned char *record, int *flag)
+static int finish_merge(node *right, node *left, unsigned char *record, int *flag)
 {
-  int i, offset;
-
-  /* copy records and offsets */
-
-  memcpy(HFS_NODEREC(*left, left->nd.ndNRecs), HFS_NODEREC(*right, 0),
-	 right->roff[right->nd.ndNRecs] - right->roff[0]);
-
-  offset = left->roff[left->nd.ndNRecs] - right->roff[0];
-
-  for (i = 1; i <= right->nd.ndNRecs; ++i)
-    left->roff[++left->nd.ndNRecs] = offset + right->roff[i];
-
   /* update link pointers */
 
   left->nd.ndFLink = right->nd.ndFLink;
@@ -363,10 +351,14 @@ int n_delete(node *np, unsigned char *record, int *flag)
       if (bt_getnode(&left) < 0)
 	return -1;
 
-      if (np->nd.ndNRecs + left.nd.ndNRecs <= HFS_MAXRECS &&
-	  np->roff[np->nd.ndNRecs] - np->roff[0] +
-	  2 * np->nd.ndNRecs <= NODESPACE(left))
-	return n_merge(np, &left, record, flag);
+      if (left.nnum == np->nnum || left.nd.ndFLink != np->nnum ||
+          left.nd.ndType != np->nd.ndType || left.nd.ndNHeight != np->nd.ndNHeight) {
+        ERROR(EIO, "inconsistent classic HFS B-tree left sibling");
+        return -1;
+      }
+      if (ClassicHfsMergeNodeRecords(left.data, left.roff, &left.nd.ndNRecs,
+                                     np->data, np->roff, np->nd.ndNRecs))
+        return finish_merge(np, &left, record, flag);
     }
 
   if (np->rnum == 0)

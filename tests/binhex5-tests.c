@@ -163,6 +163,19 @@ int main(int argc,char**argv){
        bytes[14] == 3 && bytes[16] == 1, "insert before large record at exact capacity");
  }
  {
+  unsigned char left[512] = {0}, right[512] = {0};
+  uint16_t offsets[ClassicHfsMaxRecords + 1] = {14, 502};
+  uint16_t sibling[] = {18, 20, 22}, count = 1;
+  memcpy(right + 18, "abcd", 4);
+  must(!ClassicHfsMergeNodeRecords(left, offsets, &count, right, sibling, 2) &&
+       left[502] == 0 && count == 1 && offsets[2] == 0, "oversized merge preserves left node");
+  offsets[1] = 500;
+  must(ClassicHfsMergeNodeRecords(left, offsets, &count, right, sibling, 2) &&
+       count == 3 && offsets[2] == 502 && offsets[3] == 504 &&
+       !memcmp(left + 500, "abcd", 4) && !memcmp(right + 18, "abcd", 4),
+       "exact capacity merge rebases sibling offsets and retains record order");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

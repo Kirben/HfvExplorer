@@ -70,6 +70,31 @@ static inline int ClassicHfsInsertNodeRecord(unsigned char *bytes, uint16_t *off
     return 1;
 }
 
+// Append a sibling's records, retaining the left node's descriptor and the
+// original record order. Both offset tables refer to their own node buffer.
+static inline int ClassicHfsMergeNodeRecords(unsigned char *left, uint16_t *offsets,
+                                             uint16_t *count, const unsigned char *right,
+                                             const uint16_t *rightOffsets, unsigned rightCount)
+{
+    if (!ClassicHfsValidOffsets(*count, offsets) ||
+        !ClassicHfsValidOffsets(rightCount, rightOffsets))
+        return 0;
+    unsigned total = *count + rightCount;
+    if (total > ClassicHfsMaxRecords)
+        return 0;
+    unsigned end = offsets[*count];
+    unsigned start = rightOffsets[0];
+    unsigned length = rightOffsets[rightCount] - start;
+    unsigned limit = ClassicHfsNodeSize - 2 * (total + 1);
+    if (end + length > limit)
+        return 0;
+    memcpy(left + end, right + start, length);
+    for (unsigned i = 1; i <= rightCount; ++i)
+        offsets[*count + i] = (uint16_t)(end + rightOffsets[i] - start);
+    *count = (uint16_t)total;
+    return 1;
+}
+
 static inline int ClassicHfsDecodeNode(const unsigned char *bytes, ClassicHfsNodeDescriptor *node,
                                       uint16_t *offsets)
 {
