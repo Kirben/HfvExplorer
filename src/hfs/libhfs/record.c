@@ -34,7 +34,6 @@
 void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
 {
   unsigned char *start = pdata;
-  int i;
 
   ClassicHfsAppend8(&pdata, data->cdrType);
   ClassicHfsAppend8(&pdata, data->cdrResrv2);
@@ -47,43 +46,8 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
       break;
 
     case cdrFilRec:
-      ClassicHfsAppend8(&pdata, data->u.fil.filFlags);
-      ClassicHfsAppend8(&pdata, data->u.fil.filTyp);
-
-      ClassicHfsAppend32(&pdata, data->u.fil.filUsrWds.fdType);
-      ClassicHfsAppend32(&pdata, data->u.fil.filUsrWds.fdCreator);
-      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdFlags);
-      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdLocation.v);
-      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdLocation.h);
-      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdFldr);
-
-      ClassicHfsAppend32(&pdata, data->u.fil.filFlNum);
-
-      ClassicHfsAppend16(&pdata, data->u.fil.filStBlk);
-      ClassicHfsAppend32(&pdata, data->u.fil.filLgLen);
-      ClassicHfsAppend32(&pdata, data->u.fil.filPyLen);
-
-      ClassicHfsAppend16(&pdata, data->u.fil.filRStBlk);
-      ClassicHfsAppend32(&pdata, data->u.fil.filRLgLen);
-      ClassicHfsAppend32(&pdata, data->u.fil.filRPyLen);
-
-      ClassicHfsAppend32(&pdata, data->u.fil.filCrDat);
-      ClassicHfsAppend32(&pdata, data->u.fil.filMdDat);
-      ClassicHfsAppend32(&pdata, data->u.fil.filBkDat);
-
-      ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdIconID);
-      for (i = 0; i < 4; ++i)
-	ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdUnused[i]);
-      ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdComment);
-      ClassicHfsAppend32(&pdata, data->u.fil.filFndrInfo.fdPutAway);
-
-      ClassicHfsAppend16(&pdata, data->u.fil.filClpSize);
-
-      pdata += ClassicHfsEncodeExtents(pdata, data->u.fil.filExtRec);
-
-      pdata += ClassicHfsEncodeExtents(pdata, data->u.fil.filRExtRec);
-
-      ClassicHfsAppend32(&pdata, data->u.fil.filResrv);
+      ClassicHfsEncodeFile(pdata, &data->u.fil);
+      pdata += ClassicHfsFileBodySize;
       break;
 
     case cdrThdRec:
@@ -108,7 +72,6 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
  */
 void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
 {
-  int i;
 
   data->cdrType = ClassicHfsTake8(&pdata);
   data->cdrResrv2 = ClassicHfsTake8(&pdata);
@@ -120,43 +83,7 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
       break;
 
     case cdrFilRec:
-      data->u.fil.filFlags = ClassicHfsTake8(&pdata);
-      data->u.fil.filTyp = ClassicHfsTake8(&pdata);
-
-      data->u.fil.filUsrWds.fdType = ClassicHfsTake32(&pdata);
-      data->u.fil.filUsrWds.fdCreator = ClassicHfsTake32(&pdata);
-      data->u.fil.filUsrWds.fdFlags = ClassicHfsTake16(&pdata);
-      data->u.fil.filUsrWds.fdLocation.v = ClassicHfsTake16(&pdata);
-      data->u.fil.filUsrWds.fdLocation.h = ClassicHfsTake16(&pdata);
-      data->u.fil.filUsrWds.fdFldr = ClassicHfsTake16(&pdata);
-
-      data->u.fil.filFlNum = ClassicHfsTake32(&pdata);
-
-      data->u.fil.filStBlk = ClassicHfsTake16(&pdata);
-      data->u.fil.filLgLen = ClassicHfsTake32(&pdata);
-      data->u.fil.filPyLen = ClassicHfsTake32(&pdata);
-
-      data->u.fil.filRStBlk = ClassicHfsTake16(&pdata);
-      data->u.fil.filRLgLen = ClassicHfsTake32(&pdata);
-      data->u.fil.filRPyLen = ClassicHfsTake32(&pdata);
-
-      data->u.fil.filCrDat = ClassicHfsTake32(&pdata);
-      data->u.fil.filMdDat = ClassicHfsTake32(&pdata);
-      data->u.fil.filBkDat = ClassicHfsTake32(&pdata);
-
-      data->u.fil.filFndrInfo.fdIconID = ClassicHfsTake16(&pdata);
-      for (i = 0; i < 4; ++i)
-	data->u.fil.filFndrInfo.fdUnused[i] = ClassicHfsTake16(&pdata);
-      data->u.fil.filFndrInfo.fdComment = ClassicHfsTake16(&pdata);
-      data->u.fil.filFndrInfo.fdPutAway = ClassicHfsTake32(&pdata);
-
-      data->u.fil.filClpSize = ClassicHfsTake16(&pdata);
-
-      pdata += ClassicHfsDecodeExtents(pdata, data->u.fil.filExtRec);
-
-      pdata += ClassicHfsDecodeExtents(pdata, data->u.fil.filRExtRec);
-
-      data->u.fil.filResrv = ClassicHfsTake32(&pdata);
+      ClassicHfsDecodeFile(pdata, &data->u.fil);
       break;
 
     case cdrThdRec:

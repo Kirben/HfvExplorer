@@ -36,6 +36,7 @@
 #include "../ClassicHfsBitmap.h"
 #include "../ClassicHfsCatalogThread.h"
 #include "../ClassicHfsDirectory.h"
+#include "../ClassicHfsCatalogFile.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
@@ -161,30 +162,7 @@ typedef struct {
   SignedByte	cdrResrv2;	/* reserved */
   union {
     ClassicHfsDirectory dir;
-    struct {  /* cdrFilRec */
-      SignedByte
-		filFlags;	/* file flags */
-      SignedByte
-		filTyp;		/* file type */
-      FInfo	filUsrWds;	/* Finder information */
-      ULongInt	filFlNum;	/* file ID */
-      UInteger	filStBlk;	/* first alloc block of data fork */
-      ULongInt	filLgLen;	/* logical EOF of data fork */
-      ULongInt	filPyLen;	/* physical EOF of data fork */
-      UInteger	filRStBlk;	/* first alloc block of resource fork */
-      ULongInt	filRLgLen;	/* logical EOF of resource fork */
-      ULongInt	filRPyLen;	/* physical EOF of resource fork */
-      LongInt	filCrDat;	/* date and time of creation */
-      LongInt	filMdDat;	/* date and time of last modification */
-      LongInt	filBkDat;	/* date and time of last backup */
-      FXInfo	filFndrInfo;	/* additional Finder information */
-      UInteger	filClpSize;	/* file clump size */
-      ExtDataRec
-		filExtRec;	/* first data fork extent record */
-      ExtDataRec
-		filRExtRec;	/* first resource fork extent record */
-      LongInt	filResrv;	/* reserved */
-    } fil;
+    ClassicHfsCatalogFile fil;
     ClassicHfsCatalogThread dthd; /* directory or file thread */
   } u;
 } CatDataRec;

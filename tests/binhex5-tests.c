@@ -11,6 +11,7 @@
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsCatalogThread.h"
 #include "hfs/ClassicHfsDirectory.h"
+#include "hfs/ClassicHfsCatalogFile.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNodeIO.h"
 #include "hfs/ClassicHfsGeometry.h"
@@ -535,6 +536,18 @@ int main(int argc,char**argv){
        "directory ID, backup date, and Finder fields at wire offsets");
   ClassicHfsEncodeDirectory(output,&dir);
   must(!memcmp(input,output,68) && !output[68], "directory body round trip includes reserved fields");
+ }
+ {
+  unsigned char input[100], output[101] = {0};
+  ClassicHfsCatalogFile file;
+  for (unsigned i=0;i<100;++i) input[i]=(unsigned char)(0x80+i);
+  ClassicHfsDecodeFile(input,&file);
+  must((uint32_t)file.filUsrWds.fdType==UINT32_C(0x82838485) &&
+       file.filLgLen==UINT32_C(0x98999a9b) && file.filRLgLen==UINT32_C(0xa2a3a4a5) &&
+       file.filExtRec[0].xdrStABN==0xc8c9 && file.filRExtRec[0].xdrStABN==0xd4d5,
+       "file Finder type, fork lengths and inline extents at wire offsets");
+  ClassicHfsEncodeFile(output,&file);
+  must(!memcmp(input,output,100) && !output[100], "complete catalog file body round trip");
  }
  {
   unsigned char source[106], output[107];
