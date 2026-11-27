@@ -47,6 +47,14 @@ static int record_cache_write(void *context, unsigned long sector, unsigned char
  return sector == 3 ? -1 : 0;
 }
 
+#include "hfs/ClassicHfsForkIO.h"
+static int read_pattern_block(void *context, uint32_t sector, unsigned char (*bytes)[512])
+{
+ if (sector == *(uint32_t *)context) return -1;
+ for (unsigned i = 0; i < 512; ++i) (*bytes)[i] = (unsigned char)(sector + i);
+ return 0;
+}
+
 static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent (*record)[3])
 {
  unsigned *calls = context;
@@ -408,6 +416,18 @@ int main(int argc,char**argv){
   record[2].xdrStABN = 9;
   must(!ClassicHfsPlanTruncation(record, 5, 10, 14, 32, &plan) &&
        plan.released[2].xdrStABN == 2, "reject overlap before publishing releases");
+ }
+ {
+  unsigned char out[520]; unsigned long pos = 510; uint32_t fail = 1;
+  memset(out, 0xaa, sizeof(out));
+  must(ClassicHfsReadFork(&fail, read_pattern_block, 1025, &pos, out, sizeof(out)) == -1 &&
+       pos == 512 && out[0] == 254 && out[1] == 255 && out[2] == 0xaa,
+       "fork read error preserves completed sector position");
+  fail = UINT32_MAX;
+  must(ClassicHfsReadFork(&fail, read_pattern_block, 1025, &pos, out, sizeof(out)) == 513 &&
+       pos == 1025 && out[0] == 1 && out[511] == 0 && out[512] == 2 && out[513] == 0xaa &&
+       ClassicHfsReadFork(&fail, read_pattern_block, 1025, &pos, NULL, UINT32_MAX) == 0,
+       "retry full sector and partial tail up to logical EOF");
  }
  {
   unsigned char source[106], output[107];

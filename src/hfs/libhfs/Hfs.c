@@ -51,6 +51,7 @@
 
 # include "../ClassicHfsCatalogKey.h"
 #include "../ClassicHfsGeometry.h"
+#include "../ClassicHfsForkIO.h"
 # include "internal.h"
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
@@ -1384,52 +1385,16 @@ int hfs_getfork(hfsfile *file)
  * NAME:	hfs->read()
  * DESCRIPTION:	read from an open file
  */
+static int read_fork_block(void *context, uint32_t sector, block *bytes)
+{
+  return f_getblock((hfsfile *)context, sector, bytes);
+}
+
 long hfs_read(hfsfile *file, void *buf, unsigned long len)
 {
-  unsigned long *lglen, count;
-  unsigned char *ptr = buf;
-
-  f_getptrs(file, &lglen, 0, 0);
-
-  if (file->pos >= *lglen) return 0;
-  if (len > *lglen - file->pos)
-    len = *lglen - file->pos;
-
-  if (len > 0x7fffffffUL) len = 0x7fffffffUL; /* signed transfer result */
-  count = len;
-  while (count)
-    {
-      unsigned long bnum, offs, chunk;
-
-      bnum  = file->pos >> HFS_BLOCKSZ_BITS;
-      offs  = file->pos & (HFS_BLOCKSZ - 1);
-
-      chunk = HFS_BLOCKSZ - offs;
-      if (chunk > count)
-	chunk = count;
-
-      if (offs == 0 && chunk == HFS_BLOCKSZ)
-	{
-	  if (f_getblock(file, bnum, (block *) ptr) < 0)
-	    return -1;
-	}
-      else
-	{
-	  block b;
-
-	  if (f_getblock(file, bnum, &b) < 0)
-	    return -1;
-
-	  memcpy(ptr, b + offs, chunk);
-	}
-
-      ptr += chunk;
-
-      file->pos += chunk;
-      count     -= chunk;
-    }
-
-  return len;
+  unsigned long *logicalLength;
+  f_getptrs(file, &logicalLength, 0, 0);
+  return ClassicHfsReadFork(file, read_fork_block, *logicalLength, &file->pos, buf, len);
 }
 
 /*
