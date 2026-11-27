@@ -28,7 +28,7 @@
 # include "ClassicHfsVolumeIO.h"
 # include "ClassicHfsForkState.h"
 # include "ClassicHfsTreeLookup.h"
-# include "libhfs/volume.h"
+# include "ClassicHfsCatalog.h"
 #include "ClassicHfsVolumeAllocation.h"
 
 int ClassicHfsTransferTreeCursor(node *np, int writing)

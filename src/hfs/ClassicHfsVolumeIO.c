@@ -23,7 +23,7 @@
 #include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsForkState.h"
 #include "ClassicHfsTreeLookup.h"
-#include "libhfs/volume.h"
+#include "ClassicHfsCatalog.h"
 #include "ClassicHfsVolumeBitmap.h"
 #include "ClassicHfsTreeFlush.h"
 #include "ClassicHfsBytes.h"

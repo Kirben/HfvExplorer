@@ -20,7 +20,7 @@
 #include <errno.h>
 #include <string.h>
 #include "libhfs/internal.h"
-#include "libhfs/volume.h"
+#include "ClassicHfsCatalog.h"
 #include "ClassicHfsEntry.h"
 #include "ClassicHfsVolumeIO.h"
 

@@ -14,7 +14,7 @@
 #include "hfs/ClassicHfsVolumeAllocation.h"
 #include "hfs/ClassicHfsTreeNodes.h"
 #include "hfs/ClassicHfsForkState.h"
-#include "hfs/libhfs/volume.h"
+#include "hfs/ClassicHfsCatalog.h"
 #include "hfs/ClassicHfsGrowTreeMap.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"

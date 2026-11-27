@@ -35,7 +35,6 @@
 # include <sys/stat.h>
 
 #include "libhfs/internal.h"
-#include "libhfs/volume.h"
 #include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsForkState.h"
 #include "ClassicHfsTreeLookup.h"

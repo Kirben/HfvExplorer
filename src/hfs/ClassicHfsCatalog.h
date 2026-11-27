@@ -17,29 +17,17 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#pragma once
+
 int ClassicHfsFindCatalogEntry(hfsvol *, long, char *, CatDataRec *, char *, node *);
 
 int ClassicHfsFindCatalogThread(hfsvol *, long, CatDataRec *, node *, int);
-
-# define v_getdthread(vol, id, thread, np)  \
-    ClassicHfsFindCatalogThread(vol, id, thread, np, cdrThdRec)
-# define v_getfthread(vol, id, thread, np)  \
-    ClassicHfsFindCatalogThread(vol, id, thread, np, cdrFThdRec)
 
 int ClassicHfsStoreCatalogEntry(CatDataRec *, node *);
 
 int ClassicHfsResolvePath(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
-int ClassicHfsOpenVolumeDevice(char *, int);
-int ClassicHfsCurrentVolume(hfsvol **);
-void ClassicHfsReleaseVolume(hfsvol *);
-int ClassicHfsFlushVolumeMetadata(hfsvol *, int);
-
 int ClassicHfsRenameCatalogPath(hfsvol *, char *, char *);
 int ClassicHfsAdjustEntryCount(hfsvol *, long, int, int);
 int ClassicHfsCheckNewCatalogId(hfsvol *, int);
 int ClassicHfsCreateDirectoryRecords(hfsvol *, long, char *);
-
-int ClassicHfsRecoveryExtentsValid(const ExtDataRec *, unsigned int blocks);
-int ClassicHfsRecoveryLeafValid(const node *, unsigned long previous);
-int ClassicHfsRecoverAllocationBitmap(hfsvol *);

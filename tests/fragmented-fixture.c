@@ -10,7 +10,6 @@
 #include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsForkState.h"
 #include "hfs/ClassicHfsTreeLookup.h"
-#include "hfs/libhfs/volume.h"
 #include "hfs/ClassicHfsVolumeAllocation.h"
 #include "FragmentedTestData.h"
 

@@ -27,7 +27,7 @@
 #include "ClassicHfsCatalogLeaf.h"
 #include "ClassicHfsPath.h"
 #include "ClassicHfsTime.h"
-#include "libhfs/volume.h"
+#include "ClassicHfsCatalog.h"
 # include "ClassicHfsVolumeIO.h"
 # include "ClassicHfsForkState.h"
 # include "ClassicHfsTreeLookup.h"

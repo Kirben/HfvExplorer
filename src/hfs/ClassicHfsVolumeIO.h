@@ -19,6 +19,15 @@
 
 #pragma once
 
+int ClassicHfsOpenVolumeDevice(char *, int);
+int ClassicHfsCurrentVolume(hfsvol **);
+void ClassicHfsReleaseVolume(hfsvol *);
+int ClassicHfsFlushVolumeMetadata(hfsvol *, int);
+
+int ClassicHfsRecoveryExtentsValid(const ExtDataRec *, unsigned int blocks);
+int ClassicHfsRecoveryLeafValid(const node *, unsigned long previous);
+int ClassicHfsRecoverAllocationBitmap(hfsvol *);
+
 int ClassicHfsSelectPartition(hfsvol *);
 int ClassicHfsLocateVolume(hfsvol *);
 int ClassicHfsLoadVolumeHeader(hfsvol *);

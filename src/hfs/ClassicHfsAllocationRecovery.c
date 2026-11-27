@@ -4,7 +4,7 @@
 #include <errno.h>
 #include "libhfs/internal.h"
 #include "ClassicHfsTreeLookup.h"
-#include "libhfs/volume.h"
+#include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsGeometry.h"
 
 /* Check every descriptor before touching the allocation bitmap. */

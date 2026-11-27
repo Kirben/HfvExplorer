@@ -4,7 +4,8 @@
 #include <string.h>
 #include "libhfs/internal.h"
 #include "ClassicHfsTreeLookup.h"
-#include "libhfs/volume.h"
+#include "ClassicHfsCatalog.h"
+#include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsCatalogLeaf.h"
 #include "ClassicHfsEntry.h"
 

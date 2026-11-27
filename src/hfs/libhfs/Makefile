@@ -49,11 +49,11 @@ $(TARGET): $(OBJS)
 ### DEPENDENCIES FOLLOW #######################################################
 
 ../ClassicHfsVolumeIO.o: ../ClassicHfsVolumeIO.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h
-../ClassicHfsMetadata.o: ../ClassicHfsMetadata.c internal.h hfs.h volume.h ../ClassicHfsEntry.h
+../ClassicHfsMetadata.o: ../ClassicHfsMetadata.c internal.h hfs.h ../ClassicHfsCatalog.h ../ClassicHfsVolumeIO.h ../ClassicHfsEntry.h
 ../ClassicHfsTreeMutation.o: ../ClassicHfsTreeMutation.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h
 ../ClassicHfsTime.o: ../ClassicHfsTime.c ../ClassicHfsTime.h
 ../ClassicHfsForkStorage.o: ../ClassicHfsForkStorage.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
- volume.h
+ ../ClassicHfsCatalog.h
 ../ClassicHfsMount.o: ../ClassicHfsMount.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
- ../ClassicHfsTreeNodes.h volume.h
+ ../ClassicHfsTreeNodes.h
 ../ClassicHfsNodeMutation.o: ../ClassicHfsNodeMutation.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h
