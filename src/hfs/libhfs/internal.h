@@ -37,24 +37,11 @@
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
-typedef struct _bucket_ {
-  int flags;			/* bit flags */
-  unsigned int count;		/* number of times this block is requested */
-
-  unsigned long bnum;		/* logical block number */
-  block *data;			/* pointer to block contents */
-
-  struct _bucket_ *cnext;	/* next bucket in cache chain */
-  struct _bucket_ *cprev;	/* previous bucket in cache chain */
-
-  struct _bucket_ *hnext;	/* next bucket in hash chain */
-  struct _bucket_ *hprev;	/* previous bucket in hash chain */
-} bucket;
-
-# define HFS_BLOCK_INUSE	0x01
-# define HFS_BLOCK_DIRTY	0x02
-
-# define HFS_CACHESZ	128
+#include "../ClassicHfsCache.h"
+typedef ClassicHfsCacheEntry bucket;
+# define HFS_BLOCK_INUSE ClassicHfsCacheValid
+# define HFS_BLOCK_DIRTY ClassicHfsCacheDirty
+# define HFS_CACHESZ ClassicHfsCacheSlots
 # define HFS_HASHSZ	32
 
 typedef struct {

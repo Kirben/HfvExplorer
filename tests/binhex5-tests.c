@@ -38,6 +38,15 @@ static int short_sector_write(int fd, const void *buffer, unsigned size)
 {
  return size - 1;
 }
+#include "hfs/ClassicHfsCache.h"
+typedef struct { unsigned count; unsigned long seen[3]; } CacheWriteLog;
+static int record_cache_write(void *context, unsigned long sector, unsigned char (*bytes)[512])
+{
+ CacheWriteLog *log = context;
+ log->seen[log->count++] = sector;
+ return sector == 3 ? -1 : 0;
+}
+
 static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent (*record)[3])
 {
  unsigned *calls = context;
@@ -343,6 +352,17 @@ int main(int argc,char**argv){
   must(ClassicHfsTransferSector(1, offset, bytes, 1, test_sector_seek, NULL, NULL) < 0 &&
        ClassicHfsTransferSector(0, offset, bytes, 1, test_sector_seek, NULL, short_sector_write) < 0,
        "reject displaced seek before transfer and reject a short write");
+ }
+ {
+  ClassicHfsCacheEntry entries[ClassicHfsCacheSlots] = {0};
+  CacheWriteLog log = {0};
+  entries[0].bnum = UINT32_MAX; entries[1].bnum = 3; entries[2].bnum = 1;
+  entries[0].flags = entries[1].flags = entries[2].flags = ClassicHfsCacheValid | ClassicHfsCacheDirty;
+  must(ClassicHfsFlushCache(entries, 1, record_cache_write, &log) < 0 &&
+       log.count == 3 && log.seen[0] == 1 && log.seen[1] == 3 && log.seen[2] == UINT32_MAX &&
+       entries[0].bnum == UINT32_MAX && entries[0].flags == ClassicHfsCacheValid &&
+       (entries[1].flags & ClassicHfsCacheDirty) && entries[2].flags == ClassicHfsCacheValid,
+       "ordered flush preserves slots and retains failed sector for retry");
  }
  {
   unsigned char source[106], output[107];

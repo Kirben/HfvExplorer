@@ -409,50 +409,14 @@ int getbucket(hfsvol *vol, bucket *b)
  * NAME:	putbucket()
  * DESCRIPTION:	store a bucket's block buffer
  */
-static
-int putbucket(hfsvol *vol, bucket *b)
+static int store_cached_sector(void *volume, unsigned long sector, block *data)
 {
-  if (b->flags & HFS_BLOCK_INUSE &&
-      b->flags & HFS_BLOCK_DIRTY)
-    {
-      if (putblock(vol, b->bnum, b->data) < 0)
-	return -1;
-
-      b->flags &= ~HFS_BLOCK_DIRTY;
-    }
-
-  return 0;
+  return putblock((hfsvol *)volume, sector, data);
 }
 
-/*
- * NAME:	block->flush()
- * DESCRIPTION:	commit dirty cache blocks to a volume
- */
 int b_flush(hfsvol *vol)
 {
-  bcache *cache = vol->cache;
-  int i, result = 0;
-
-  if (cache == 0)
-    return 0;
-
-  for (i = 0; i < HFS_CACHESZ; ++i)
-    {
-      if (putbucket(vol, &cache->chain[i]) < 0)
-	result = -1;
-    }
-
-  return result;
-}
-
-/*
- * NAME:	compare()
- * DESCRIPTION:	comparison function for qsort of cache buckets
- */
-static
-int compare(bucket *b1, bucket *b2)
-{
-  return b1->bnum - b2->bnum;
+  return vol->cache ? ClassicHfsFlushCache(vol->cache->chain, 0, store_cached_sector, vol) : 0;
 }
 
 /*
@@ -470,10 +434,7 @@ int b_finish(hfsvol *vol)
   b_debugcache(vol);
 # endif
 
-  qsort(vol->cache->chain, HFS_CACHESZ, sizeof(bucket),
-	(int (*)(const void *, const void *)) compare);
-
-  result = b_flush(vol);
+  result = ClassicHfsFlushCache(vol->cache->chain, 1, store_cached_sector, vol);
 
   FREE(vol->cache);
   vol->cache = 0;
@@ -538,7 +499,7 @@ int findbucket(bcache *cache, unsigned long bnum, bucket **ib)
 	       b->bnum, b->count);
 # endif
 
-      if (putbucket(cache->vol, b) < 0)
+      if (ClassicHfsWriteBackEntry(b, store_cached_sector, cache->vol) < 0)
 	return -1;
 
       b->flags &= ~HFS_BLOCK_INUSE;
