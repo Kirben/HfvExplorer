@@ -29,22 +29,12 @@
 # include "volume.h"
 #include "../ClassicHfsVolumeAllocation.h"
 
-static int read_node_block(void *file, uint32_t number, block *bytes)
-{
-  return f_getblock((hfsfile *)file, number, bytes);
-}
-
-static int write_node_block(void *file, uint32_t number, block *bytes)
-{
-  return f_putblock((hfsfile *)file, number, bytes);
-}
-
 int ClassicHfsTransferTreeCursor(node *np, int writing)
 {
   btree *bt = np->bt;
   ClassicHfsNodeStatus result = ClassicHfsTransferNode(np->nnum, bt->hdr.bthNNodes,
       bt->map, bt->mapsz, &np->data, &np->nd, np->roff, writing,
-      writing ? write_node_block : read_node_block, &bt->f);
+      writing ? ClassicHfsWriteForkSector : ClassicHfsReadForkSector, &bt->f);
   if (result == ClassicHfsNodeUnavailable)
     { ERROR(EIO, "classic HFS B-tree node outside allocated map"); }
   else if (result == ClassicHfsNodeBadOffsets)
@@ -140,17 +130,32 @@ static int load_fork_extents(void *context, unsigned first, ExtDataRec *record)
   return ClassicHfsFindOverflow((hfsfile *)context, first, record, 0);
 }
 
-int f_doblock(hfsfile *file, unsigned long num, block *bp,
-	       int (*func)(hfsvol *, unsigned int, unsigned int, block *))
+static int ClassicHfsTransferForkSector(hfsfile *file, uint32_t number, block *bytes, int writing)
 {
-  ExtDataRec *initial;
-  unsigned physical, sector;
-  initial = ClassicHfsSelectedFork(file).extents;
-  int mapped = ClassicHfsResolveForkSector(num, file->vol->lpa, file->vol->mdb.drNmAlBlks,
-      *initial, file->ext, &file->fabn, load_fork_extents, file, &physical, &sector);
-  if (mapped < 0)
-    { ERROR(EIO, "invalid classic HFS fork extent or sector"); }
-  return mapped > 0 ? func(file->vol, physical, sector, bp) : -1;
+    ClassicHfsForkFields fork = ClassicHfsSelectedFork(file);
+    if (number >= *fork.physical / HFS_BLOCKSZ || *fork.physical % HFS_BLOCKSZ) {
+        ERROR(EIO, "sector outside classic HFS physical fork");
+        return -1;
+    }
+    unsigned physical, sector;
+    int mapped = ClassicHfsResolveForkSector(number, file->vol->lpa, file->vol->mdb.drNmAlBlks,
+        *fork.extents, file->ext, &file->fabn, load_fork_extents, file, &physical, &sector);
+    if (mapped < 0)
+        { ERROR(EIO, "invalid classic HFS fork extent or sector"); }
+    if (mapped <= 0)
+        return -1;
+    return writing ? b_writeab(file->vol, physical, sector, bytes)
+                   : b_readab(file->vol, physical, sector, bytes);
+}
+
+int ClassicHfsReadForkSector(void *file, uint32_t sector, block *bytes)
+{
+    return ClassicHfsTransferForkSector((hfsfile *)file, sector, bytes, 0);
+}
+
+int ClassicHfsWriteForkSector(void *file, uint32_t sector, block *bytes)
+{
+    return ClassicHfsTransferForkSector((hfsfile *)file, sector, bytes, 1);
 }
 
 // Validate every record from the cached logical position to physical EOF

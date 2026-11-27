@@ -38,7 +38,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
  }
  must(v_flush(v,0)==0 && v->mdb.drXTFlSize==length,"flush self-records without growing allocation");
  bytes=malloc(length); must(bytes!=NULL,"overflow tree snapshot allocation");
- for(i=0;i<length/512;++i) must(f_doblock(&v->ext.f,i,(block*)(bytes+i*512),b_readab)==0,"snapshot overflow tree");
+ for(i=0;i<length/512;++i) must(ClassicHfsReadForkSector(&v->ext.f,i,(block*)(bytes+i*512))==0,"snapshot overflow tree");
  k=0;
  for(i=0;i<10;++i) for(j=0;j<pieces[i].xdrNumABlks*v->lpa;++j,++k)
   must(b_writeab(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(bytes+k*512))==0,"relocate overflow tree");
@@ -53,7 +53,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
  for(i=0;i<length/512;++i) {
   block actual,expected;
   must(fread(expected,512,1,out)==1,"read self-tree oracle block");
-  { int result=f_doblock(&v->ext.f,i,&actual,b_readab);
+  { int result=ClassicHfsReadForkSector(&v->ext.f,i,&actual);
     if(result || memcmp(actual,expected,512)) {
       fprintf(stderr,"Self-tree block %u, result %d\n",i,result);
       must(0,"core self-fragmented tree byte fidelity");
@@ -103,7 +103,7 @@ void CreateFragmentedFixture(const char* directory) {
  must(v->cat.f.cat.u.fil.filExtRec[0].xdrNumABlks+v->cat.f.cat.u.fil.filExtRec[1].xdrNumABlks+
       v->cat.f.cat.u.fil.filExtRec[2].xdrNumABlks==blocks,"original catalog fits inline extents");
  catalog=malloc(m.catalogSize); must(catalog!=NULL,"catalog allocation");
- for(i=0;i<m.catalogSize/512;++i) must(f_doblock(&v->cat.f,i,(block*)(catalog+i*512),b_readab)==0,"snapshot catalog");
+ for(i=0;i<m.catalogSize/512;++i) must(ClassicHfsReadForkSector(&v->cat.f,i,(block*)(catalog+i*512))==0,"snapshot catalog");
  memcpy(old,v->cat.f.cat.u.fil.filExtRec,sizeof(old));
  for(i=0;i<10;++i) {
   v->mdb.drAllocPtr=(unsigned short)(16000+i*100); pieces[i].xdrNumABlks=(unsigned short)(i==9?blocks-9:1);
@@ -137,7 +137,7 @@ void CreateFragmentedFixture(const char* directory) {
  }
  free(payload); must(hfs_close(f)==0,"close verification fork");
  out=fopen(m.catalog,"wb"); must(out!=NULL,"create catalog oracle");
- for(i=0;i<m.catalogSize/512;++i) { block bytes; must(f_doblock(&v->cat.f,i,&bytes,b_readab)==0,"read relocated catalog"); must(fwrite(bytes,512,1,out)==1,"save catalog oracle"); }
+ for(i=0;i<m.catalogSize/512;++i) { block bytes; must(ClassicHfsReadForkSector(&v->cat.f,i,&bytes)==0,"read relocated catalog"); must(fwrite(bytes,512,1,out)==1,"save catalog oracle"); }
  fclose(out); must(hfs_umount(v)==0,"close fixture");
  FragmentOverflowTree(m.image,directory);
  sprintf(path,"%s\\fragmented.bin",directory); out=fopen(path,"wb"); must(out!=NULL,"create manifest");

@@ -1196,27 +1196,17 @@ int hfs_getfork(hfsfile *file)
  * NAME:	hfs->read()
  * DESCRIPTION:	read from an open file
  */
-static int read_fork_block(void *context, uint32_t sector, block *bytes)
-{
-  return f_getblock((hfsfile *)context, sector, bytes);
-}
-
 long hfs_read(hfsfile *file, void *buf, unsigned long len)
 {
   unsigned long *logicalLength;
   logicalLength = ClassicHfsSelectedFork(file).logical;
-  return ClassicHfsReadFork(file, read_fork_block, *logicalLength, &file->pos, buf, len);
+  return ClassicHfsReadFork(file, ClassicHfsReadForkSector, *logicalLength, &file->pos, buf, len);
 }
 
 /*
  * NAME:	hfs->write()
  * DESCRIPTION:	write to an open file
  */
-static int write_fork_block(void *context, uint32_t sector, block *bytes)
-{
-  return f_putblock((hfsfile *)context, sector, bytes);
-}
-
 static int grow_fork(void *context)
 {
   hfsfile *file = (hfsfile *)context;
@@ -1247,7 +1237,7 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
       file->flags |= HFS_UPDATE_CATREC;
     }
 
-  return ClassicHfsWriteFork(file, read_fork_block, write_fork_block, grow_fork,
+  return ClassicHfsWriteFork(file, ClassicHfsReadForkSector, ClassicHfsWriteForkSector, grow_fork,
                              pylen, lglen, &file->pos, buf, len);
 }
 

@@ -19,11 +19,8 @@
 
 #include "../ClassicHfsForkState.h"
 
-int f_doblock(hfsfile *, unsigned long, block *,
-	      int (*)(hfsvol *, unsigned int, unsigned int, block *));
-
-# define f_getblock(file, num, bp)	f_doblock(file, num, bp, b_readab)
-# define f_putblock(file, num, bp)	f_doblock(file, num, bp, b_writeab)
+int ClassicHfsReadForkSector(void *file, uint32_t sector, block *bytes);
+int ClassicHfsWriteForkSector(void *file, uint32_t sector, block *bytes);
 
 int ClassicHfsExtendForkAllocation(hfsfile *);
 int f_trunc(hfsfile *);
