@@ -824,7 +824,9 @@ int RunBrowserSessionTest(const char* directory){
    app.m_pMainWnd=nullptr;Check(frame.LoadFrame(IDR_MAINFRAME,WS_OVERLAPPEDWINDOW,nullptr,&context)!=FALSE,"create real hidden browser frame");
    Check(!frame.IsWindowVisible()&&app.m_pMainWnd==nullptr&&startup.GetBrowserSession().Owner()==&frame,"startup frame/session binding");
    app.m_startup_floppies=FALSE;
-   startup.Mounts().AddWindows('Z',DRIVE_REMOVABLE,"Z:\\");
+   const char floppyLetter=toupper(wa[0])=='Z'?'Y':'Z';
+   const int floppyDrive=floppyLetter-'A';
+   startup.Mounts().AddWindows(floppyLetter,DRIVE_REMOVABLE);
    startup.Mounts().AddWindows(wa[0],DRIVE_FIXED,wa);
    app.m_startup_hds=FALSE;
    const auto invalid=root+"\\invalid-startup.dsk";
@@ -833,7 +835,7 @@ int RunBrowserSessionTest(const char* directory){
    auto& boot=startup.GetBrowserSession();
 
    bool probedRemovable=false;
-   BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=std::string(path).find("Z:")==0;};
+   BrowserDirectory::testObserveRead=[&](const char* path){probedRemovable|=path[0]==floppyLetter&&path[1]==':';};
    Check(startup.OnNewDocument()!=FALSE&&boot.Navigating()&&!boot.ListingAvailable(),"startup did not queue its first folder");
    PumpUntil([&]{return !boot.Navigating();},"startup Windows folder did not publish");
    BrowserDirectory::testObserveRead={};
@@ -844,8 +846,8 @@ int RunBrowserSessionTest(const char* directory){
 #ifdef HFV_FLOPPY_TESTING
    {std::vector<BYTE> image;std::string why;Check(PrepareFloppyHfs("Manual",image,why),"prepare manual floppy fixture");auto fixture=root+"\\manual-floppy.dsk";{CFile file;Check(file.Open(fixture,CFile::modeCreate|CFile::modeWrite),"save manual floppy fixture");file.Write(image.data(),UINT(image.size()));}
     auto volume=hfs_mount(fixture.GetBuffer(),0,O_RDWR);fixture.ReleaseBuffer();char entry[]="Manual:Readable",type[]="TEXT",creator[]="TEST";Check(volume&&hfs_create(volume,entry,type,creator)==0&&hfs_umount(volume)==0,"populate manual floppy fixture");{CFile file;Check(file.Open(fixture,CFile::modeRead),"load manual floppy fixture");Check(file.Read(image.data(),UINT(image.size()))==image.size(),"read manual floppy fixture");}
-    FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;~Detach(){doc.Mounts().CloseClassicVolumes();readonly_cd_backend_final();readonly_floppy_attach_api(25,nullptr);}}detach{startup};
-    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=std::string(path).find("Z:")==0;};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.GetBrowserSession().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
+    FakeFloppy disk(image);readonly_cd_backend_init();Check(readonly_floppy_attach_api(floppyDrive,&disk),"attach manual floppy fixture");struct Detach{Doc& doc;int drive;~Detach(){doc.Mounts().CloseClassicVolumes();readonly_cd_backend_final();readonly_floppy_attach_api(drive,nullptr);}}detach{startup,floppyDrive};
+    app.m_disable_autofloppy=TRUE;bool windowsProbe=false;BrowserDirectory::testObserveRead=[&](const char* path){windowsProbe|=path[0]==floppyLetter&&path[1]==':';};startup.GetBrowserSession().Tree()->GetTreeCtrl().SelectItem(startup.GetBrowserSession().MountRoot({BrowserMountInventory::Kind::WindowsDrive,0}));
     PumpUntil([&]{return !startup.GetBrowserSession().Navigating();},"floppy navigation did not finish");
     BrowserDirectory::testObserveRead={};
     auto& session=startup.GetBrowserSession();bool found=false;for(int row=0;row<session.List()->GetListCtrl().GetItemCount();++row){auto binding=session.List()->BrowserRowAt(row);if(binding&&binding->entry.name==u"Readable")found=true;}
@@ -867,7 +869,7 @@ int RunBrowserSessionTest(const char* directory){
     const auto current=session.Mounts().Lookup({BrowserMountInventory::Kind::ClassicVolume,0});
     Check(current&&current->generation==attachment->generation&&!session.Mounts().IsCurrent(*attachment),
           "restoring a media generation revived an obsolete mount address");
-    session.NavigationMediaChanged(1u<<25);
+    session.NavigationMediaChanged(1u<<floppyDrive);
     Check(!session.Mounts().IsCurrent(*current),"media notice did not invalidate the captured mount");
     Check(stale.MediaGenerationKnown()&&stale.MediaGeneration()==original.MediaGeneration(),
           "a command rebound a published row to replacement floppy media");
