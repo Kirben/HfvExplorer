@@ -32,22 +32,7 @@
 # include <errno.h>
 # include <string.h>
 # include <time.h>
-# include <ctype.h>
-#ifdef __EMX__
-# include <sys/types.h>
-#endif
 # include <sys/stat.h>
-
-#ifdef __EMX__
-#define INCL_DOSERRORS
-#define INCL_DOSFILEMGR
-
-#ifndef WIN32
-#include <os2.h>
-#include "libhfs/os2open.h"
-#endif
-
-#endif
 
 #include "libhfs/internal.h"
 #include "libhfs/volume.h"
@@ -103,9 +88,6 @@ int ClassicHfsCurrentVolume(hfsvol **volume)
 // hosts with POSIX device locking, keep the advisory lock until close.
 int ClassicHfsOpenVolumeDevice(char *path, int flags)
 {
-#ifdef __EMX__
-    flags |= O_BINARY;
-#endif
     int fd = open(path, flags);
 #if !defined(WIN32) && !defined(NODEVLOCKS)
     if (fd >= 0) {
@@ -133,23 +115,6 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
     ERROR(EINVAL, "invalid classic HFS mount request");
     return NULL;
   }
-
-#ifndef WIN32
-#ifdef __EMX__
-  char new_path[10];
-  
-  /* Handle drive specifications for Win32 */
-  if(_emx_env & 0x1000) { /* Check if running under rsx */
-    if(_emx_rev >> 16 == 2) { /* Check for RSXNT */
-      if(isalpha(path[0]) && path[1]==':' && path[2]==0) {
-	strcpy(new_path, "\\\\.\\");
-	strcat(new_path, path);
-	path = new_path;
-      }
-    }
-  }
-#endif
-#endif
 
   /* A recovery remount adopts the already locked descriptor. */
   if (supplied_fd < 0)

@@ -174,7 +174,6 @@ LIBHFS_SRC = ClassicHfsEntry.h ClassicHfsCatalogRecord.h ClassicHfsCatalogFile.h
 	../ClassicHfsVolumeIO.c block.h ../ClassicHfsMetadata.c ../ClassicHfsTreeMutation.c btree.h \
 	../ClassicHfsForkStorage.c file.h ../ClassicHfsMount.c hfs.h internal.h \
 	../ClassicHfsNodeMutation.c node.h volume.h \
-	os2open.c os2open.h \
 	Makefile)
 
 DOC_SRC = $(addprefix $(DOCDIR)/, \
