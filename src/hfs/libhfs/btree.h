@@ -20,7 +20,6 @@
 int bt_getnode(node *);
 int bt_putnode(node *);
 
-int bt_writehdr(btree *);
 
 int bt_space(btree *, unsigned int);
 

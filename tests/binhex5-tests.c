@@ -6,7 +6,10 @@
 #include <fcntl.h>
 #include <io.h>
 #undef ERROR
-#include "hfs/libhfs/hfs.h"
+#include <errno.h>
+#include "hfs/libhfs/internal.h"
+#include "hfs/libhfs/btree.h"
+#include "hfs/ClassicHfsTreeFlush.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsCatalogLeaf.h"
@@ -798,6 +801,18 @@ int main(int argc,char**argv){
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
+ {
+  btree *tree = &v->cat;
+  node before = tree->hdrnd;
+  int flags = tree->flags;
+  tree->flags |= HFS_UPDATE_BTHDR;
+  tree->hdrnd.nd.ndFLink = 1;
+  must(tree->mapsz == HFS_MAP1SZ && ClassicHfsFlushTreeHeader(tree) < 0 &&
+       (tree->flags & HFS_UPDATE_BTHDR) && !memcmp(before.data, tree->hdrnd.data, sizeof(before.data)),
+       "reject unexpected map continuation before publishing header");
+  tree->hdrnd = before;
+  tree->flags = flags;
+ }
  must(ClassicHfsCompareNames("A", "a") == 0 && ClassicHfsCompareNames("a", "ab") < 0 &&
       ClassicHfsCompareNames("\x80", "\x8a") == 0 && ClassicHfsCompareNames("a", "\x80") < 0 &&
       ClassicHfsCompareNames(" ", "\xca") == 0, "classic MacRoman name ordering");

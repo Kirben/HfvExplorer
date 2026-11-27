@@ -30,6 +30,7 @@
 # include "low.h"
 #include "../ClassicHfsVolumeBitmap.h"
 # include "btree.h"
+#include "../ClassicHfsTreeFlush.h"
 # include "volume.h"
 
 static HFV_THREAD_LOCAL int m_invalid_cd_hack = 0;
@@ -288,11 +289,11 @@ int v_flush(hfsvol *vol, int umounting)
   if (! (vol->flags & HFS_READONLY))
     {
       if ((vol->ext.flags & HFS_UPDATE_BTHDR) &&
-	  bt_writehdr(&vol->ext) < 0)
+	  ClassicHfsFlushTreeHeader(&vol->ext) < 0)
 	return -1;
 
       if ((vol->cat.flags & HFS_UPDATE_BTHDR) &&
-	  bt_writehdr(&vol->cat) < 0)
+	  ClassicHfsFlushTreeHeader(&vol->cat) < 0)
 	return -1;
 
       if ((vol->flags & HFS_UPDATE_VBM) &&
