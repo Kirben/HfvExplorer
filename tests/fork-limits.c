@@ -29,7 +29,7 @@ int main(int argc,char** argv) {
   fake.cat.u.fil.filPyLen=(0xffffffffUL/volume->mdb.drAlBlkSiz)*volume->mdb.drAlBlkSiz;
   must(ClassicHfsExtendForkAllocation(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"physical allocation rollover guard");
   fake.cat.u.fil.filLgLen=0xffffffffUL;
-  must(f_trunc(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"rounded physical EOF rollover guard");
+  must(ClassicHfsTrimForkAllocation(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"rounded physical EOF rollover guard");
   fake.cat.u.fil.filLgLen=0;fake.pos=1;
   must(hfs_read(&fake,&byte,1)==0,"read position above EOF does not unsigned-wrap remaining length");
   fake.pos=0;must(hfs_write(&fake,&byte,0x80000000UL)==-1 && errno==EINVAL,"oversized single transfer rejected before buffer access");

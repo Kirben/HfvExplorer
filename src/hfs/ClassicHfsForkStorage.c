@@ -20,14 +20,14 @@
 # include <string.h>
 # include <errno.h>
 
-# include "internal.h"
-#include "../ClassicHfsGeometry.h"
-#include "../ClassicHfsNodeIO.h"
-# include "block.h"
-# include "file.h"
-# include "btree.h"
-# include "volume.h"
-#include "../ClassicHfsVolumeAllocation.h"
+# include "libhfs/internal.h"
+#include "ClassicHfsGeometry.h"
+#include "ClassicHfsNodeIO.h"
+# include "libhfs/block.h"
+# include "libhfs/file.h"
+# include "libhfs/btree.h"
+# include "libhfs/volume.h"
+#include "ClassicHfsVolumeAllocation.h"
 
 int ClassicHfsTransferTreeCursor(node *np, int writing)
 {
@@ -249,21 +249,47 @@ int ClassicHfsExtendForkAllocation(hfsfile *file)
   return blocks.xdrNumABlks;
 }
 
-/*
- * NAME:	file->trunc()
- * DESCRIPTION:	release disk blocks unneeded by a file
- */
-int f_trunc(hfsfile *file)
+// Validate retained and discarded records together before releasing any
+// block. A corrupt overflow record can otherwise free a retained extent.
+static int validate_truncation_chain(hfsfile *file, unsigned end)
 {
-  ExtDataRec *extrec;
-  unsigned long *lglen, *pylen, alblksz;
+    unsigned char seen[(UINT16_MAX + 7u) / 8u] = {0};
+    for (unsigned first = 0; first < end;) {
+        ExtDataRec record;
+        if (!first)
+            memcpy(record, *ClassicHfsSelectedFork(file).extents, sizeof(record));
+        else if (ClassicHfsFindOverflow(file, first, &record, NULL) <= 0)
+            return -1;
+        ClassicHfsTruncation plan;
+        if (!ClassicHfsPlanTruncation(record, first, end, end, file->vol->mdb.drNmAlBlks, &plan))
+            break;
+        for (unsigned i = 0; i < ClassicHfsExtentCount; ++i) {
+            unsigned start = record[i].xdrStABN;
+            unsigned limit = start + record[i].xdrNumABlks;
+            for (unsigned n = start; n < limit; ++n) {
+                if (!file->vol->vbm || !ClassicHfsBitIsSet(file->vol->vbm, n) || ClassicHfsBitIsSet(seen, n)) {
+                    ERROR(EIO, "overlapping or unallocated classic HFS truncation extent");
+                    return -1;
+                }
+                ClassicHfsSetBit(seen, n);
+            }
+        }
+        first = plan.next;
+        if (first == end)
+            return 0;
+    }
+    ERROR(EIO, "invalid classic HFS truncation chain");
+    return -1;
+}
+
+int ClassicHfsTrimForkAllocation(hfsfile *file)
+{
+  ClassicHfsForkFields fields = ClassicHfsSelectedFork(file);
+  ExtDataRec *extrec = fields.extents;
+  unsigned long *pylen = fields.physical;
+  unsigned long alblksz = file->vol->mdb.drAlBlkSiz;
   uint32_t newpylen;
-  ClassicHfsForkFields forkFields = ClassicHfsSelectedFork(file);
-  lglen = forkFields.logical;
-  pylen = forkFields.physical;
-  extrec = forkFields.extents;
-  alblksz = file->vol->mdb.drAlBlkSiz;
-  int sizeStatus = ClassicHfsTruncatedSize(*lglen, *pylen, alblksz, &newpylen);
+  int sizeStatus = ClassicHfsTruncatedSize(*fields.logical, *pylen, alblksz, &newpylen);
   if (sizeStatus != ClassicHfsForkSizeOk) {
     if (sizeStatus == ClassicHfsForkSizeLimit)
       { ERROR(EFBIG, "classic HFS physical fork size limit"); }
@@ -275,7 +301,9 @@ int f_trunc(hfsfile *file)
     return 0;
 
   unsigned oldEnd = *pylen / alblksz, keep = newpylen / alblksz;
-  unsigned start = file->fabn <= keep ? file->fabn : 0;
+  if (validate_truncation_chain(file, oldEnd) < 0)
+    return -1;
+  unsigned start = 0;
   while (start < oldEnd) {
     ExtDataRec current;
     node n;

@@ -198,6 +198,21 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 
 int main(int argc,char**argv){
     {
+        hfsvol volume = {0};
+        hfsfile file = {0};
+        block bitmap = {0x80};
+        volume.vbm = &bitmap;
+        volume.mdb.drAlBlkSiz = 512;
+        volume.mdb.drNmAlBlks = 4;
+        file.vol = &volume;
+        file.cat.u.fil.filPyLen = 1024;
+        file.cat.u.fil.filExtRec[0].xdrNumABlks = 2;
+        must(ClassicHfsTrimForkAllocation(&file) < 0 && errno == EIO &&
+             bitmap[0] == 0x80 && file.cat.u.fil.filPyLen == 1024 &&
+             file.cat.u.fil.filExtRec[0].xdrNumABlks == 2 && !volume.flags,
+             "invalid fork allocation rejected before releasing any sector");
+    }
+    {
         ClassicHfsTreeHeader header = {0};
         header.bthRoot = header.bthFNode = header.bthLNode = 1;
         header.bthNNodes = 4; header.bthDepth = 1; header.bthNRecs = 3;

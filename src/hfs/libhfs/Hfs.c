@@ -1171,7 +1171,7 @@ int hfs_setfork(hfsfile *file, int fork)
   int result = 0;
 
   if (! (file->vol->flags & HFS_READONLY) &&
-      f_trunc(file) < 0)
+      ClassicHfsTrimForkAllocation(file) < 0)
     result = -1;
 
   ClassicHfsSelectFork(file, fork);
@@ -1302,7 +1302,7 @@ int hfs_close(hfsfile *file)
         if(!(vol->flags&HFS_WRITE_FAILED))return -1; // Keep the view for retry.
         result=-1;
       } else {
-        if(f_trunc(file)<0||ClassicHfsFlushOpenFile(file)<0)result=-1;
+        if(ClassicHfsTrimForkAllocation(file)<0||ClassicHfsFlushOpenFile(file)<0)result=-1;
         result=ClassicHfsEndTransaction(vol,result);
         if(result<0&&!(vol->flags&HFS_WRITE_FAILED))return -1;
       }
@@ -1645,11 +1645,11 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   file.cat.u.fil.filRLgLen = 0;
 
   ClassicHfsSelectFork(&file, 0);
-  if (f_trunc(&file) < 0)
+  if (ClassicHfsTrimForkAllocation(&file) < 0)
     return -1;
 
   ClassicHfsSelectFork(&file, 1);
-  if (f_trunc(&file) < 0)
+  if (ClassicHfsTrimForkAllocation(&file) < 0)
     return -1;
 
   /* delete file record */
@@ -1978,7 +1978,7 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
  vol=file->vol;
  if(ClassicHfsBeginTransaction(vol)<0)return -1;
  result=hfs_truncate_impl(file,length);
- if(result==0&&f_trunc(file)<0)result=-1;
+ if(result==0&&ClassicHfsTrimForkAllocation(file)<0)result=-1;
  if(result==0&&ClassicHfsFlushOpenFile(file)<0)result=-1;
  return ClassicHfsEndTransaction(vol,result);
 }
