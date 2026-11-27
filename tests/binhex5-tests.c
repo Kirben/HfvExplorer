@@ -11,6 +11,7 @@
 #include "hfs/libhfs/btree.h"
 #include "hfs/ClassicHfsTreeFlush.h"
 #include "hfs/libhfs/node.h"
+#include "hfs/libhfs/file.h"
 #include "hfs/ClassicHfsGrowTreeMap.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
@@ -804,6 +805,13 @@ int main(int argc,char**argv){
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  {
+  hfsfile damaged = {0};
+  damaged.vol = v;
+  damaged.cat.u.fil.filExtRec[0].xdrNumABlks = 1;
+  unsigned freeBefore = v->mdb.drFreeBks, firstBefore = v->mdb.drAllocPtr;
+  must(ClassicHfsExtendForkAllocation(&damaged) < 0 && v->mdb.drFreeBks == freeBefore &&
+       v->mdb.drAllocPtr == firstBefore && damaged.cat.u.fil.filPyLen == 0,
+       "reject extents on empty fork before claiming allocation blocks");
   btree *tree = &v->cat;
   node before = tree->hdrnd;
   int flags = tree->flags;

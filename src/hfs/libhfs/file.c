@@ -128,27 +128,51 @@ int f_doblock(hfsfile *file, unsigned long num, block *bp,
   return mapped > 0 ? func(file->vol, physical, sector, bp) : -1;
 }
 
-/*
- * NAME:	file->alloc()
- * DESCRIPTION:	reserve disk blocks for a file
- */
-int f_alloc(hfsfile *file)
+// Validate every record from the cached logical position to physical EOF
+// before claiming volume blocks. Reload the cached record from its owner.
+static int ClassicHfsFindAppendRecord(hfsfile *file, unsigned end, unsigned *start,
+                                      ExtDataRec tail, node *leaf)
+{
+    unsigned volumeBlocks = file->vol->mdb.drNmAlBlks;
+    *start = file->fabn;
+    if (end > volumeBlocks || (*start && *start >= end)) {
+        ERROR(EIO, "invalid classic HFS fork extent position");
+        return -1;
+    }
+    for (;;) {
+        if (*start) {
+            if (ClassicHfsFindOverflow(file, *start, tail, leaf) <= 0)
+                return -1;
+        } else {
+            memcpy(tail, *ClassicHfsSelectedFork(file).extents, sizeof(ExtDataRec));
+        }
+        if (!end) {
+            for (unsigned i = 0; i < ClassicHfsExtentCount; ++i)
+                if (tail[i].xdrNumABlks) {
+                    ERROR(EIO, "empty classic HFS fork has allocated extents");
+                    return -1;
+                }
+            return 0;
+        }
+        ClassicHfsTruncation checked;
+        if (!ClassicHfsPlanTruncation(tail, *start, end, end, volumeBlocks, &checked)) {
+            ERROR(EIO, "invalid classic HFS extent record during fork growth");
+            return -1;
+        }
+        if (checked.next == end)
+            return 0;
+        *start = checked.next;
+    }
+}
+
+int ClassicHfsExtendForkAllocation(hfsfile *file)
 {
   hfsvol *vol = file->vol;
   ExtDescriptor blocks;
-  ExtDataRec *extrec;
-  unsigned long *pylen, clumpsz;
-  unsigned int start, end;
-  node n;
-  int i;
-
-  clumpsz = file->clump;
-  if (clumpsz == 0)
-    clumpsz = vol->mdb.drClpSiz;
-
-  pylen = ClassicHfsSelectedFork(file).physical;
-  int sizeStatus = ClassicHfsGrowthRequest(*pylen, vol->mdb.drAlBlkSiz, clumpsz,
-                                          &blocks.xdrNumABlks);
+  ClassicHfsForkFields fields = ClassicHfsSelectedFork(file);
+  unsigned long clump = file->clump ? file->clump : vol->mdb.drClpSiz;
+  int sizeStatus = ClassicHfsGrowthRequest(*fields.physical, vol->mdb.drAlBlkSiz, clump,
+                                           &blocks.xdrNumABlks);
   if (sizeStatus != ClassicHfsForkSizeOk) {
     if (sizeStatus == ClassicHfsForkSizeLimit)
       { ERROR(EFBIG, "classic HFS physical fork size limit"); }
@@ -156,59 +180,15 @@ int f_alloc(hfsfile *file)
       { ERROR(EIO, "invalid physical fork length"); }
     return -1;
   }
-
-  if (v_allocblocks(vol, &blocks) < 0)
+  unsigned start, end = *fields.physical / vol->mdb.drAlBlkSiz;
+  ExtDataRec tail;
+  node leaf;
+  if (ClassicHfsFindAppendRecord(file, end, &start, tail, &leaf) < 0 ||
+      v_allocblocks(vol, &blocks) < 0)
     return -1;
 
-  /* update the file's extents */
-
-  extrec = ClassicHfsSelectedFork(file).extents;
-
-  start  = file->fabn;
-  end    = *pylen / vol->mdb.drAlBlkSiz;
-
-  n.nnum = 0;
-  i      = -1;
-
-  while (start < end)
-    {
-      for (i = 0; i < 3; ++i)
-	{
-	  unsigned int num;
-
-	  num    = file->ext[i].xdrNumABlks;
-	  start += num;
-
-	  if (start == end)
-	    break;
-	  else if (start > end)
-	    {
-	      v_freeblocks(vol, &blocks);
-	      ERROR(EIO, "file extents exceed file physical length");
-	      return -1;
-	    }
-	  else if (num == 0)
-	    {
-	      v_freeblocks(vol, &blocks);
-	      ERROR(EIO, "empty file extent");
-	      return -1;
-	    }
-	}
-
-      if (start == end)
-	break;
-
-      if (ClassicHfsFindOverflow(file, start, &file->ext, &n) <= 0)
-	{
-	  v_freeblocks(vol, &blocks);
-	  return -1;
-	}
-
-      file->fabn = start;
-    }
-
   ExtDataRec updated;
-  int append = ClassicHfsAppendExtent(file->ext, file->fabn, end, vol->mdb.drNmAlBlks,
+  int append = ClassicHfsAppendExtent(tail, start, end, vol->mdb.drNmAlBlks,
                                       blocks, updated);
   if (append == ClassicHfsCannotAppend) {
     v_freeblocks(vol, &blocks);
@@ -223,27 +203,18 @@ int f_alloc(hfsfile *file)
       v_freeblocks(vol, &blocks);
       return -1;
     }
-    file->fabn = end;
-  } else {
-      /* store the modified extent record */
-
-      if (file->fabn)
-	{
-	  if ((n.nnum == 0 &&
-	       ClassicHfsFindOverflow(file, file->fabn, 0, &n) <= 0) ||
-	      ClassicHfsStoreOverflow(file, file->fabn, updated, &n) < 0)
-	    {
-	      v_freeblocks(vol, &blocks);
-	      return -1;
-	    }
-	}
-      else
-	memcpy(extrec, updated, sizeof(updated));
+    start = end;
+  } else if (start) {
+    if (ClassicHfsStoreOverflow(file, start, updated, &leaf) < 0) {
+      v_freeblocks(vol, &blocks);
+      return -1;
     }
+  } else {
+    memcpy(*fields.extents, updated, sizeof(updated));
+  }
+  file->fabn = start;
   memcpy(file->ext, updated, sizeof(updated));
-
-  *pylen += blocks.xdrNumABlks * vol->mdb.drAlBlkSiz;
-
+  *fields.physical += blocks.xdrNumABlks * vol->mdb.drAlBlkSiz;
   file->flags |= HFS_UPDATE_CATREC;
 
   return blocks.xdrNumABlks;

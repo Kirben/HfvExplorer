@@ -83,7 +83,7 @@ void CreateLargeForkFixture(const char* directory) {
  // Test the physical-EOF rollover without allocating another four GiB.
  { hfsfile fake=*file;unsigned short freeBefore=volume->mdb.drFreeBks;
    fake.cat.u.fil.filPyLen=(0xffffffffUL/volume->mdb.drAlBlkSiz)*volume->mdb.drAlBlkSiz;
-   must(f_alloc(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==freeBefore,"4 GiB physical allocation rollover rejected"); }
+   must(ClassicHfsExtendForkAllocation(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==freeBefore,"4 GiB physical allocation rollover rejected"); }
  must(hfs_close(file)==0 && hfs_umount(volume)==0,"persist both at Apple maximum forks");
  volume=hfs_mount(m.image,0,O_RDONLY);must(volume!=NULL,"reopen both large forks");file=hfs_open(volume,name);must(file!=NULL,"reopen large file");
  for(fork=0;fork<2;++fork) verifyFork(file,fork,length,bytes,capacity);

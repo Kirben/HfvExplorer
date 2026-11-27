@@ -1222,7 +1222,7 @@ static int grow_fork(void *context)
   hfsfile *file = (hfsfile *)context;
   if (ClassicHfsReserveTreeSpace(&file->vol->ext, 1) < 0)
     return -1;
-  return f_alloc(file);
+  return ClassicHfsExtendForkAllocation(file);
 }
 
 long hfs_write(hfsfile *file, void *buf, unsigned long len)

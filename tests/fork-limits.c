@@ -27,7 +27,7 @@ int main(int argc,char** argv) {
  {
   hfsfile fake=*file;unsigned short before=volume->mdb.drFreeBks;
   fake.cat.u.fil.filPyLen=(0xffffffffUL/volume->mdb.drAlBlkSiz)*volume->mdb.drAlBlkSiz;
-  must(f_alloc(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"physical allocation rollover guard");
+  must(ClassicHfsExtendForkAllocation(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"physical allocation rollover guard");
   fake.cat.u.fil.filLgLen=0xffffffffUL;
   must(f_trunc(&fake)==-1 && errno==EFBIG && volume->mdb.drFreeBks==before,"rounded physical EOF rollover guard");
   fake.cat.u.fil.filLgLen=0;fake.pos=1;

@@ -25,5 +25,5 @@ int f_doblock(hfsfile *, unsigned long, block *,
 # define f_getblock(file, num, bp)	f_doblock(file, num, bp, b_readab)
 # define f_putblock(file, num, bp)	f_doblock(file, num, bp, b_writeab)
 
-int f_alloc(hfsfile *);
+int ClassicHfsExtendForkAllocation(hfsfile *);
 int f_trunc(hfsfile *);

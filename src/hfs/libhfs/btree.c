@@ -84,7 +84,7 @@ int ClassicHfsReserveTreeSpace(btree *tree, unsigned records)
     while (tree->hdr.bthFree < required) {
         if (tree != &volume->ext && ClassicHfsReserveTreeSpace(&volume->ext, 1) < 0)
             return -1;
-        int blocks = f_alloc(&tree->f);
+        int blocks = ClassicHfsExtendForkAllocation(&tree->f);
         if (blocks < 0)
             return -1;
         uint64_t added = (uint64_t)blocks * (blockBytes / ClassicHfsNodeSize);
