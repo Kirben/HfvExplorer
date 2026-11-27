@@ -2,6 +2,7 @@
 // Volume field definitions adapted from hfsutils, Copyright (C) 1996, 1997 Robert Leslie.
 #pragma once
 #include "ClassicHfsExtents.h"
+#include "ClassicHfsGeometry.h"
 #include "ClassicHfsRecordBytes.h"
 
 typedef struct {
@@ -36,6 +37,31 @@ typedef struct {
   unsigned long	drCTFlSize;	/* size (in bytes) of catalog file */
   ClassicHfsExtent	drCTExtRec[ClassicHfsExtentCount];	/* first extent record for catalog file */
 } ClassicHfsMasterDirectory;
+
+// Called after validation of the 1..27-byte volume name and format geometry.
+static inline void ClassicHfsInitMasterDirectory(ClassicHfsMasterDirectory *mdb,
+                                                 const ClassicHfsFormatGeometry *geometry,
+                                                 const char *name, size_t nameLength,
+                                                 uint32_t creationDate)
+{
+    memset(mdb, 0, sizeof(*mdb));
+    mdb->drSigWord = 0x4244;
+    mdb->drCrDate = creationDate;
+    mdb->drLsMod = creationDate;
+    mdb->drVBMSt = 3;
+    mdb->drNmAlBlks = geometry->allocationBlocks;
+    mdb->drFreeBks = geometry->allocationBlocks;
+    mdb->drAlBlkSiz = geometry->blockBytes;
+    mdb->drClpSiz = geometry->blockBytes * 4;
+    mdb->drAlBlSt = geometry->firstAllocationSector;
+    mdb->drXTClpSiz = geometry->treeClumpBytes;
+    mdb->drCTClpSiz = geometry->treeClumpBytes;
+    memcpy(mdb->drVN, name, nameLength);
+    // Root creation consumes CNID 2 and increments the count. The root
+    // itself is excluded from the on-disk directory total.
+    mdb->drNxtCNID = 2;
+    mdb->drDirCnt = (unsigned long)-1;
+}
 
 static inline void ClassicHfsDecodeMasterDirectory(unsigned char bytes[512], ClassicHfsMasterDirectory *mdb)
 {

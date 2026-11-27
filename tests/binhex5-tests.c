@@ -98,6 +98,15 @@ static void verify_formatted_tree_headers(const char *image)
     FILE *file = fopen(image, "rb");
     must(file && fseek(file, 1024, SEEK_SET) == 0 &&
          fread(mdb, 1, sizeof(mdb), file) == sizeof(mdb), "read formatted MDB");
+    unsigned char alternate[512];
+    must(fseek(file, -1024, SEEK_END) == 0 &&
+         fread(alternate, 1, sizeof(alternate), file) == sizeof(alternate) &&
+         !memcmp(mdb, alternate, sizeof(mdb)), "formatted primary and alternate MDB agree");
+    must(ClassicHfsRead16(mdb) == 0x4244 && ClassicHfsRead16(mdb + 14) == 3 &&
+         ClassicHfsRead32(mdb + 30) == 16 && mdb[36] == 3 && !memcmp(mdb + 37, "BH5", 3) &&
+         ClassicHfsRead32(mdb + 84) == 0 && ClassicHfsRead32(mdb + 88) == 0 &&
+         ClassicHfsRead16(mdb + 34) < ClassicHfsRead16(mdb + 18),
+         "formatted volume name, root counters, next ID and free space");
     for (unsigned tree = 0; tree < 2; ++tree) {
         long offset = 512L * ClassicHfsRead16(mdb + 28) +
             ClassicHfsRead32(mdb + 20) * ClassicHfsRead16(mdb + (tree ? 150 : 134));

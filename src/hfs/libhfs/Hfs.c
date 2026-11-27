@@ -595,17 +595,17 @@ int hfs_format(char *path, int pnum, char *vname)
   btree *ext = &vol.ext;
   btree *cat = &vol.cat;
   ClassicHfsFormatGeometry geometry;
-  int i, result = 0;
+  size_t nameLength = vname ? strlen(vname) : 0;
+  int result = 0;
   block vbm[16];
 
-  if (strchr(vname, ':'))
+  if (vname && strchr(vname, ':'))
     {
       ERROR(EINVAL, "volume name may not contain colons");
       return -1;
     }
 
-  i = strlen(vname);
-  if (i < 1 || i > HFS_MAX_VLEN)
+  if (!nameLength || nameLength > HFS_MAX_VLEN)
     {
       ERROR(EINVAL, "volume name must be 1-27 chars");
       return -1;
@@ -695,49 +695,8 @@ int hfs_format(char *path, int pnum, char *vname)
 
   vol.lpa = geometry.sectorsPerBlock;
 
-  vol.mdb.drSigWord  = HFS_SIGWORD;
-  vol.mdb.drCrDate   = ClassicHfsFromUnixSeconds(time(0));
-  vol.mdb.drLsMod    = vol.mdb.drCrDate;
-  vol.mdb.drAtrb     = 0;
-  vol.mdb.drNmFls    = 0;
-  vol.mdb.drVBMSt    = 3;
-  vol.mdb.drAllocPtr = 0;
-  vol.mdb.drNmAlBlks = geometry.allocationBlocks;
-  vol.mdb.drAlBlkSiz = geometry.blockBytes;
-  vol.mdb.drClpSiz   = vol.mdb.drAlBlkSiz * 4;
-  vol.mdb.drAlBlSt   = geometry.firstAllocationSector;
-  vol.mdb.drNxtCNID  = HFS_CNID_ROOTDIR;  /* modified later */
-  vol.mdb.drFreeBks  = vol.mdb.drNmAlBlks;
-
-  strcpy(vol.mdb.drVN, vname);
-
-  vol.mdb.drVolBkUp  = 0;
-  vol.mdb.drVSeqNum  = 0;
-  vol.mdb.drWrCnt    = 0;
-  vol.mdb.drXTClpSiz = geometry.treeClumpBytes;
-  vol.mdb.drCTClpSiz = vol.mdb.drXTClpSiz;
-  vol.mdb.drNmRtDirs = 0;
-  vol.mdb.drFilCnt   = 0;
-  vol.mdb.drDirCnt   = -1;  /* incremented when root folder is created */
-
-  for (i = 0; i < 8; ++i)
-    vol.mdb.drFndrInfo[i] = 0;
-
-  vol.mdb.drVCSize   = 0;
-  vol.mdb.drVBMCSize = 0;
-  vol.mdb.drCtlCSize = 0;
-
-  vol.mdb.drXTFlSize = 0;
-  vol.mdb.drCTFlSize = 0;
-
-  for (i = 0; i < 3; ++i)
-    {
-      vol.mdb.drXTExtRec[i].xdrStABN    = 0;
-      vol.mdb.drXTExtRec[i].xdrNumABlks = 0;
-
-      vol.mdb.drCTExtRec[i].xdrStABN    = 0;
-      vol.mdb.drCTExtRec[i].xdrNumABlks = 0;
-    }
+  ClassicHfsInitMasterDirectory(&vol.mdb, &geometry, vname, nameLength,
+                                ClassicHfsFromUnixSeconds(time(0)));
 
   /* initialize volume bitmap */
 
