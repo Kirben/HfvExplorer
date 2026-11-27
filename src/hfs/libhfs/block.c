@@ -42,6 +42,7 @@
 # include "../../ClassicHfsRecovery.h"
 #endif
 #include "../ClassicHfsTime.h"
+#include "../ClassicHfsGeometry.h"
 # include "block.h"
 # include "low.h"
 
@@ -664,6 +665,20 @@ int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
   return 0;
 }
 
+static int allocation_sector(hfsvol *vol, unsigned anum, unsigned index, uint32_t *sector)
+{
+  if (!ClassicHfsAllocationSector(vol->mdb.drAlBlSt, vol->mdb.drNmAlBlks,
+                                  vol->lpa, vol->vlen, anum, index, sector)) {
+      ERROR(EIO, "allocation sector outside classic HFS volume");
+      return -1;
+  }
+  if (vol->vbm && !ClassicHfsBitIsSet(vol->vbm, anum)) {
+      ERROR(EIO, "unallocated classic HFS block");
+      return -1;
+  }
+  return 0;
+}
+
 /*
  * NAME:	block->readab()
  * DESCRIPTION:	read a block from an allocation block from a volume
@@ -671,20 +686,11 @@ int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
 int b_readab(hfsvol *vol,
 	     unsigned int anum, unsigned int index, block *bp)
 {
-  /* verify the allocation block exists and is marked as in-use */
+  uint32_t sector;
+  if (allocation_sector(vol, anum, index, &sector) < 0)
+    return -1;
 
-  if (anum >= vol->mdb.drNmAlBlks)
-    {
-      ERROR(EIO, "read nonexistent block");
-      return -1;
-    }
-  else if (vol->vbm && ! ClassicHfsBitIsSet(vol->vbm, anum))
-    {
-      ERROR(EIO, "read unallocated block");
-      return -1;
-    }
-
-  return b_readlb(vol, vol->mdb.drAlBlSt + anum * vol->lpa + index, bp);
+  return b_readlb(vol, sector, bp);
 }
 
 /*
@@ -694,18 +700,9 @@ int b_readab(hfsvol *vol,
 int b_writeab(hfsvol *vol,
 	      unsigned int anum, unsigned int index, block *bp)
 {
-  /* verify the allocation block exists and is marked as in-use */
-
-  if (anum >= vol->mdb.drNmAlBlks)
-    {
-      ERROR(EIO, "write nonexistent block");
-      return -1;
-    }
-  else if (vol->vbm && ! ClassicHfsBitIsSet(vol->vbm, anum))
-    {
-      ERROR(EIO, "write unallocated block");
-      return -1;
-    }
+  uint32_t sector;
+  if (allocation_sector(vol, anum, index, &sector) < 0)
+    return -1;
 
   vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
   vol->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));
@@ -713,5 +710,5 @@ int b_writeab(hfsvol *vol,
 
   vol->flags |= HFS_UPDATE_MDB;
 
-  return b_writelb(vol, vol->mdb.drAlBlSt + anum * vol->lpa + index, bp);
+  return b_writelb(vol, sector, bp);
 }

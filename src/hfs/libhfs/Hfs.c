@@ -50,6 +50,7 @@
 #endif
 
 # include "../ClassicHfsCatalogKey.h"
+#include "../ClassicHfsGeometry.h"
 # include "internal.h"
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
@@ -286,7 +287,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 
       /* do minimal consistency checks */
 
-      if (vol->mdb.drAlBlkSiz % HFS_BLOCKSZ != 0)
+      if (!vol->mdb.drAlBlkSiz || vol->mdb.drAlBlkSiz % HFS_BLOCKSZ != 0)
 	{
 	  close(vol->fd);
 	  v_destruct(vol);
@@ -295,9 +296,17 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  return 0;
 	}
 
-      if (vol->vlen == 0)
-	vol->vlen = vol->mdb.drAlBlSt +
-	  vol->mdb.drNmAlBlks * (vol->mdb.drAlBlkSiz >> HFS_BLOCKSZ_BITS) + 2;
+      if (vol->vlen == 0) {
+          uint32_t sectors;
+          if (!ClassicHfsVolumeSectors(vol->mdb.drAlBlSt, vol->mdb.drNmAlBlks,
+                                       vol->mdb.drAlBlkSiz >> HFS_BLOCKSZ_BITS, &sectors)) {
+              close(vol->fd);
+              v_destruct(vol);
+              ERROR(EINVAL, "invalid classic HFS volume length");
+              return 0;
+          }
+          vol->vlen = sectors;
+      }
 
       /* initialize volume block cache (OK to fail) */
 

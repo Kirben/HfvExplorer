@@ -11,6 +11,7 @@
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNode.h"
+#include "hfs/ClassicHfsGeometry.h"
 #include "hfs/ClassicHfsBitmap.h"
 #include "hfs/ClassicHfsTreeHeader.h"
 #include "hfs/ClassicHfsTime.h"
@@ -197,6 +198,17 @@ int main(int argc,char**argv){
   runs[0].xdrNumABlks = 0;
   must(ClassicHfsLocateBlock(runs, 20, 7, 7, &location) == ClassicHfsInvalidExtent,
        "missing mapping cannot advance overflow search");
+ }
+ {
+  uint32_t sector = 77;
+  must(ClassicHfsAllocationSector(16, 65535, 256, 16776978, 65534, 255, &sector) &&
+       sector == 16776975, "last allocation sector on a large image");
+  must(!ClassicHfsAllocationSector(16, 65535, 256, sector, 65534, 255, &sector) &&
+       !ClassicHfsAllocationSector(16, 65535, 256, UINT32_MAX, 1, 256, &sector) &&
+       !ClassicHfsAllocationSector(16, 65535, 0x100000, UINT32_MAX, 4096, 0, &sector) &&
+       sector == 16776975, "reject partition overrun, invalid index and wrapped sector");
+  must(ClassicHfsVolumeSectors(16, 65535, 256, &sector) && sector == 16776978 &&
+       !ClassicHfsVolumeSectors(16, 65535, 0x100000, &sector), "checked classic volume length");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
