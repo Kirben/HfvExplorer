@@ -31,5 +31,3 @@ void d_stores(unsigned char **, char *, int);
 
 unsigned long d_tomtime(unsigned long);
 unsigned long d_toutime(unsigned long);
-
-int d_relstring(char *, char *);

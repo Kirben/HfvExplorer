@@ -49,6 +49,7 @@
 
 #endif
 
+# include "../ClassicHfsNames.h"
 # include "internal.h"
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
@@ -525,7 +526,7 @@ hfsvol *hfs_getvol(char *name)
 
   for (vol = hfs_mounts; vol; vol = vol->next)
     {
-      if (d_relstring(name, vol->mdb.drVN) == 0)
+      if (ClassicHfsCompareNames(name, vol->mdb.drVN) == 0)
 	return vol;
     }
 
@@ -2019,7 +2020,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
       if (! moving && strcmp(srcname, dstname) == 0)
 	return 0;  /* source and destination are the same */
 
-      if (moving || d_relstring(srcname, dstname))
+      if (moving || ClassicHfsCompareNames(srcname, dstname))
 	{
 	  ERROR(EEXIST, "can't use destination name");
 	  return -1;

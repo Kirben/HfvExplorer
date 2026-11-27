@@ -20,6 +20,7 @@
 # include <string.h>
 # include <errno.h>
 
+# include "../ClassicHfsNames.h"
 # include "internal.h"
 # include "data.h"
 # include "record.h"
@@ -99,7 +100,7 @@ int r_comparecatkeys(unsigned char *pkey1, unsigned char *pkey2)
   if (diff)
     return diff;
 
-  return d_relstring(key1.ckrCName, key2.ckrCName);
+  return ClassicHfsCompareNames(key1.ckrCName, key2.ckrCName);
 }
 
 /*

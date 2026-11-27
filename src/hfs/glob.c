@@ -24,6 +24,7 @@
 # include "dstring.h"
 # include "hfs.h"
 # include "glob.h"
+# include "ClassicHfsNames.h"
 
 /*
  * NAME:	strmatch()
@@ -73,7 +74,7 @@ int strmatch(char *str, char *pat)
 
 		s = *str;
 
-		if (hfs_charorder[p0] == hfs_charorder[s])
+		if (ClassicHfsNameWeight(p0) == ClassicHfsNameWeight(s))
 		  break;
 
 		if (pat[1] == '-')
@@ -83,10 +84,10 @@ int strmatch(char *str, char *pat)
 		    if (p1 == 0)
 		      return 0;
 
-		    if ((hfs_charorder[p0] <= hfs_charorder[s] &&
-			 hfs_charorder[p1] >= hfs_charorder[s]) ||
-			(hfs_charorder[p0] >= hfs_charorder[s] &&
-			 hfs_charorder[p1] <= hfs_charorder[s]))
+		    if ((ClassicHfsNameWeight(p0) <= ClassicHfsNameWeight(s) &&
+			 ClassicHfsNameWeight(p1) >= ClassicHfsNameWeight(s)) ||
+			(ClassicHfsNameWeight(p0) >= ClassicHfsNameWeight(s) &&
+			 ClassicHfsNameWeight(p1) <= ClassicHfsNameWeight(s)))
 		      break;
 
 		    pat += 2;
@@ -115,8 +116,8 @@ int strmatch(char *str, char *pat)
 	  /* fall through */
 
 	default:
-	  if (hfs_charorder[(unsigned char) *pat] !=
-	      hfs_charorder[(unsigned char) *str])
+	  if (ClassicHfsNameWeight((unsigned char) *pat) !=
+	      ClassicHfsNameWeight((unsigned char) *str))
 	    return 0;
 	}
 

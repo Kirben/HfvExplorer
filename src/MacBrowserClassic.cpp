@@ -22,6 +22,7 @@ int hfs_recognizes_image_fd(int);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
 }
 #include "ClassicCatalog.h"
+#include "hfs/ClassicHfsNames.h"
 #include "ClassicCopyArchive.h"
 #include "ClassicImagePath.h"
 #include "ClassicHfsRecovery.h"
@@ -789,7 +790,7 @@ std::string ClassicCopyNameKey(const std::u16string& name)
 {
     auto key=Encode(name);
     // Match the catalog collation used by libhfs.
-    for(auto& byte:key)byte=char(hfs_charorder[static_cast<unsigned char>(byte)]);
+    for(auto& byte:key)byte=char(ClassicHfsNameWeight(static_cast<unsigned char>(byte)));
     return key;
 }
 

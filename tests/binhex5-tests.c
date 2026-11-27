@@ -8,6 +8,7 @@
 #undef ERROR
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsBytes.h"
+#include "hfs/ClassicHfsNames.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
 #include "hfs/crc.h"
@@ -37,6 +38,11 @@ int main(int argc,char**argv){
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
  must(hfs_format(image,0,label)==0,"format image");v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
+ must(ClassicHfsCompareNames("A", "a") == 0 && ClassicHfsCompareNames("a", "ab") < 0 &&
+      ClassicHfsCompareNames("\x80", "\x8a") == 0 && ClassicHfsCompareNames("a", "\x80") < 0 &&
+      ClassicHfsCompareNames(" ", "\xca") == 0, "classic MacRoman name ordering");
+ must(hfs_create(v,"BH5:\x80","TEXT","TEST")==0,"create accented catalog name");
+ must(hfs_create(v,"bh5:\x8a","TEXT","TEST")<0,"reject equivalent catalog name");
  for(k=0;k<sizeof(cases)/sizeof(cases[0]);k++){
   hfsfile*f;hfsdirent original,restored;unsigned char bytes[5000],*exported;unsigned size,i;unsigned d=cases[k][0],r=cases[k][1];
   if(k)must(hfs_delete(v,source)==0,"remove previous source");
@@ -75,6 +81,6 @@ int main(int argc,char**argv){
   for(i=0;i<2;i++){memset(b,0,128);b[1]=1;b[2]='X';b[83+4*i]=0x80;save(badpath,b,128);{char absent[]="BH5:TooLarge";must(cpi_macb(badpath,v,absent)==-1&&strstr(cpi_error,"bad file length")&&hfs_stat(v,absent,&e)==-1,"legacy fork limit preflight");}}
   free(b);
  }
- must(hfs_umount(v)==0,"persist image");v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen image");verify(v,target,4097,3073);must(hfs_umount(v)==0,"close image");
+ must(hfs_umount(v)==0,"persist image");v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen image");verify(v,target,4097,3073);verify(v,"bh5:\x8a",0,0);must(hfs_umount(v)==0,"close image");
  puts("PASS: BinHex 5/MacBinary I import/export, empty and aligned/unaligned forks, metadata/protected flag, Pascal names, unpadded final fork, preflight preservation, II CRC downgrade protection, secondary headers and Apple fork limits; synthetic files only");return 0;
 }

@@ -116,7 +116,6 @@ typedef struct {
 
 #include "../EngineContext.h"
 #define hfs_error (hfs_context_get()->error)
-extern unsigned char hfs_charorder[];
 
 hfsvol *hfs_mount(char *, int, int);
 int hfs_flush(hfsvol *);

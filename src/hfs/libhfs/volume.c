@@ -22,6 +22,7 @@
 # include <errno.h>
 # include <time.h>
 
+# include "../ClassicHfsNames.h"
 # include "internal.h"
 # include "data.h"
 # include "low.h"
@@ -376,7 +377,7 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
       name[nptr - path] = 0;
 
       /* The caller already selected the mount. A label only confirms it. */
-      if (d_relstring(vol->mdb.drVN, name) != 0)
+      if (ClassicHfsCompareNames(vol->mdb.drVN, name) != 0)
         {
           ERROR(ENOENT, "path does not name the selected HFS volume");
           return -1;
