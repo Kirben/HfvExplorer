@@ -177,62 +177,40 @@ int f_alloc(hfsfile *file)
       file->fabn = start;
     }
 
-  if (i >= 0 &&
-      file->ext[i].xdrStABN + file->ext[i].xdrNumABlks == blocks.xdrStABN)
-    file->ext[i].xdrNumABlks += blocks.xdrNumABlks;
-  else
-    {
-      /* create a new extent descriptor */
-
-      if (++i < 3)
-	file->ext[i] = blocks;
-      else
-	{
-	  unsigned char record[HFS_EXTRECMAXLEN];
-	  int reclen;
-
-	  /* record is full; create a new one */
-
-	  file->ext[0] = blocks;
-
-	  for (i = 1; i < 3; ++i)
-	    {
-	      file->ext[i].xdrStABN    = 0;
-	      file->ext[i].xdrNumABlks = 0;
-	    }
-
-	  file->fabn = start;
-
-	  reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
-	  reclen += ClassicHfsEncodeExtents(record + reclen, file->ext);
-
-	  if (bt_insert(&vol->ext, record, reclen) < 0)
-	    {
-	      v_freeblocks(vol, &blocks);
-	      return -1;
-	    }
-
-	  i = -1;
-	}
+  ExtDataRec updated;
+  int append = ClassicHfsAppendExtent(file->ext, file->fabn, end, vol->mdb.drNmAlBlks,
+                                      blocks, updated);
+  if (append == ClassicHfsCannotAppend) {
+    v_freeblocks(vol, &blocks);
+    ERROR(EIO, "inconsistent classic HFS fork extents at physical EOF");
+    return -1;
+  }
+  if (append == ClassicHfsNewOverflowRecord) {
+    unsigned char record[HFS_EXTRECMAXLEN];
+    int reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
+    reclen += ClassicHfsEncodeExtents(record + reclen, updated);
+    if (bt_insert(&vol->ext, record, reclen) < 0) {
+      v_freeblocks(vol, &blocks);
+      return -1;
     }
-
-  if (i >= 0)
-    {
+    file->fabn = end;
+  } else {
       /* store the modified extent record */
 
       if (file->fabn)
 	{
 	  if ((n.nnum == 0 &&
 	       v_extsearch(file, file->fabn, 0, &n) <= 0) ||
-	      v_putextrec(&file->ext, &n) < 0)
+	      v_putextrec(&updated, &n) < 0)
 	    {
 	      v_freeblocks(vol, &blocks);
 	      return -1;
 	    }
 	}
       else
-	memcpy(extrec, file->ext, sizeof(ExtDataRec));
+	memcpy(extrec, updated, sizeof(updated));
     }
+  memcpy(file->ext, updated, sizeof(updated));
 
   *pylen += blocks.xdrNumABlks * vol->mdb.drAlBlkSiz;
 

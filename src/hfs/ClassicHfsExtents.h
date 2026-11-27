@@ -28,6 +28,45 @@ static inline int ClassicHfsDecodeExtents(const unsigned char *bytes, ClassicHfs
     return ClassicHfsExtentBytes;
 }
 
+enum { ClassicHfsCannotAppend = -1, ClassicHfsExtendedRecord, ClassicHfsNewOverflowRecord };
+
+// Append to the final record only if it accounts for exactly the remaining
+// physical length. The returned record is staged separately for publication.
+static inline int ClassicHfsAppendExtent(const ClassicHfsExtent *current, unsigned recordStart,
+                                         unsigned eofBlocks, unsigned volumeBlocks,
+                                         ClassicHfsExtent added, ClassicHfsExtent *output)
+{
+    unsigned first = added.xdrStABN, length = added.xdrNumABlks;
+    if (!length || recordStart > eofBlocks || eofBlocks > volumeBlocks ||
+        length > volumeBlocks - eofBlocks || first >= volumeBlocks || length > volumeBlocks - first)
+        return ClassicHfsCannotAppend;
+    unsigned used = 0, logical = recordStart;
+    for (unsigned i = 0; i < ClassicHfsExtentCount; ++i) {
+        unsigned start = current[i].xdrStABN, size = current[i].xdrNumABlks;
+        if (!size)
+            continue;
+        if (i != used || size > eofBlocks - logical || start >= volumeBlocks ||
+            size > volumeBlocks - start || (start < first + length && first < start + size))
+            return ClassicHfsCannotAppend;
+        logical += size;
+        ++used;
+    }
+    if (logical != eofBlocks)
+        return ClassicHfsCannotAppend;
+    memcpy(output, current, ClassicHfsExtentCount * sizeof(*output));
+    if (used && current[used - 1].xdrStABN + current[used - 1].xdrNumABlks == first) {
+        output[used - 1].xdrNumABlks += added.xdrNumABlks;
+        return ClassicHfsExtendedRecord;
+    }
+    if (used < ClassicHfsExtentCount) {
+        output[used] = added;
+        return ClassicHfsExtendedRecord;
+    }
+    memset(output, 0, ClassicHfsExtentCount * sizeof(*output));
+    output[0] = added;
+    return ClassicHfsNewOverflowRecord;
+}
+
 enum ClassicHfsExtentLocation {
     ClassicHfsInvalidExtent,
     ClassicHfsMappedBlock,

@@ -388,6 +388,17 @@ int main(int argc,char**argv){
        entry->bnum == 131 && !entry->flags, "reserve clean victim for retry");
  }
  {
+  ClassicHfsExtent tail[3] = {{2,2},{7,1},{12,1}}, added = {13,2}, out[3] = {0};
+  must(ClassicHfsAppendExtent(tail, 8, 12, 32, added, out) == ClassicHfsExtendedRecord &&
+       out[2].xdrNumABlks == 3 && tail[2].xdrNumABlks == 1, "stage contiguous growth");
+  added.xdrStABN = 21;
+  must(ClassicHfsAppendExtent(tail, 8, 12, 32, added, out) == ClassicHfsNewOverflowRecord &&
+       out[0].xdrStABN == 21 && !out[1].xdrNumABlks, "start next overflow extent record");
+  added.xdrStABN = 7;
+  must(ClassicHfsAppendExtent(tail, 8, 12, 32, added, out) == ClassicHfsCannotAppend &&
+       out[0].xdrStABN == 21, "reject allocation overlapping tail before publication");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;
