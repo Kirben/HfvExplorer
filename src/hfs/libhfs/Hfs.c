@@ -63,7 +63,7 @@
 # include "file.h"
 # include "btree.h"
 # include "node.h"
-# include "record.h"
+#include "../ClassicHfsEntry.h"
 # include "volume.h"
 
 #include "..\..\filehook.h"
@@ -1133,7 +1133,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 		      &data, cname, 0) < 0)
 	return -1;
 
-      r_unpackdirent(HFS_CNID_ROOTPAR, cname, &data, ent);
+      ClassicHfsDescribeEntry(HFS_CNID_ROOTPAR, cname, &data, ent);
 
       dir->vptr = vol->next;
 
@@ -1190,7 +1190,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	{
 	case cdrDirRec:
 	case cdrFilRec:
-	  r_unpackdirent(key.ckrParID, key.ckrCName, &data, ent);
+	  ClassicHfsDescribeEntry(key.ckrParID, key.ckrCName, &data, ent);
 	  return 0;
 
 	case cdrThdRec:
@@ -1233,7 +1233,7 @@ int hfs_readdir2(
 					  pdata, cname, 0) < 0)
 				return -1;
 
-    r_unpackdirent(HFS_CNID_ROOTPAR, cname, pdata, ent);
+    ClassicHfsDescribeEntry(HFS_CNID_ROOTPAR, cname, pdata, ent);
     dir->vptr = vol->next;
     return 0;
   }
@@ -1271,7 +1271,7 @@ int hfs_readdir2(
     switch (pdata->cdrType) {
 			case cdrDirRec:
 			case cdrFilRec:
-				r_unpackdirent(pkey->ckrParID, pkey->ckrCName, pdata, ent);
+				ClassicHfsDescribeEntry(pkey->ckrParID, pkey->ckrCName, pdata, ent);
 				return 0;
 			case cdrThdRec:
 			case cdrFThdRec:
@@ -1531,7 +1531,7 @@ int hfs_stat(hfsvol *vol, char *path, hfsdirent *ent)
       v_resolve(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
-  r_unpackdirent(parid, name, &data, ent);
+  ClassicHfsDescribeEntry(parid, name, &data, ent);
 
   return 0;
 }
@@ -1542,7 +1542,7 @@ int hfs_stat(hfsvol *vol, char *path, hfsdirent *ent)
  */
 int hfs_fstat(hfsfile *file, hfsdirent *ent)
 {
-  r_unpackdirent(file->parid, file->name, &file->cat, ent);
+  ClassicHfsDescribeEntry(file->parid, file->name, &file->cat, ent);
 
   return 0;
 }
@@ -1566,7 +1566,7 @@ static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
       return -1;
     }
 
-  r_packdirent(&data, ent);
+  ClassicHfsApplyEntry(&data, ent);
 
   if (v_putcatrec(&data, &n) < 0)
     return -1;
@@ -1586,7 +1586,7 @@ int hfs_fsetattr(hfsfile *file, hfsdirent *ent)
       return -1;
     }
 
-  r_packdirent(&file->cat, ent);
+  ClassicHfsApplyEntry(&file->cat, ent);
 
   file->flags |= HFS_UPDATE_CATREC;
 

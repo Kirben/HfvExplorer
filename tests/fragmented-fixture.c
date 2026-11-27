@@ -9,7 +9,6 @@
 #include "hfs/libhfs/internal.h"
 #include "hfs/libhfs/block.h"
 #include "hfs/libhfs/file.h"
-#include "hfs/libhfs/record.h"
 #include "hfs/libhfs/btree.h"
 #include "hfs/libhfs/volume.h"
 #include "FragmentedTestData.h"

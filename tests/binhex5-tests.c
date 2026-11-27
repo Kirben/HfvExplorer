@@ -11,6 +11,7 @@
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsCatalogThread.h"
 #include "hfs/ClassicHfsDirectory.h"
+#include "hfs/ClassicHfsEntry.h"
 #include "hfs/ClassicHfsCatalogFile.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNodeIO.h"
@@ -563,6 +564,23 @@ int main(int argc,char**argv){
         ClassicHfsEncodeCatalogRecord(output,size,&record)==size && !memcmp(input,output,size) &&
         output[size]==0xcc, "bounded catalog encode and reserved type byte");
   }
+ }
+ {
+  ClassicHfsCatalogRecord record = {0}; hfsdirent entry = {0};
+  record.cdrType = cdrFilRec;
+  record.u.fil.filFlags = 0x42;
+  record.u.fil.filFlNum = 100;
+  record.u.fil.filRLgLen = 200;
+  record.u.fil.filResrv = 300;
+  ClassicHfsDescribeEntry(2,"Example",&record,&entry);
+  must(entry.cnid==100 && entry.u.file.rsize==200 && !strcmp(entry.name,"Example"),
+       "describe file identity and resource length");
+  entry.flags |= HFS_ISLOCKED; entry.cnid=0; entry.u.file.rsize=0;
+  memcpy(entry.u.file.type,"TEXT",4);
+  ClassicHfsApplyEntry(&record,&entry);
+  must(record.u.fil.filFlags==0x43 && record.u.fil.filUsrWds.fdType==0x54455854 &&
+       record.u.fil.filFlNum==100 && record.u.fil.filRLgLen==200 && record.u.fil.filResrv==300,
+       "entry edits preserve identity, fork length, reserved fields and other flags");
  }
  {
   unsigned char source[106], output[107];

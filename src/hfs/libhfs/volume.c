@@ -28,7 +28,6 @@
 #include "../ClassicHfsTime.h"
 # include "low.h"
 # include "btree.h"
-# include "record.h"
 # include "volume.h"
 
 static HFV_THREAD_LOCAL int m_invalid_cd_hack = 0;

@@ -67,7 +67,6 @@
     <ClCompile Include="hfs\libhfs\hfs.c" />
     <ClCompile Include="hfs\libhfs\low.c" />
     <ClCompile Include="hfs\libhfs\node.c" />
-    <ClCompile Include="hfs\libhfs\record.c" />
     <ClCompile Include="hfs\libhfs\volume.c" />
     <ClCompile Include="filehook.c" />
     <ClCompile Include="hfs\interface.c" />
