@@ -41,7 +41,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
  for(i=0;i<length/512;++i) must(ClassicHfsReadForkSector(&v->ext.f,i,(block*)(bytes+i*512))==0,"snapshot overflow tree");
  k=0;
  for(i=0;i<10;++i) for(j=0;j<pieces[i].xdrNumABlks*v->lpa;++j,++k)
-  must(b_writeab(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(bytes+k*512))==0,"relocate overflow tree");
+  must(ClassicHfsTransferAllocationSector(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(bytes+k*512),1)==0,"relocate overflow tree");
  memcpy(v->ext.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec)); memcpy(v->ext.f.ext,pieces,sizeof(ExtDataRec)); v->ext.f.fabn=0;
  memcpy(v->mdb.drXTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;
  for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(ClassicHfsReleaseVolumeExtent(v,&old[i])==0,"release relocated extent");
@@ -117,7 +117,7 @@ void CreateFragmentedFixture(const char* directory) {
  }
  k=0;
  for(i=0;i<10;++i) for(j=0;j<pieces[i].xdrNumABlks*v->lpa;++j,++k)
-  must(b_writeab(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(catalog+k*512))==0,"relocate catalog contents");
+  must(ClassicHfsTransferAllocationSector(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(catalog+k*512),1)==0,"relocate catalog contents");
  memcpy(v->cat.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec));
  memcpy(v->cat.f.ext,pieces,sizeof(ExtDataRec)); v->cat.f.fabn=0;
  memcpy(v->mdb.drCTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;

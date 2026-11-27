@@ -8,6 +8,7 @@
 #undef ERROR
 #include <errno.h>
 #include "hfs/libhfs/internal.h"
+#include "hfs/libhfs/block.h"
 #include "hfs/libhfs/btree.h"
 #include "hfs/ClassicHfsTreeFlush.h"
 #include "hfs/ClassicHfsVolumeAllocation.h"
@@ -166,6 +167,21 @@ static void verify_repeated_tree_map(char *image)
 }
 
 int main(int argc,char**argv){
+    {
+        hfsvol volume = {0};
+        block sector = {0}, bitmap = {0x80};
+        volume.lpa = 1; volume.vlen = 8;
+        volume.mdb.drAlBlSt = 4; volume.mdb.drNmAlBlks = 1;
+        volume.mdb.drAtrb = HFS_ATRB_UMOUNTED;
+        must(ClassicHfsTransferAllocationSector(&volume, 0, 0, &sector, 1) < 0 && errno == EIO &&
+             !volume.flags && !volume.mdb.drWrCnt, "missing allocation bitmap rejects writes");
+        volume.vbm = &bitmap;
+        volume.flags = HFS_WRITE_FAILED;
+        must(ClassicHfsTransferAllocationSector(&volume, 0, 0, &sector, 1) < 0 &&
+             volume.mdb.drAtrb == HFS_ATRB_UMOUNTED && !volume.mdb.drLsMod &&
+             !volume.mdb.drWrCnt && volume.flags == HFS_WRITE_FAILED,
+             "failed sector submission preserves master directory metadata");
+    }
     {
         char map = (char)0xc0;
         btree tree = {0};

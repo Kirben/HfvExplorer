@@ -446,50 +446,30 @@ int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
   return 0;
 }
 
-static int allocation_sector(hfsvol *vol, unsigned anum, unsigned index, uint32_t *sector)
+int ClassicHfsTransferAllocationSector(hfsvol *volume, unsigned number, unsigned index,
+                                       block *bytes, int writing)
 {
-  if (!ClassicHfsAllocationSector(vol->mdb.drAlBlSt, vol->mdb.drNmAlBlks,
-                                  vol->lpa, vol->vlen, anum, index, sector)) {
-      ERROR(EIO, "allocation sector outside classic HFS volume");
-      return -1;
-  }
-  if (vol->vbm && !ClassicHfsBitIsSet(vol->vbm, anum)) {
-      ERROR(EIO, "unallocated classic HFS block");
-      return -1;
-  }
-  return 0;
-}
-
-/*
- * NAME:	block->readab()
- * DESCRIPTION:	read a block from an allocation block from a volume
- */
-int b_readab(hfsvol *vol,
-	     unsigned int anum, unsigned int index, block *bp)
-{
-  uint32_t sector;
-  if (allocation_sector(vol, anum, index, &sector) < 0)
-    return -1;
-
-  return b_readlb(vol, sector, bp);
-}
-
-/*
- * NAME:	b->writeab()
- * DESCRIPTION:	write a block to an allocation block to a volume
- */
-int b_writeab(hfsvol *vol,
-	      unsigned int anum, unsigned int index, block *bp)
-{
-  uint32_t sector;
-  if (allocation_sector(vol, anum, index, &sector) < 0)
-    return -1;
-
-  vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
-  vol->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));
-  ++vol->mdb.drWrCnt;
-
-  vol->flags |= HFS_UPDATE_MDB;
-
-  return b_writelb(vol, sector, bp);
+    uint32_t sector;
+    if (!ClassicHfsAllocationSector(volume->mdb.drAlBlSt, volume->mdb.drNmAlBlks,
+                                    volume->lpa, volume->vlen, number, index, &sector)) {
+        ERROR(EIO, "allocation sector outside classic HFS volume");
+        return -1;
+    }
+    if (writing && (volume->flags & HFS_READONLY)) {
+        ERROR(EROFS, "classic HFS volume is read-only");
+        return -1;
+    }
+    if ((writing && !volume->vbm) || (volume->vbm && !ClassicHfsBitIsSet(volume->vbm, number))) {
+        ERROR(EIO, "allocation sector is not marked in the classic HFS bitmap");
+        return -1;
+    }
+    if (!writing)
+        return b_readlb(volume, sector, bytes);
+    if (b_writelb(volume, sector, bytes) < 0)
+        return -1;
+    volume->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
+    volume->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));
+    ++volume->mdb.drWrCnt;
+    volume->flags |= HFS_UPDATE_MDB;
+    return 0;
 }

@@ -144,8 +144,7 @@ static int ClassicHfsTransferForkSector(hfsfile *file, uint32_t number, block *b
         { ERROR(EIO, "invalid classic HFS fork extent or sector"); }
     if (mapped <= 0)
         return -1;
-    return writing ? b_writeab(file->vol, physical, sector, bytes)
-                   : b_readab(file->vol, physical, sector, bytes);
+    return ClassicHfsTransferAllocationSector(file->vol, physical, sector, bytes, writing);
 }
 
 int ClassicHfsReadForkSector(void *file, uint32_t sector, block *bytes)
