@@ -154,7 +154,7 @@ void DeleteMovedSources(const std::vector<Location>& sources,const std::vector<s
   if(report){
    auto progress=job.progress();
    progress.phase="Removing moved sources";
-   progress.path=Utf8(checked[i].volume->Stat(checked[i].id).name);
+   progress.path=Utf8(checked[i].entry.name);
    job.progress(progress);
    if(job.cancelled())
     throw OperationError(ERROR_CANCELLED,"Destination copies were published. Source entries removed: "+std::to_string(removed)+
