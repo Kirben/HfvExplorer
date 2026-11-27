@@ -24,6 +24,6 @@
 <ClCompile Include="..\src\hfs\ClassicHfsForkStorage.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsMount.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsNodeMutation.c" />
-<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="image-roundtrip.c" /></ItemGroup>
+<ClCompile Include="DisposableHfsRecoveryHooks.c" /><ClCompile Include="..\src\Filehook.c" /><ClCompile Include="image-roundtrip.c" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

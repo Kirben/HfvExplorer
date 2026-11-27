@@ -10,7 +10,7 @@
   <Import Project="..\WindowsCompatibility.props" />
   <PropertyGroup><OutDir>$(ProjectDir)..\bin\x64\</OutDir><IntDir>$(ProjectDir)..\obj\cd-readonly\</IntDir><TargetName>cd-readonly</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_CD_TESTING;HFV_READONLY_CD;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile><LanguageStandard>stdcpp17</LanguageStandard><MultiProcessorCompilation>true</MultiProcessorCompilation><WarningLevel>Level3</WarningLevel><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>HFV_CD_TESTING;HFV_READONLY_CD;__EMX__;WIN32;NDEBUG;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
     <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_CD_TESTING;HFV_READONLY_CD;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
     <Link><SubSystem>Console</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
@@ -24,6 +24,6 @@
 <ClCompile Include="..\src\hfs\ClassicHfsForkStorage.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsMount.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsNodeMutation.c" />
-<ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlySource.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
+<ClCompile Include="DisposableHfsRecoveryHooks.c" /><ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-readonly.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlySource.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
