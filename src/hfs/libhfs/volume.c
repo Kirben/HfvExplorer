@@ -256,21 +256,15 @@ int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
  * NAME:	vol->freeblocks()
  * DESCRIPTION:	deallocate a contiguous range of blocks
  */
-void v_freeblocks(hfsvol *vol, ExtDescriptor *blocks)
+int v_freeblocks(hfsvol *vol, const ExtDescriptor *blocks)
 {
-  unsigned int start, len, pt;
-  block *vbm;
-
-  start = blocks->xdrStABN;
-  len   = blocks->xdrNumABlks;
-  vbm   = vol->vbm;
-
-  vol->mdb.drFreeBks += len;
-
-  for (pt = start; pt < start + len; ++pt)
-    ClassicHfsClearBit(vbm, pt);
-
+  if (!ClassicHfsReleaseBlocks(vol->vbm, vol->mdb.drNmAlBlks, blocks->xdrStABN,
+                              blocks->xdrNumABlks, &vol->mdb.drFreeBks)) {
+      ERROR(EIO, "invalid classic HFS extent release");
+      return -1;
+  }
   vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
+  return 0;
 }
 
 /*

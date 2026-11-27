@@ -347,13 +347,19 @@ int f_trunc(hfsfile *file)
     {
       ExtDescriptor blocks;
 
-      file->ext[i].xdrNumABlks -= start - end;
-      dlen -= start - end;
-
-      blocks.xdrStABN    = file->ext[i].xdrStABN + file->ext[i].xdrNumABlks;
-      blocks.xdrNumABlks = start - end;
-
-      v_freeblocks(file->vol, &blocks);
+      unsigned int release = start - end;
+      unsigned int kept = file->ext[i].xdrNumABlks - release;
+      unsigned int first = file->ext[i].xdrStABN + kept;
+      if (release > dlen || first > UINT16_MAX) {
+          ERROR(EIO, "invalid classic HFS fork tail");
+          return -1;
+      }
+      blocks.xdrStABN = (uint16_t)first;
+      blocks.xdrNumABlks = (uint16_t)release;
+      if (v_freeblocks(file->vol, &blocks) < 0)
+          return -1;
+      file->ext[i].xdrNumABlks = (uint16_t)kept;
+      dlen -= release;
     }
 
   *pylen = newpylen;
@@ -380,8 +386,9 @@ int f_trunc(hfsfile *file)
 	      return -1;
 	    }
 
+	  if (v_freeblocks(file->vol, &file->ext[i]) < 0)
+	    return -1;
 	  dlen -= num;
-	  v_freeblocks(file->vol, &file->ext[i]);
 
 	  file->ext[i].xdrStABN    = 0;
 	  file->ext[i].xdrNumABlks = 0;

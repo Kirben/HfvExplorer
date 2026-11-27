@@ -31,7 +31,7 @@ int v_putcatrec(CatDataRec *, node *);
 int v_putextrec(ExtDataRec *, node *);
 
 int v_allocblocks(hfsvol *, ExtDescriptor *);
-void v_freeblocks(hfsvol *, ExtDescriptor *);
+int v_freeblocks(hfsvol *, const ExtDescriptor *);
 
 int v_resolve(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 

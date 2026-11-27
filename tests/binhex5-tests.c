@@ -165,6 +165,22 @@ int main(int argc,char**argv){
    }
   }
  }
+ {
+  unsigned char map[2] = {0x07, 0xe0};
+  uint16_t freeBlocks = 10;
+  must(!ClassicHfsReleaseBlocks(map, 16, 5, 7, &freeBlocks) &&
+       map[0] == 7 && map[1] == 0xe0 && freeBlocks == 10, "partial double free is atomic");
+  must(!ClassicHfsReleaseBlocks(map, 16, 15, 2, &freeBlocks) &&
+       !ClassicHfsReleaseBlocks(map, 16, UINT32_MAX, 1, &freeBlocks), "invalid release range");
+  freeBlocks = 15;
+  must(!ClassicHfsReleaseBlocks(map, 16, 5, 6, &freeBlocks) &&
+       map[0] == 7 && map[1] == 0xe0 && freeBlocks == 15, "invalid free count preserves bitmap");
+  freeBlocks = 10;
+  must(ClassicHfsReleaseBlocks(map, 16, 5, 6, &freeBlocks) &&
+       map[0] == 0 && map[1] == 0 && freeBlocks == 16, "release across bitmap bytes");
+  must(!ClassicHfsReleaseBlocks(map, 16, 5, 6, &freeBlocks) && freeBlocks == 16,
+       "reject repeated release");
+ }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);

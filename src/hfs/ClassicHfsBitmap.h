@@ -20,6 +20,23 @@ static inline void ClassicHfsClearBit(void *bitmap, uint32_t index)
     bytes[index / 8] &= (unsigned char)~(0x80u >> (index % 8));
 }
 
+// Validate the complete range before freeing any of it. Keep the arithmetic
+// wide enough to reject extents whose end exceeds the 16-bit volume limit.
+static inline int ClassicHfsReleaseBlocks(void *bitmap, unsigned count, unsigned first,
+                                          unsigned length, uint16_t *freeBlocks)
+{
+    if (!bitmap || !length || first >= count || length > count - first ||
+        count > UINT16_MAX || *freeBlocks > count - length)
+        return 0;
+    for (unsigned i = first; i < first + length; ++i)
+        if (!ClassicHfsBitIsSet(bitmap, i))
+            return 0;
+    for (unsigned i = first; i < first + length; ++i)
+        ClassicHfsClearBit(bitmap, i);
+    *freeBlocks = (uint16_t)(*freeBlocks + length);
+    return 1;
+}
+
 // Prefer the first adequate extent from the allocation hint. Otherwise use
 // the longest partial extent. A run can cross the hint, never the disk end.
 static inline unsigned ClassicHfsFindFreeRun(const void *bitmap, unsigned count,

@@ -44,7 +44,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
   must(b_writeab(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(bytes+k*512))==0,"relocate overflow tree");
  memcpy(v->ext.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec)); memcpy(v->ext.f.ext,pieces,sizeof(ExtDataRec)); v->ext.f.fabn=0;
  memcpy(v->mdb.drXTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;
- for(i=0;i<3;++i) if(old[i].xdrNumABlks) v_freeblocks(v,&old[i]);
+ for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(v_freeblocks(v,&old[i])==0,"release relocated extent");
  out=fopen(oracle,"wb"); must(out!=NULL,"create extents oracle");
  must(fwrite(bytes,length,1,out)==1,"save pre-relocation extents oracle"); fclose(out);
  free(bytes); must(hfs_umount(v)==0,"persist self-fragmented overflow tree");
@@ -121,7 +121,7 @@ void CreateFragmentedFixture(const char* directory) {
  memcpy(v->cat.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec));
  memcpy(v->cat.f.ext,pieces,sizeof(ExtDataRec)); v->cat.f.fabn=0;
  memcpy(v->mdb.drCTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;
- for(i=0;i<3;++i) if(old[i].xdrNumABlks) v_freeblocks(v,&old[i]);
+ for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(v_freeblocks(v,&old[i])==0,"release relocated extent");
  free(catalog); must(hfs_umount(v)==0,"persist fragmented catalog");
  v=hfs_mount(m.image,0,O_RDONLY); must(v!=NULL,"independent reopen fragmented catalog");
  f=hfs_open(v,"Fragments:Fragment00"); must(f!=NULL,"find file through fragmented catalog");
