@@ -53,6 +53,7 @@
 #include "../ClassicHfsGeometry.h"
 #include "../ClassicHfsForkIO.h"
 # include "internal.h"
+#include "../ClassicHfsCatalogLeaf.h"
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
 #endif
@@ -925,7 +926,6 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 {
   CatKeyRec key;
   CatDataRec data;
-  unsigned char *ptr;
 
   if (dir->dirid == 0)
     {
@@ -985,10 +985,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	  dir->n.rnum = 0;
 	}
 
-      ptr = HFS_NODEREC(dir->n, dir->n.rnum);
-
-      int payload = ClassicHfsCatalogPayload(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], &key);
-      if (!payload) {
+      if (!ClassicHfsReadLeafEntry(dir->n.data, dir->n.roff, dir->n.nd.ndNRecs, dir->n.rnum, &key, &data)) {
         ERROR(EIO, "invalid catalog key");
         return -1;
       }
@@ -999,8 +996,6 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	  ERROR(ENOENT, "no more entries");
 	  return -1;
 	}
-
-      ClassicHfsDecodeCatalogRecord(ptr + payload, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum] - payload, &data);
 
       switch (data.cdrType)
 	{
@@ -1030,7 +1025,6 @@ int hfs_readdir2(
   CatDataRec *pdata
 )
 {
-  unsigned char *ptr;
 
   if (dir->dirid == 0) {
 	  hfsvol *vol;
@@ -1072,9 +1066,7 @@ int hfs_readdir2(
 	    }
 		  dir->n.rnum = 0;
 		}
-    ptr = HFS_NODEREC(dir->n, dir->n.rnum);
-    int payload = ClassicHfsCatalogPayload(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], pkey);
-      if (!payload) {
+    if (!ClassicHfsReadLeafEntry(dir->n.data, dir->n.roff, dir->n.nd.ndNRecs, dir->n.rnum, pkey, pdata)) {
       ERROR(EIO, "invalid catalog key");
       return -1;
     }
@@ -1083,7 +1075,7 @@ int hfs_readdir2(
 		  ERROR(ENOENT, "no more entries");
 			return -1;
 		}
-    ClassicHfsDecodeCatalogRecord(ptr + payload, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum] - payload, pdata);
+
     switch (pdata->cdrType) {
 			case cdrDirRec:
 			case cdrFilRec:

@@ -24,6 +24,7 @@
 
 # include "../ClassicHfsNames.h"
 # include "internal.h"
+#include "../ClassicHfsCatalogLeaf.h"
 #include "../ClassicHfsPath.h"
 #include "../ClassicHfsTime.h"
 # include "low.h"
@@ -48,7 +49,6 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
   CatKeyRec key;
   unsigned char pkey[HFS_CATKEYLEN];
   node n;
-  unsigned char *ptr;
   int found;
 
   if (np == 0)
@@ -63,18 +63,12 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
   if (found <= 0)
     return found;
 
-  ptr = HFS_NODEREC(*np, np->rnum);
-
-  int payload = ClassicHfsCatalogPayload(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum], &key);
-  if (!payload) {
+  if (!ClassicHfsReadLeafEntry(np->data, np->roff, np->nd.ndNRecs, np->rnum, &key, data)) {
     ERROR(EIO, "invalid classic HFS catalog record");
     return -1;
   }
   if (cname)
     strcpy(cname, key.ckrCName);
-  if (data)
-    ClassicHfsDecodeCatalogRecord(ptr + payload, np->roff[np->rnum + 1] - np->roff[np->rnum] - payload, data);
-
   return 1;
 }
 
@@ -191,20 +185,10 @@ int v_getthread(hfsvol *vol, long id, CatDataRec *thread, node *np, int type)
  */
 int v_putcatrec(CatDataRec *data, node *np)
 {
-  unsigned char pdata[HFS_CATDATALEN], *ptr;
-  int len = 0;
-
-  len = ClassicHfsEncodeCatalogRecord(pdata, sizeof(pdata), data);
-
-  ptr = HFS_NODEREC(*np, np->rnum);
-  int available = np->roff[np->rnum + 1] - np->roff[np->rnum];
-  int payload = ClassicHfsCatalogPayload(ptr, available, 0);
-  if (!payload || len <= 0 || len > available - payload || pdata[0] != ptr[payload]) {
-    ERROR(EIO, "catalog update exceeds existing record");
+  if (!ClassicHfsUpdateLeafEntry(np->data, np->roff, np->nd.ndNRecs, np->rnum, data)) {
+    ERROR(EIO, "invalid classic HFS catalog update");
     return -1;
   }
-  memcpy(ptr + payload, pdata, len);
-
   return bt_putnode(np);
 }
 

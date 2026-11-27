@@ -9,6 +9,7 @@
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
+#include "hfs/ClassicHfsCatalogLeaf.h"
 #include "hfs/ClassicHfsCatalogThread.h"
 #include "hfs/ClassicHfsDirectory.h"
 #include "hfs/ClassicHfsEntry.h"
@@ -123,6 +124,19 @@ static void verify_formatted_tree_headers(const char *image)
 }
 
 int main(int argc,char**argv){
+    {
+        unsigned char sector[512] = {0}, before[512];
+        uint16_t offsets[] = {14, 24};
+        ClassicHfsCatalogRecord record = {0};
+        record.cdrType = cdrFilRec;
+        int key = ClassicHfsWriteCatalogKey(sector + 14, 2, "X");
+        sector[14 + key] = cdrFilRec;
+        memcpy(before, sector, sizeof(before));
+        must(!ClassicHfsReadLeafEntry(sector, offsets, 1, 0, NULL, &record) &&
+             !ClassicHfsUpdateLeafEntry(sector, offsets, 1, 0, &record) &&
+             !ClassicHfsUpdateLeafEntry(sector, offsets, 1, -1, &record) &&
+             !memcmp(before, sector, sizeof(before)), "reject truncated catalog leaf and invalid slot before update");
+    }
     {
         ClassicHfsCatalogRecord disk = {0}, opened = {0}, staged = {0};
         opened.cdrType = disk.cdrType = cdrFilRec;
