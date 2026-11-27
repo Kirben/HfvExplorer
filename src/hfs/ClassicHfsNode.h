@@ -49,6 +49,27 @@ static inline int ClassicHfsCompactNode(unsigned char *bytes, uint16_t *offsets,
     return 1;
 }
 
+// Insert an external record at a slot, leaving room for the enlarged offset table.
+static inline int ClassicHfsInsertNodeRecord(unsigned char *bytes, uint16_t *offsets,
+                                             uint16_t *count, unsigned slot,
+                                             const unsigned char *record, unsigned length)
+{
+    if (*count >= ClassicHfsMaxRecords || slot > *count || !length || (length & 1) ||
+        !ClassicHfsValidOffsets(*count, offsets))
+        return 0;
+    unsigned end = offsets[*count];
+    unsigned limit = ClassicHfsNodeSize - 2 * (*count + 2);
+    if (end > limit || length > limit - end)
+        return 0;
+    unsigned start = offsets[slot];
+    memmove(bytes + start + length, bytes + start, end - start);
+    memcpy(bytes + start, record, length);
+    for (unsigned i = *count + 1; i > slot; --i)
+        offsets[i] = (uint16_t)(offsets[i - 1] + length);
+    ++*count;
+    return 1;
+}
+
 static inline int ClassicHfsDecodeNode(const unsigned char *bytes, ClassicHfsNodeDescriptor *node,
                                       uint16_t *offsets)
 {

@@ -149,6 +149,20 @@ int main(int argc,char**argv){
        "compact fully deleted node");
  }
  {
+  unsigned char bytes[512] = {0}, record[494] = {1, 2};
+  uint16_t offsets[ClassicHfsMaxRecords + 1] = {14}, count = 0;
+  must(ClassicHfsInsertNodeRecord(bytes, offsets, &count, 0, record, 490),
+       "insert large record in empty node");
+  must(!ClassicHfsInsertNodeRecord(bytes, offsets, &count, 2, record, 2) &&
+       !ClassicHfsInsertNodeRecord(bytes, offsets, &count, 0, record, 4) &&
+       count == 1 && offsets[1] == 504 && bytes[14] == 1,
+       "reject invalid slot and offset-table overlap before insertion");
+  record[0] = 3;
+  must(ClassicHfsInsertNodeRecord(bytes, offsets, &count, 0, record, 2) &&
+       count == 2 && offsets[1] == 16 && offsets[2] == 506 &&
+       bytes[14] == 3 && bytes[16] == 1, "insert before large record at exact capacity");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

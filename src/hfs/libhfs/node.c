@@ -199,12 +199,15 @@ int n_split(node *left, unsigned char *record, int *reclen)
     return -1;
 
   n_search(&right, record);
-  if (right.rnum >= 0)
-    n_insertx(&right, record, *reclen);
+  if (right.rnum >= 0) {
+    if (n_insertx(&right, record, *reclen) < 0)
+      return -1;
+  }
   else
     {
       n_search(left, record);
-      n_insertx(left, record, *reclen);
+      if (n_insertx(left, record, *reclen) < 0)
+        return -1;
     }
 
   /* store the new/modified nodes */
@@ -248,27 +251,14 @@ int n_split(node *left, unsigned char *record, int *reclen)
  * NAME:	node->insertx()
  * DESCRIPTION:	insert a record into a node (which must already have room)
  */
-void n_insertx(node *np, unsigned char *record, int reclen)
+int n_insertx(node *np, unsigned char *record, int reclen)
 {
-  int rnum, i;
-  unsigned char *ptr;
-
-  rnum = np->rnum + 1;
-
-  /* push other records down to make room */
-
-  for (ptr = HFS_NODEREC(*np, np->nd.ndNRecs) + reclen;
-       ptr > HFS_NODEREC(*np, rnum) + reclen; --ptr)
-    *(ptr - 1) = *(ptr - 1 - reclen);
-
-  ++np->nd.ndNRecs;
-
-  for (i = np->nd.ndNRecs; i > rnum; --i)
-    np->roff[i] = np->roff[i - 1] + reclen;
-
-  /* write the new record */
-
-  memcpy(HFS_NODEREC(*np, rnum), record, reclen);
+  if (!ClassicHfsInsertNodeRecord(np->data, np->roff, &np->nd.ndNRecs,
+                                  np->rnum + 1, record, reclen)) {
+    ERROR(EIO, "record does not fit in classic HFS B-tree node");
+    return -1;
+  }
+  return 0;
 }
 
 /*
@@ -286,7 +276,8 @@ int n_insert(node *np, unsigned char *record, int *reclen)
       *reclen + 2 > NODESPACE(*np))
     return n_split(np, record, reclen);
 
-  n_insertx(np, record, *reclen);
+  if (n_insertx(np, record, *reclen) < 0)
+    return -1;
   *reclen = 0;
 
   return bt_putnode(np);

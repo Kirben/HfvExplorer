@@ -481,10 +481,12 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
       /* insert index records for new root */
 
       n_search(&root, oroot);
-      n_insertx(&root, oroot, orootlen);
+      if (n_insertx(&root, oroot, orootlen) < 0)
+        return -1;
 
       n_search(&root, record);
-      n_insertx(&root, record, reclen);
+      if (n_insertx(&root, record, reclen) < 0)
+        return -1;
 
       if (bt_putnode(&root) < 0)
 	return -1;

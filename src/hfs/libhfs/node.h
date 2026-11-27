@@ -27,7 +27,7 @@ int n_search(node *, unsigned char *);
 void n_index(btree *, unsigned char *, unsigned long, unsigned char *, int *);
 int n_split(node *, unsigned char *, int *);
 
-void n_insertx(node *, unsigned char *, int);
+int n_insertx(node *, unsigned char *, int);
 int n_insert(node *, unsigned char *, int *);
 
 int n_merge(node *, node *, unsigned char *, int *);
