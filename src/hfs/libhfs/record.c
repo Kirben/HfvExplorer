@@ -103,17 +103,9 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
 
       ClassicHfsAppend16(&pdata, data->u.fil.filClpSize);
 
-      for (i = 0; i < 3; ++i)
-	{
-	  ClassicHfsAppend16(&pdata, data->u.fil.filExtRec[i].xdrStABN);
-	  ClassicHfsAppend16(&pdata, data->u.fil.filExtRec[i].xdrNumABlks);
-	}
+      pdata += ClassicHfsEncodeExtents(pdata, data->u.fil.filExtRec);
 
-      for (i = 0; i < 3; ++i)
-	{
-	  ClassicHfsAppend16(&pdata, data->u.fil.filRExtRec[i].xdrStABN);
-	  ClassicHfsAppend16(&pdata, data->u.fil.filRExtRec[i].xdrNumABlks);
-	}
+      pdata += ClassicHfsEncodeExtents(pdata, data->u.fil.filRExtRec);
 
       ClassicHfsAppend32(&pdata, data->u.fil.filResrv);
       break;
@@ -219,17 +211,9 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
 
       data->u.fil.filClpSize = ClassicHfsTake16(&pdata);
 
-      for (i = 0; i < 3; ++i)
-	{
-	  data->u.fil.filExtRec[i].xdrStABN = ClassicHfsTake16(&pdata);
-	  data->u.fil.filExtRec[i].xdrNumABlks = ClassicHfsTake16(&pdata);
-	}
+      pdata += ClassicHfsDecodeExtents(pdata, data->u.fil.filExtRec);
 
-      for (i = 0; i < 3; ++i)
-	{
-	  data->u.fil.filRExtRec[i].xdrStABN = ClassicHfsTake16(&pdata);
-	  data->u.fil.filRExtRec[i].xdrNumABlks = ClassicHfsTake16(&pdata);
-	}
+      pdata += ClassicHfsDecodeExtents(pdata, data->u.fil.filRExtRec);
 
       data->u.fil.filResrv = ClassicHfsTake32(&pdata);
       break;
@@ -254,40 +238,6 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
     default:
       abort();
 # endif
-    }
-}
-
-/*
- * NAME:	record->packextdata()
- * DESCRIPTION:	pack extent record data
- */
-void r_packextdata(ExtDataRec *data, unsigned char *pdata, int *len)
-{
-  unsigned char *start = pdata;
-  int i;
-
-  for (i = 0; i < 3; ++i)
-    {
-      ClassicHfsAppend16(&pdata, (*data)[i].xdrStABN);
-      ClassicHfsAppend16(&pdata, (*data)[i].xdrNumABlks);
-    }
-
-  if (len)
-    *len += pdata - start;
-}
-
-/*
- * NAME:	record->unpackextdata()
- * DESCRIPTION:	unpack extent record data
- */
-void r_unpackextdata(unsigned char *pdata, ExtDataRec *data)
-{
-  int i;
-
-  for (i = 0; i < 3; ++i)
-    {
-      (*data)[i].xdrStABN = ClassicHfsTake16(&pdata);
-      (*data)[i].xdrNumABlks = ClassicHfsTake16(&pdata);
     }
 }
 

@@ -9,7 +9,7 @@
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
-#include "hfs/ClassicHfsExtentKey.h"
+#include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
@@ -98,6 +98,20 @@ int main(int argc,char**argv){
        "catalog parent IDs compare unsigned");
   leaf[6] = 31;
   must(ClassicHfsCatalogNameLength(leaf) == 0, "name cannot extend beyond its key");
+ }
+ {
+  ClassicHfsExtent runs[3] = {{0xfedc, 2}, {0, 0}, {0x8000, 0xffff}}, decoded[3];
+  unsigned char bytes[21] = {7};
+  bytes[20] = 0x55;
+  must(ClassicHfsEncodeExtents(bytes + 8, runs) == 12 &&
+       !memcmp(bytes + 8, "\xfe\xdc\0\2\0\0\0\0\x80\0\xff\xff", 12) && bytes[20] == 0x55,
+       "three extent descriptors on disk");
+  ClassicHfsDecodeExtents(bytes + 8, decoded);
+  must(!memcmp(decoded, runs, sizeof(runs)), "extent descriptor round trip");
+  must(ClassicHfsValidExtentRecord(bytes, 20) && !ClassicHfsValidExtentRecord(bytes, 19),
+       "overflow extent record boundary");
+  bytes[0] = 6;
+  must(!ClassicHfsValidExtentRecord(bytes, 20), "invalid overflow extent key length");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

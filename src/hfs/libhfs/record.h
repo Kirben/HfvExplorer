@@ -23,8 +23,6 @@
 void r_packcatdata(CatDataRec *, unsigned char *, int *);
 void r_unpackcatdata(unsigned char *, CatDataRec *);
 
-void r_packextdata(ExtDataRec *, unsigned char *, int *);
-void r_unpackextdata(unsigned char *, ExtDataRec *);
 
 
 void r_unpackdirent(long, char *, CatDataRec *, hfsdirent *);

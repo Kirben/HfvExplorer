@@ -271,11 +271,7 @@ int l_readmdb(hfsvol *vol)
 
   mdb->drXTFlSize = ClassicHfsTake32(&ptr);
 
-  for (i = 0; i < 3; ++i)
-    {
-      mdb->drXTExtRec[i].xdrStABN = ClassicHfsTake16(&ptr);
-      mdb->drXTExtRec[i].xdrNumABlks = ClassicHfsTake16(&ptr);
-    }
+  ptr += ClassicHfsDecodeExtents(ptr, mdb->drXTExtRec);
 
 # ifdef DEBUG
   if (ptr - b != 146)
@@ -284,11 +280,7 @@ int l_readmdb(hfsvol *vol)
 
   mdb->drCTFlSize = ClassicHfsTake32(&ptr);
 
-  for (i = 0; i < 3; ++i)
-    {
-      mdb->drCTExtRec[i].xdrStABN = ClassicHfsTake16(&ptr);
-      mdb->drCTExtRec[i].xdrNumABlks = ClassicHfsTake16(&ptr);
-    }
+  ptr += ClassicHfsDecodeExtents(ptr, mdb->drCTExtRec);
 
 # ifdef DEBUG
   if (ptr - b != 162)
@@ -439,11 +431,7 @@ int l_writemdb(hfsvol *vol)
   ClassicHfsAppend16(&ptr, mdb->drCtlCSize);
   ClassicHfsAppend32(&ptr, mdb->drXTFlSize);
 
-  for (i = 0; i < 3; ++i)
-    {
-      ClassicHfsAppend16(&ptr, mdb->drXTExtRec[i].xdrStABN);
-      ClassicHfsAppend16(&ptr, mdb->drXTExtRec[i].xdrNumABlks);
-    }
+  ptr += ClassicHfsEncodeExtents(ptr, mdb->drXTExtRec);
 
 # ifdef DEBUG
   if (ptr - b != 146)
@@ -452,11 +440,7 @@ int l_writemdb(hfsvol *vol)
 
   ClassicHfsAppend32(&ptr, mdb->drCTFlSize);
 
-  for (i = 0; i < 3; ++i)
-    {
-      ClassicHfsAppend16(&ptr, mdb->drCTExtRec[i].xdrStABN);
-      ClassicHfsAppend16(&ptr, mdb->drCTExtRec[i].xdrNumABlks);
-    }
+  ptr += ClassicHfsEncodeExtents(ptr, mdb->drCTExtRec);
 
 # ifdef DEBUG
   if (ptr - b != 162)

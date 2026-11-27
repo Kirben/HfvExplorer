@@ -146,7 +146,11 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
   if (data)
     {
       ptr = HFS_NODEREC(*np, np->rnum);
-      r_unpackextdata(HFS_RECDATA(ptr), data);
+      if (!ClassicHfsValidExtentRecord(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum])) {
+          ERROR(EIO, "invalid overflow extent record");
+          return -1;
+      }
+      ClassicHfsDecodeExtents(ptr + ClassicHfsExtentKeySize, *data);
     }
 
   return 1;
@@ -200,13 +204,12 @@ int v_putcatrec(CatDataRec *data, node *np)
  */
 int v_putextrec(ExtDataRec *data, node *np)
 {
-  unsigned char pdata[HFS_EXTDATALEN], *ptr;
-  int len = 0;
-
-  r_packextdata(data, pdata, &len);
-
-  ptr = HFS_NODEREC(*np, np->rnum);
-  memcpy(HFS_RECDATA(ptr), pdata, len);
+  unsigned char *ptr = HFS_NODEREC(*np, np->rnum);
+  if (!ClassicHfsValidExtentRecord(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum])) {
+      ERROR(EIO, "invalid overflow extent record");
+      return -1;
+  }
+  ClassicHfsEncodeExtents(ptr + ClassicHfsExtentKeySize, *data);
 
   return bt_putnode(np);
 }
@@ -738,7 +741,7 @@ static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
               ExtDataRec data;
               if (end - start - key_size < HFS_EXTDATALEN)
                 goto invalid_record;
-              r_unpackextdata(record, &data);
+              ClassicHfsDecodeExtents(record, data);
               if (markexts(vol, &data) < 0)
                 return -1;
             }

@@ -236,7 +236,7 @@ int f_alloc(hfsfile *file)
 	  file->fabn = start;
 
 	  reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
-	  r_packextdata(&file->ext, HFS_RECDATA(record), &reclen);
+	  reclen += ClassicHfsEncodeExtents(record + reclen, file->ext);
 
 	  if (bt_insert(&vol->ext, record, reclen) < 0)
 	    {

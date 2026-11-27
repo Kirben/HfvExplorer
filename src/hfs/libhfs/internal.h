@@ -83,14 +83,9 @@ typedef char		Str15[16];
 typedef char		Str31[32];
 typedef long		OSType;
 
-typedef struct {
-  UInteger	xdrStABN;	/* first allocation block */
-  UInteger	xdrNumABlks;	/* number of allocation blocks */
-} ExtDescriptor;
-
-typedef ExtDescriptor ExtDataRec[3];
-
-#include "../ClassicHfsExtentKey.h"
+#include "../ClassicHfsExtents.h"
+typedef ClassicHfsExtent ExtDescriptor;
+typedef ClassicHfsExtent ExtDataRec[ClassicHfsExtentCount];
 
 #include "../ClassicHfsCatalogKey.h"
 typedef ClassicHfsCatalogKey CatKeyRec;
@@ -105,7 +100,7 @@ typedef ClassicHfsCatalogKey CatKeyRec;
 # define HFS_RECDATA(ptr)	((ptr) + HFS_RECKEYSKIP(ptr))
 
 # define HFS_CATDATALEN		sizeof(CatDataRec)
-# define HFS_EXTDATALEN		sizeof(ExtDataRec)
+# define HFS_EXTDATALEN		ClassicHfsExtentBytes
 
 # define HFS_CATKEYLEN		sizeof(CatKeyRec)
 # define HFS_EXTKEYLEN		ClassicHfsExtentKeySize
