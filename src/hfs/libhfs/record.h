@@ -21,7 +21,6 @@ void r_packcatkey(CatKeyRec *, unsigned char *, int *);
 void r_unpackcatkey(unsigned char *, CatKeyRec *);
 
 
-int r_comparecatkeys(unsigned char *, unsigned char *);
 
 void r_packcatdata(CatDataRec *, unsigned char *, int *);
 void r_unpackcatdata(unsigned char *, CatDataRec *);

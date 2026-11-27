@@ -57,26 +57,6 @@ void r_unpackcatkey(unsigned char *pkey, CatKeyRec *key)
 }
 
 /*
- * NAME:	record->comparecatkeys()
- * DESCRIPTION:	compare two (packed) catalog record keys
- */
-int r_comparecatkeys(unsigned char *pkey1, unsigned char *pkey2)
-{
-  CatKeyRec key1;
-  CatKeyRec key2;
-  int diff;
-
-  r_unpackcatkey(pkey1, &key1);
-  r_unpackcatkey(pkey2, &key2);
-
-  diff = key1.ckrParID - key2.ckrParID;
-  if (diff)
-    return diff;
-
-  return ClassicHfsCompareNames(key1.ckrCName, key2.ckrCName);
-}
-
-/*
  * NAME:	record->packcatdata()
  * DESCRIPTION:	pack catalog record data
  */

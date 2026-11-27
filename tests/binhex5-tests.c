@@ -8,7 +8,7 @@
 #undef ERROR
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
-#include "hfs/ClassicHfsNames.h"
+#include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtentKey.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
@@ -74,6 +74,18 @@ int main(int argc,char**argv){
   ClassicHfsWriteExtentKey(last, 0xff, 1, 0x8000);
   must(ClassicHfsCompareExtentKeys(last, first) < 0 && ClassicHfsCompareExtentKeys(first, first) == 0,
        "extent block order and equality");
+ }
+ {
+  unsigned char thread[] = {6, 0, 0, 0, 0, 1, 0};
+  unsigned char leaf[] = {7, 0, 0, 0, 0, 1, 1, 0x80};
+  unsigned char index[38] = {37, 0, 0, 0, 0, 1, 1, 0x8a};
+  must(ClassicHfsCompareCatalogKeys(thread, leaf) < 0 &&
+       ClassicHfsCompareCatalogKeys(leaf, index) == 0, "thread, leaf and padded index collation");
+  ClassicHfsWrite32(index + 2, UINT32_MAX);
+  must(ClassicHfsCompareCatalogKeys(index, leaf) > 0 && ClassicHfsCompareCatalogKeys(leaf, index) < 0,
+       "catalog parent IDs compare unsigned");
+  leaf[6] = 31;
+  must(ClassicHfsCatalogNameLength(leaf) == 0, "name cannot extend beyond its key");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

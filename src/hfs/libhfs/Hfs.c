@@ -49,7 +49,7 @@
 
 #endif
 
-# include "../ClassicHfsNames.h"
+# include "../ClassicHfsCatalogKey.h"
 # include "internal.h"
 #ifdef WIN32
 # include "../../ClassicHfsRecovery.h"
@@ -198,7 +198,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       vol->cat.map     = 0;
       vol->cat.mapsz   = 0;
       vol->cat.flags   = 0;
-      vol->cat.compare = r_comparecatkeys;
+      vol->cat.compare = ClassicHfsCompareCatalogKeys;
 
       /* open and lock the device */
 
@@ -900,7 +900,7 @@ int hfs_format(char *path, int pnum, char *vname)
   cat->map     = map;
   cat->mapsz   = HFS_MAP1SZ;
   cat->flags   = HFS_UPDATE_BTHDR;
-  cat->compare = r_comparecatkeys;
+  cat->compare = ClassicHfsCompareCatalogKeys;
 
   if (result == 0 && bt_space(cat, 1) < 0)
     result = -1;
