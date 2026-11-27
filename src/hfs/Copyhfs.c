@@ -37,7 +37,7 @@
 # include <string.h>
 
 #include "libhfs\internal.h"
-#include "libhfs\file.h"
+#include "ClassicHfsForkState.h"
 
 // # include "libhfs\hfs.h"
 # include "ClassicHfsBytes.h"

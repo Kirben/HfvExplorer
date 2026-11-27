@@ -8,7 +8,7 @@
 #undef ERROR
 #include "hfs/libhfs/internal.h"
 #include "hfs/libhfs/block.h"
-#include "hfs/libhfs/file.h"
+#include "hfs/ClassicHfsForkState.h"
 #include "hfs/ClassicHfsTreeLookup.h"
 #include "hfs/libhfs/volume.h"
 #include "hfs/ClassicHfsVolumeAllocation.h"

@@ -8,7 +8,7 @@
 #include <errno.h>
 #undef ERROR
 #include "hfs/libhfs/internal.h"
-#include "hfs/libhfs/file.h"
+#include "hfs/ClassicHfsForkState.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
 #include "LargeForkTestData.h"

@@ -29,7 +29,7 @@
 #include "ClassicHfsTime.h"
 #include "libhfs/volume.h"
 # include "libhfs/block.h"
-# include "libhfs/file.h"
+# include "ClassicHfsForkState.h"
 # include "ClassicHfsTreeLookup.h"
 # include "ClassicHfsTreeNodes.h"
 #include "ClassicHfsGrowTreeMap.h"

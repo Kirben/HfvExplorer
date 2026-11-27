@@ -13,7 +13,7 @@
 #include "hfs/ClassicHfsTreeFlush.h"
 #include "hfs/ClassicHfsVolumeAllocation.h"
 #include "hfs/ClassicHfsTreeNodes.h"
-#include "hfs/libhfs/file.h"
+#include "hfs/ClassicHfsForkState.h"
 #include "hfs/libhfs/volume.h"
 #include "hfs/ClassicHfsGrowTreeMap.h"
 #include "hfs/ClassicHfsRecordBytes.h"
@@ -32,12 +32,6 @@
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
 #include "hfs/crc.h"
-/* This transfer-format harness operates only on its own new image, without
-   a recovery transaction. The release build links the real sector hooks. */
-int hfv_hfs_recover_image(int fd, int writable) { return 0; }
-int hfv_hfs_before_sector_write(int fd, unsigned long long sector) { return 0; }
-void hfv_hfs_after_sector_write(int fd) {}
-
 static void must(int ok,const char* action){if(!ok){fprintf(stderr,"FAIL: BinHex 5: %s (%s; %s; %s)\n",action,hfs_error?hfs_error:"",cpi_error,cpo_error);exit(1);}}
 static void save(const char* path,const unsigned char* bytes,unsigned size){HANDLE f=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,0,NULL);DWORD wrote=0;must(f!=INVALID_HANDLE_VALUE,"create host fixture");must(WriteFile(f,bytes,size,&wrote,NULL)&&wrote==size,"write host fixture");CloseHandle(f);}
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}

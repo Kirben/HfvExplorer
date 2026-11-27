@@ -2,6 +2,13 @@
 #pragma once
 #include <string.h>
 
+int ClassicHfsReadForkSector(void *file, uint32_t sector, block *bytes);
+int ClassicHfsWriteForkSector(void *file, uint32_t sector, block *bytes);
+
+int ClassicHfsExtendForkAllocation(hfsfile *);
+int ClassicHfsFlushOpenFile(hfsfile *);
+int ClassicHfsTrimForkAllocation(hfsfile *);
+
 enum { fkData = 0, fkRsrc = 0xff };
 
 typedef struct {

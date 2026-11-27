@@ -26,7 +26,7 @@
 #include "ClassicHfsTime.h"
 #include "ClassicHfsNodeIO.h"
 # include "libhfs/block.h"
-# include "libhfs/file.h"
+# include "ClassicHfsForkState.h"
 # include "ClassicHfsTreeLookup.h"
 # include "libhfs/volume.h"
 #include "ClassicHfsVolumeAllocation.h"
