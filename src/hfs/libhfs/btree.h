@@ -25,10 +25,8 @@ int bt_writehdr(btree *);
 
 int bt_space(btree *, unsigned int);
 
-int bt_insertx(node *, unsigned char *, int *);
 int bt_insert(btree *, unsigned char *, int);
 
-int bt_deletex(node *, unsigned char *, unsigned char *, int *);
 int bt_delete(btree *, unsigned char *);
 
 int bt_search(btree *, unsigned char *, node *);

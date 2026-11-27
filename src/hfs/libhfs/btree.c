@@ -380,12 +380,20 @@ int bt_space(btree *bt, unsigned int nrecs)
  * NAME:	btree->insertx()
  * DESCRIPTION:	recursively locate a node and insert a record
  */
-int bt_insertx(node *np, unsigned char *record, int *reclen)
+static int bt_insertx(node *np, unsigned height, unsigned char *record, int *reclen)
 {
   node child;
   unsigned char *rec;
 
-  if (n_search(np, record))
+  uint32_t next;
+  int route = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
+                                    np->bt == &np->bt->f.vol->cat, record, np->bt->compare,
+                                    &np->rnum, np->bt->hdr.bthNNodes, &next, ClassicHfsInsert);
+  if (route == ClassicHfsInvalidSearch) {
+    ERROR(EIO, "invalid classic HFS B-tree mutation path");
+    return -1;
+  }
+  if (route == ClassicHfsFoundKey)
     {
       ERROR(EIO, "b*-tree record already exists");
       return -1;
@@ -400,15 +408,16 @@ int bt_insertx(node *np, unsigned char *record, int *reclen)
 	rec = HFS_NODEREC(*np, np->rnum);
 
       child.bt   = np->bt;
-      child.nnum = ClassicHfsRead32(HFS_RECDATA(rec));
+      child.nnum = next;
 
       if (bt_getnode(&child) < 0 ||
-	  bt_insertx(&child, record, reclen) < 0)
+	  bt_insertx(&child, height - 1, record, reclen) < 0)
 	return -1;
 
       if (np->rnum < 0)
 	{
 	  n_index(np->bt, HFS_NODEREC(child, 0), child.nnum, rec, 0);
+	  np->rnum = 0; /* the split separator follows the updated first child */
 	  if (*reclen == 0)
 	    return bt_putnode(np);
 	}
@@ -457,7 +466,7 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
 	return -1;
     }
 
-  if (bt_insertx(&root, record, &reclen) < 0)
+  if (bt_insertx(&root, bt->hdr.bthDepth, record, &reclen) < 0)
     return -1;
 
   if (reclen)
@@ -502,13 +511,18 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
  * NAME:	btree->deletex()
  * DESCRIPTION:	recursively locate a node and delete a record
  */
-int bt_deletex(node *np, unsigned char *key, unsigned char *record, int *flag)
+static int bt_deletex(node *np, unsigned height, unsigned char *key, unsigned char *record, int *flag)
 {
   node child;
   unsigned char *rec;
-  int found;
-
-  found = n_search(np, key);
+  uint32_t next;
+  int route = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
+                                    np->bt == &np->bt->f.vol->cat, key, np->bt->compare,
+                                    &np->rnum, np->bt->hdr.bthNNodes, &next, ClassicHfsDelete);
+  if (route == ClassicHfsInvalidSearch) {
+    ERROR(EIO, "invalid classic HFS B-tree mutation path");
+    return -1;
+  }
 
   switch ((unsigned char) np->nd.ndType)
     {
@@ -522,10 +536,10 @@ int bt_deletex(node *np, unsigned char *key, unsigned char *record, int *flag)
       rec = HFS_NODEREC(*np, np->rnum);
 
       child.bt   = np->bt;
-      child.nnum = ClassicHfsRead32(HFS_RECDATA(rec));
+      child.nnum = next;
 
       if (bt_getnode(&child) < 0 ||
-	  bt_deletex(&child, key, rec, flag) < 0)
+	  bt_deletex(&child, height - 1, key, rec, flag) < 0)
 	return -1;
 
       if (*flag)
@@ -547,7 +561,7 @@ int bt_deletex(node *np, unsigned char *key, unsigned char *record, int *flag)
       return 0;
 
     case ndLeafNode:
-      if (found == 0)
+      if (route != ClassicHfsFoundKey)
 	{
 	  ERROR(EIO, "b*-tree record not found");
 	  return -1;
@@ -581,7 +595,7 @@ int bt_delete(btree *bt, unsigned char *key)
     }
 
   if (bt_getnode(&root) < 0 ||
-      bt_deletex(&root, key, record, &flag) < 0)
+      bt_deletex(&root, bt->hdr.bthDepth, key, record, &flag) < 0)
     return -1;
 
   if (bt->hdr.bthDepth > 1 && root.nd.ndNRecs == 1)
@@ -637,7 +651,7 @@ int bt_search(btree *bt, unsigned char *key, node *np)
       return -1;
     int result = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
                                        bt == &bt->f.vol->cat, key, bt->compare,
-                                       &np->rnum, bt->hdr.bthNNodes, &child);
+                                       &np->rnum, bt->hdr.bthNNodes, &child, ClassicHfsLookup);
     if (result == ClassicHfsInvalidSearch) {
       ERROR(EIO, "invalid classic HFS B-tree search path");
       return -1;

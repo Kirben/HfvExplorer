@@ -124,6 +124,8 @@ static inline int ClassicHfsSearchNode(unsigned char *bytes, const uint16_t *off
     return exact;
 }
 
+typedef enum { ClassicHfsLookup, ClassicHfsInsert, ClassicHfsDelete } ClassicHfsSearchPurpose;
+
 enum { ClassicHfsInvalidSearch = -1, ClassicHfsMissingKey, ClassicHfsFoundKey, ClassicHfsVisitChild };
 
 // Decide one level of a root-to-leaf lookup on a decoded node. The caller
@@ -131,7 +133,8 @@ enum { ClassicHfsInvalidSearch = -1, ClassicHfsMissingKey, ClassicHfsFoundKey, C
 static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNodeDescriptor *node,
                                         const uint16_t *offsets, unsigned height, int catalog,
                                         unsigned char *key, int (*compare)(unsigned char *, unsigned char *),
-                                        int *slot, uint32_t totalNodes, uint32_t *child)
+                                        int *slot, uint32_t totalNodes, uint32_t *child,
+                                        ClassicHfsSearchPurpose purpose)
 {
     if (!height || (unsigned)node->ndNHeight != height ||
         node->ndType != (height == 1 ? -1 : 0))
@@ -139,6 +142,9 @@ static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNo
     for (unsigned i = 0; i < node->ndNRecs; ++i) {
         unsigned char *record = bytes + offsets[i];
         unsigned keyLength = record[0];
+        if (purpose != ClassicHfsLookup &&
+            (!keyLength || (height > 1 && catalog && keyLength != 37)))
+            return ClassicHfsInvalidSearch;
         if (!keyLength)
             continue;
         unsigned padded = (keyLength + 2) & ~1u;
@@ -148,9 +154,12 @@ static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNo
             return ClassicHfsInvalidSearch;
     }
     int exact = ClassicHfsSearchNode(bytes, offsets, node->ndNRecs, key, compare, slot);
-    if (height == 1 || *slot < 0)
+    if (height == 1 || (exact && purpose == ClassicHfsInsert) ||
+        (*slot < 0 && purpose != ClassicHfsInsert))
         return exact ? ClassicHfsFoundKey : ClassicHfsMissingKey;
-    unsigned char *record = bytes + offsets[*slot];
+    if (!node->ndNRecs)
+        return ClassicHfsInvalidSearch;
+    unsigned char *record = bytes + offsets[*slot < 0 ? 0 : *slot];
     uint32_t next = ClassicHfsRead32(record + ((record[0] + 2) & ~1u));
     if (!next || next >= totalNodes)
         return ClassicHfsInvalidSearch;

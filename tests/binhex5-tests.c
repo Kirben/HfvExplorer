@@ -220,13 +220,21 @@ int main(int argc,char**argv){
   int slot;
   node.ndNHeight = 2; node.ndNRecs = 1;
   bytes[14] = 7; bytes[25] = 3;
-  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child)
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child, ClassicHfsLookup)
        == ClassicHfsVisitChild && child == 3, "follow validated index child");
-  must(ClassicHfsLookupLevel(bytes, &node, offsets, 1, 0, key, compare_test_keys, &slot, 4, &child)
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 1, 0, key, compare_test_keys, &slot, 4, &child, ClassicHfsLookup)
        == ClassicHfsInvalidSearch, "reject repeated height on cyclic descent");
   offsets[1] = 24;
-  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child)
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child, ClassicHfsLookup)
        == ClassicHfsInvalidSearch, "reject truncated child pointer");
+  offsets[1] = 26;
+  bytes[15] = 2;
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys,
+       &slot, 4, &child, ClassicHfsInsert) == ClassicHfsVisitChild && slot == -1 && child == 3,
+       "insert below first separator descends through leftmost child");
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys,
+       &slot, 4, &child, ClassicHfsDelete) == ClassicHfsMissingKey,
+       "delete below first separator stops without selecting a child");
  }
  {
   unsigned char source[106], output[107];
