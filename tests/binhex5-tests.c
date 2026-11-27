@@ -1150,6 +1150,14 @@ int main(int argc,char**argv){
  must(hfs_format(image,-1,label)<0 && errno==EINVAL,"negative partition cannot select a whole-image format");
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  {
+  uint32_t nextId = v->mdb.drNxtCNID;
+  must(hfs_mkdir(v, ":MissingParent:Nested") < 0 && errno == ENOENT &&
+       hfs_create(v, ":MissingParent:Nested", "TEXT", "TEST") < 0 && errno == ENOENT &&
+       v->mdb.drNxtCNID == nextId, "missing creation parent preserves next catalog ID");
+  must(hfs_create(v, ":InvalidCreator", "TEXT", NULL) < 0 && errno == EINVAL &&
+       v->mdb.drNxtCNID == nextId, "invalid file creator rejected before mutation");
+ }
+ {
   CatDataRec entry, thread, saved;
   node slot;
   long previous = v->cwd;

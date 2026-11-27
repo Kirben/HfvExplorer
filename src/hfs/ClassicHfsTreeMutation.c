@@ -536,3 +536,67 @@ int ClassicHfsCreateDirectoryRecords(hfsvol *volume, long parent, char *name)
     volume->flags |= HFS_UPDATE_MDB;
     return 0;
 }
+
+static int create_file_record(hfsvol *volume, long parent, char *name,
+                              const char *type, const char *creator)
+{
+    CatDataRec file = {0};
+    file.cdrType = cdrFilRec;
+    file.u.fil.filFlNum = volume->mdb.drNxtCNID;
+    file.u.fil.filCrDat = file.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(NULL));
+    file.u.fil.filUsrWds.fdType = ClassicHfsRead32((const unsigned char *)type);
+    file.u.fil.filUsrWds.fdCreator = ClassicHfsRead32((const unsigned char *)creator);
+
+    unsigned char bytes[HFS_CATRECMAXLEN];
+    int size = encode_catalog_entry(bytes, parent, name, &file);
+    if (size < 0 || ClassicHfsReserveTreeSpace(&volume->cat, 1) < 0 ||
+        ClassicHfsInsertTreeRecord(&volume->cat, bytes, size) < 0 ||
+        ClassicHfsAdjustEntryCount(volume, parent, 0, 1) < 0)
+        return -1;
+    ++volume->mdb.drNxtCNID;
+    volume->flags |= HFS_UPDATE_MDB;
+    return 0;
+}
+
+static int create_catalog_path(hfsvol *volume, char *path, const char *type, const char *creator)
+{
+    if (ClassicHfsCurrentVolume(&volume) < 0)
+        return -1;
+    char name[HFS_MAX_FLEN + 1];
+    long parent = 0;
+    CatDataRec existing;
+    int found = ClassicHfsResolvePath(volume, path, &existing, &parent, name, NULL);
+    if (found < 0)
+        return -1;
+    if (found) {
+        ERROR(EEXIST, "classic HFS entry already exists");
+        return -1;
+    }
+    if (!parent || parent == HFS_CNID_ROOTPAR) {
+        ERROR(parent ? EINVAL : ENOENT, "invalid classic HFS creation parent");
+        return -1;
+    }
+    if (volume->flags & HFS_READONLY) {
+        ERROR(EROFS, "classic HFS volume is read-only");
+        return -1;
+    }
+    if (ClassicHfsCheckNewCatalogId(volume, 0) < 0 || ClassicHfsBeginTransaction(volume) < 0)
+        return -1;
+    int result = type ? create_file_record(volume, parent, name, type, creator)
+                      : ClassicHfsCreateDirectoryRecords(volume, parent, name);
+    return ClassicHfsEndTransaction(volume, result);
+}
+
+int hfs_create(hfsvol *volume, char *path, char *type, char *creator)
+{
+    if (!type || !creator) {
+        ERROR(EINVAL, "classic HFS file creation requires type and creator codes");
+        return -1;
+    }
+    return create_catalog_path(volume, path, type, creator);
+}
+
+int hfs_mkdir(hfsvol *volume, char *path)
+{
+    return create_catalog_path(volume, path, NULL, NULL);
+}

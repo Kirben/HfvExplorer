@@ -681,47 +681,6 @@ int hfs_fsetattr(hfsfile *file, hfsdirent *ent)
 }
 
 /*
- * NAME:	hfs->mkdir()
- * DESCRIPTION:	create a new directory
- */
-static int hfs_mkdir_impl(hfsvol *vol, char *path)
-{
-  CatDataRec data;
-  long parid;
-  char name[HFS_MAX_FLEN + 1];
-  int found;
-
-  if (ClassicHfsCurrentVolume(&vol) < 0)
-    return -1;
-
-  found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
-  if (found < 0 || parid == 0)
-    return -1;
-  else if (found)
-    {
-      ERROR(EEXIST, 0);
-      return -1;
-    }
-
-  if (parid == HFS_CNID_ROOTPAR)
-    {
-      ERROR(EINVAL, 0);
-      return -1;
-    }
-
-  if (vol->flags & HFS_READONLY)
-    {
-      ERROR(EROFS, 0);
-      return -1;
-    }
-
-  if (ClassicHfsCreateDirectoryRecords(vol, parid, name) < 0)
-    return -1;
-
-  return 0;
-}
-
-/*
  * NAME:	hfs->rmdir()
  * DESCRIPTION:	delete an empty directory
  */
@@ -776,109 +735,6 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
 
   if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
       ClassicHfsAdjustEntryCount(vol, parid, 1, -1) < 0)
-    return -1;
-
-  return 0;
-}
-
-/*
- * NAME:	hfs->create()
- * DESCRIPTION:	create a new file
- */
-static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
-{
-  CatDataRec data;
-  long id, parid;
-  char name[HFS_MAX_FLEN + 1];
-  unsigned char record[HFS_CATRECMAXLEN];
-  int found, i, reclen;
-
-  if (ClassicHfsCurrentVolume(&vol) < 0)
-    return -1;
-
-  found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
-  if (found < 0 || parid == 0)
-    return -1;
-  else if (found)
-    {
-      ERROR(EEXIST, 0);
-      return -1;
-    }
-
-  if (parid == HFS_CNID_ROOTPAR)
-    {
-      ERROR(EINVAL, 0);
-      return -1;
-    }
-
-  if (vol->flags & HFS_READONLY)
-    {
-      ERROR(EROFS, 0);
-      return -1;
-    }
-
-  /* create file `name' in parent `parid' */
-
-  if (ClassicHfsCheckNewCatalogId(vol, 0) < 0)
-    return -1;
-
-  if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
-    return -1;
-
-  id = vol->mdb.drNxtCNID++;
-  vol->flags |= HFS_UPDATE_MDB;
-
-  /* create file record */
-
-  data.cdrType   = cdrFilRec;
-  data.cdrResrv2 = 0;
-
-  data.u.fil.filFlags = 0;
-  data.u.fil.filTyp   = 0;
-
-  memset(&data.u.fil.filUsrWds, 0, sizeof(data.u.fil.filUsrWds));
-
-  data.u.fil.filUsrWds.fdType    = ClassicHfsRead32((unsigned char *) type);
-  data.u.fil.filUsrWds.fdCreator = ClassicHfsRead32((unsigned char *) creator);
-
-  data.u.fil.filFlNum  = id;
-  data.u.fil.filStBlk  = 0;
-  data.u.fil.filLgLen  = 0;
-  data.u.fil.filPyLen  = 0;
-  data.u.fil.filRStBlk = 0;
-  data.u.fil.filRLgLen = 0;
-  data.u.fil.filRPyLen = 0;
-  data.u.fil.filCrDat  = ClassicHfsFromUnixSeconds(time(0));
-  data.u.fil.filMdDat  = data.u.fil.filCrDat;
-  data.u.fil.filBkDat  = 0;
-
-  memset(&data.u.fil.filFndrInfo, 0, sizeof(data.u.fil.filFndrInfo));
-
-  data.u.fil.filClpSize = 0;
-
-  for (i = 0; i < 3; ++i)
-    {
-      data.u.fil.filExtRec[i].xdrStABN     = 0;
-      data.u.fil.filExtRec[i].xdrNumABlks  = 0;
-
-      data.u.fil.filRExtRec[i].xdrStABN    = 0;
-      data.u.fil.filRExtRec[i].xdrNumABlks = 0;
-    }
-
-  data.u.fil.filResrv = 0;
-
-  if ((reclen = ClassicHfsWriteCatalogKey(record, parid, name)) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-  {
-    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &data);
-    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
-    reclen += size;
-  }
-
-  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0 ||
-      ClassicHfsAdjustEntryCount(vol, parid, 0, 1) < 0)
     return -1;
 
   return 0;
@@ -1193,24 +1049,6 @@ int hfs_rename(hfsvol *vol,char *source,char *destination) {
  result=hfs_rename_impl(vol,source,destination);return ClassicHfsEndTransaction(vol,result);
 }
 
-static int mutation_target(hfsvol **vol,char *path) {
- CatDataRec data;long parent;int found;
- if(ClassicHfsCurrentVolume(vol)<0)return -1;
- found=ClassicHfsResolvePath(*vol,path,&data,&parent,0,0);
- if(found<0)return -1;
- if(!parent){ERROR(ENOENT,"HFS parent directory not found");return -1;}
- return 0;
-}
-int hfs_mkdir(hfsvol *vol,char *path) {
- int result;
- if(mutation_target(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
- result=hfs_mkdir_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
-}
-int hfs_create(hfsvol *vol,char *path,char *type,char *creator) {
- int result;
- if(mutation_target(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
- result=hfs_create_impl(vol,path,type,creator);return ClassicHfsEndTransaction(vol,result);
-}
 int hfs_rmdir(hfsvol *vol,char *path) {
  int result;
  if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
