@@ -545,13 +545,20 @@ int RunCutCompetitor(const char* file,const char* mode)
         return CopyFileA(file,replacement.c_str(),TRUE)&&MoveFileA(file,backup.c_str())&&
                MoveFileA(replacement.c_str(),file)?0:1;
     }
-    if(strcmp(mode,"stream"))return 1;
+    const bool resource=!strcmp(mode,"resource");
+    const bool data=resource||!strcmp(mode,"data");
+    if(!data&&strcmp(mode,"stream"))return 1;
     WIN32_FILE_ATTRIBUTE_DATA info{};
     if(!GetFileAttributesExA(file,GetFileExInfoStandard,&info))return 1;
-    const auto stream=CreateFileA((path+":CutNotes").c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
+    const auto editedPath=data?path:path+":CutNotes";
+    const auto stream=CreateFileA(editedPath.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_DELETE,
+                                  nullptr,OPEN_EXISTING,0,nullptr);
     if(stream==INVALID_HANDLE_VALUE)return 1;
     DWORD written=0;
-    const bool edited=WriteFile(stream,"NEW!",4,&written,nullptr)&&written==4&&FlushFileBuffers(stream);
+    LARGE_INTEGER offset{};
+    offset.QuadPart=-4;
+    const bool edited=(!resource||SetFilePointerEx(stream,offset,nullptr,FILE_END))&&
+                      WriteFile(stream,"NEW!",4,&written,nullptr)&&written==4&&FlushFileBuffers(stream);
     CloseHandle(stream);
     const auto primary=CreateFileA(file,FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
                                    nullptr,OPEN_EXISTING,0,nullptr);
@@ -582,7 +589,7 @@ void CompeteWithCut(const std::string& path,const char* mode)
 
 void ShippingDirectoryCutRaces(const std::string& root,FILE* report)
 {
-    for(unsigned scenario:{0u,1u,2u}){
+    for(unsigned scenario:{0u,1u,2u,3u,4u}){
         const auto folder=root+"\\cut-race-"+std::to_string(scenario);
         const auto source=folder+"\\From",destination=folder+"\\To";
         Check(CreateDirectoryA(folder.c_str(),nullptr)&&CreateDirectoryA(source.c_str(),nullptr)&&
@@ -622,8 +629,8 @@ void ShippingDirectoryCutRaces(const std::string& root,FILE* report)
             last=current.id;
             if(current.path.find("Z barrier")!=std::string::npos){
                 Check(GetFileAttributesA(copied.c_str())!=INVALID_FILE_ATTRIBUTES,"worker reached the barrier before publishing the first nested file");
-                const auto replaced=scenario==0?copied:destination+"\\Tree\\Nested\\%A first";
-                CompeteWithCut(scenario==2?original:replaced,scenario==2?"stream":"replace");
+                const auto replaced=(scenario==0||scenario==3)?copied:destination+"\\Tree\\Nested\\%A first";
+                CompeteWithCut(scenario==2?original:replaced,scenario==2?"stream":scenario==3?"data":scenario==4?"resource":"replace");
                 injected=true;
             }
             operation.Job()->resolve(current.id,Storage::ConflictChoice::Replace);
@@ -638,8 +645,10 @@ void ShippingDirectoryCutRaces(const std::string& root,FILE* report)
         Verify(*from,entry.id,4096);
         Check(from->FindChild(2,u"Z barrier",entry),"Cut lost the second source");
         Verify(*from,entry.id,4096,3);
-        Check(to->FindChild(2,u"A first",entry),"Cut lost the published or replacement destination");
-        Verify(*to,entry.id,4096);
+        if(scenario<3){
+            Check(to->FindChild(2,u"A first",entry),"Cut lost the published or replacement destination");
+            Verify(*to,entry.id,4096);
+        }
         auto parent=OpenWindows(Wide(destination));
         Check(parent->FindChild(2,u"Neighbor",entry),"Cut removed unrelated destination data");
         Verify(*parent,entry.id,4096,11);
@@ -653,13 +662,20 @@ void ShippingDirectoryCutRaces(const std::string& root,FILE* report)
             };
             verifyStream(stream,"NEW!");
             verifyStream(copied+":CutNotes","OLD!");
+        }else if(scenario>=3){
+            CFile input;
+            char bytes[4]{};
+            const auto changed=scenario==3?copied:destination+"\\Tree\\Nested\\%A first";
+            Check(input.Open(changed.c_str(),CFile::modeRead|CFile::shareDenyNone)!=FALSE,"open rewritten destination");
+            if(scenario==4)input.Seek(-4,CFile::end);
+            Check(input.Read(bytes,4)==4&&!memcmp(bytes,"NEW!",4),"Cut changed the rewritten destination");
         }else{
-            const auto replaced=scenario==0?copied:destination+"\\Tree\\Nested\\%A first";
+            const auto replaced=(scenario==0||scenario==3)?copied:destination+"\\Tree\\Nested\\%A first";
             Check(GetFileAttributesA((replaced+".saved").c_str())!=INVALID_FILE_ATTRIBUTES,
                   "Cut deleted the independent process's saved file");
         }
     }
-    fprintf(report,"PASS: shipping directory Cut retains both source forks after a nested data or AppleDouble replacement, or a same-size stream edit by a competing process.\n");
+    fprintf(report,"PASS: shipping directory Cut retains both source forks after a nested data or AppleDouble replacement, or a same-size data or stream edit by a competing process.\n");
 }
 }
 

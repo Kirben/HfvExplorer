@@ -223,7 +223,8 @@ int DeleteHostEntry(const std::wstring& path,bool directory,const MacBrowser::En
   if(!DeleteHostDirectory(full,job,&expected.primary))return 0;
  }else{
   if(!pin(primary,full,expected.primary,directory))return 0;
-  if(cut&&cut->primaryStreams&&WindowsMoveUndo::CaptureNamedStreams(full)!=*cut->primaryStreams){
+  if(cut&&((cut->primaryStreams&&WindowsMoveUndo::CaptureNamedStreams(full)!=*cut->primaryStreams)||
+           (cut->primaryData&&WindowsMoveUndo::CapturePrimaryData(full,expected.primary,job)!=*cut->primaryData))){
    SetLastError(ERROR_FILE_INVALID);
    return 0;
   }

@@ -248,8 +248,8 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
    }
   }
  }
- for(bool paired:{false,true}){
-  const auto folder=root+(paired?"\\late-stream-pair":"\\late-stream-file");
+ for(bool paired:{false,true})for(bool rewrite:{false,true}){
+  const auto folder=root+(paired?"\\late-stream-pair":"\\late-stream-file")+(rewrite?"-data":"-stream");
   Check(CreateDirectoryA(folder.c_str(),nullptr)!=FALSE,"create late source stream fixture");
   const auto file=folder+"\\Document",stream=file+":Late";
   if(paired){
@@ -261,12 +261,19 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
   Check(GetFileAttributesExA(file.c_str(),GetFileExInfoStandard,&info)!=FALSE,"capture Cut source timestamp");
   auto source=Host(file,false);
   source.cut=true;
-  const auto destination=native->MakeDirectory(2,paired?u"Late pair":u"Late file");
+  const auto destination=native->MakeDirectory(2,paired?(rewrite?u"Late pair data":u"Late pair"):(rewrite?u"Late file data":u"Late file"));
   bool injected=false;
   struct Reset{~Reset(){windowsPublicationFault={};}} reset;
   windowsPublicationFault=[&](const char* phase){
    if(strcmp(phase,"cut-source-verified"))return;
-   Save(stream,"LATE");
+   if(rewrite){
+    const auto edited=CreateFileA(file.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
+    Check(edited!=INVALID_HANDLE_VALUE,"open primary Cut bytes for rewrite");
+    DWORD got=0;
+    const bool wrote=WriteFile(edited,"LATE",4,&got,nullptr)&&got==4;
+    CloseHandle(edited);
+    Check(wrote,"rewrite primary Cut bytes");
+   }else Save(stream,"LATE");
    const auto handle=CreateFileA(file.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
    Check(handle!=INVALID_HANDLE_VALUE,"open source attribute fixture");
    const bool restored=SetFileTime(handle,nullptr,nullptr,&info.ftLastWriteTime)!=FALSE;
@@ -277,8 +284,10 @@ void WindowsCutSafety(const std::string& root,const std::shared_ptr<Volume>& nat
   Storage::Job job;
   Completion completion;
   const auto result=ExecuteInWorker(OrdinaryCopy{{source},Native(native,destination)},job,completion);
-  Check(injected&&result.code&&!result.moved&&Load(file)==original&&
-        Load(stream)==std::vector<BYTE>({'L','A','T','E'})&&
+  auto expected=original;
+  if(rewrite)memcpy(expected.data(),"LATE",4);
+  Check(injected&&result.code&&!result.moved&&Load(file)==expected&&
+        (rewrite||Load(stream)==std::vector<BYTE>({'L','A','T','E'}))&&
         (!paired||GetFileAttributesA((folder+"\\%Document").c_str())!=INVALID_FILE_ATTRIBUTES),
         "Cut removed a source with a late stream or split its AppleDouble pair");
  }

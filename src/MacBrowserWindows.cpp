@@ -859,10 +859,14 @@ private:
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         lastPublication_={path,newData->Identity()};
         if(activePublications){
-            EntryIdentity identity;
-            identity.primary=lastPublication_.second;
-            if(newResource)identity.companion=newResource->Identity();
-            (*activePublications)[path]=std::move(identity);
+            WindowsPublication receipt;
+            receipt.identity.primary=lastPublication_.second;
+            receipt.primaryData=WindowsMoveUndo::CapturePrimaryData(newData->handle,job);
+            if(newResource){
+                receipt.identity.companion=newResource->Identity();
+                receipt.companionData=WindowsMoveUndo::CapturePrimaryData(newResource->handle,job);
+            }
+            (*activePublications)[path]=std::move(receipt);
         }
         return Id(path);
     }

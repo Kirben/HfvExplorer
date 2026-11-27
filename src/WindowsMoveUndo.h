@@ -25,7 +25,8 @@ class Session {
     void RenameChecked(const std::wstring& from,const std::wstring& to,
                        const MacBrowser::ObjectIdentity* expected,
                        const std::map<std::wstring,MacBrowser::WindowsCutEntry>* tree,bool relabel=false,
-                       const std::optional<std::string>& expectedStreams={});
+                       const std::optional<std::string>& expectedStreams={},
+                       const std::optional<std::string>& expectedData={});
 public:
     Session(const std::wstring& folder,const std::string& decision,bool exportOnly=false);
     ~Session();

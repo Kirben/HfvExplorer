@@ -20,10 +20,14 @@ struct WindowsCutEntry {
     std::wstring path;
     EntryIdentity identity;
     bool directory;
-    std::optional<std::string> primaryStreams,companionStreams;
+    std::optional<std::string> primaryStreams,companionStreams,primaryData,companionData;
 };
 using WindowsCutPlan=std::vector<WindowsCutEntry>;
-using WindowsPublications=std::map<std::wstring,EntryIdentity>;
+struct WindowsPublication {
+    EntryIdentity identity;
+    std::string primaryData,companionData;
+};
+using WindowsPublications=std::map<std::wstring,WindowsPublication>;
 void TrackWindowsPublications(WindowsPublications&,const std::function<void()>&);
 class Volume;
 void FinishWindowsCut(Volume&,const WindowsCutPlan&,Storage::Job&);

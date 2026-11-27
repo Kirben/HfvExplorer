@@ -495,6 +495,11 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
             streams=NamedStreamDigest(recording?path:staged);
         Check(!known->second.primaryStreams||streams==*known->second.primaryStreams,
               "A Windows Cut source has changed alternate streams; it was retained");
+        std::string primary;
+        if(!directory&&(recording||known->second.primaryData))
+            primary=CapturePrimaryData(recording?path:staged,MacBrowser::WindowsIdentity(info));
+        Check(!known->second.primaryData||primary==*known->second.primaryData,
+              "A Windows Cut source has changed primary data; it was retained");
         if(recording){
             Data record;
             record.put(uint64_t(Op::TreeEntryWithData));
@@ -506,7 +511,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
                 record.put(FileLength(info));
             }
             record.put(streams);
-            if(!directory)record.put(CapturePrimaryData(path,MacBrowser::WindowsIdentity(info)));
+            if(!directory)record.put(primary);
             // The rename frame flushes the full inventory before the folder moves.
             WriteFrame(journal,record);
         }
@@ -670,22 +675,23 @@ void Session::StageCut(const MacBrowser::WindowsCutPlan& plan)
         if(!i->identity.companion.key.empty()){
             MacBrowser::WindowsCutEntry sidecar{companion(i->path),{},false,i->companionStreams};
             sidecar.identity.primary=i->identity.companion;
+            sidecar.primaryData=i->companionData;
             Check(tree.emplace(sidecar.path,sidecar).second,"Conflicting Windows cut companion");
         }
     }
     if(!root.identity.companion.key.empty()){
-        RenameChecked(companion(root.path),Slot(),&root.identity.companion,nullptr,false,root.companionStreams);
+        RenameChecked(companion(root.path),Slot(),&root.identity.companion,nullptr,false,root.companionStreams,root.companionData);
 #ifdef HFV_TESTING
         if(state_->exportOnly&&MacBrowser::windowsPublicationFault)
             MacBrowser::windowsPublicationFault("delete-companion-staged");
 #endif
     }
-    RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr,false,root.primaryStreams);
+    RenameChecked(root.path,Slot(),&root.identity.primary,root.directory?&tree:nullptr,false,root.primaryStreams,root.primaryData);
 }
 void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
                             const MacBrowser::ObjectIdentity* expected,
                             const std::map<std::wstring,MacBrowser::WindowsCutEntry>* tree,bool relabel,
-                            const std::optional<std::string>& expectedStreams)
+                            const std::optional<std::string>& expectedStreams,const std::optional<std::string>& expectedData)
 {
     if(relabel)RelabelPaths(state_->root,state_->stage,from,to);
     else Paths(state_->root,state_->stage,from,to);
@@ -712,6 +718,7 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
           "A Windows Cut source has changed alternate streams; it was retained");
     const bool fileData=staging&&!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY);
     const auto primary=fileData?CapturePrimaryData(from,MacBrowser::WindowsIdentity(info)):std::string{};
+    Check(!expectedData||primary==*expectedData,"A Windows Cut source has changed primary data; it was retained");
     record.put(uint64_t(relabel?Op::Relabel:staging?Op::StageRenameWithData:streams.empty()?Op::Rename:Op::RenameWithStreams));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
@@ -727,6 +734,8 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
     Check(Identify(to)==id,"Windows move did not preserve entry identity");
     Check(!expectedStreams||NamedStreamDigest(to)==*expectedStreams,
           "A Windows Cut source changed alternate streams during staging; it was retained");
+    Check(!expectedData||CapturePrimaryData(to,MacBrowser::WindowsIdentity(info))==*expectedData,
+          "A Windows Cut source changed primary data during staging; it was retained");
     // Renaming pins the directory entry, not its children. Verify the actual
     // staged tree before permitting the caller to commit the decision.
     if(stagingTree)

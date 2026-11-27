@@ -409,6 +409,7 @@ class WindowsCutDestination {
     std::vector<std::pair<std::u16string,std::string>> entries_;
     std::vector<HANDLE> pins_;
     ObjectIdentity folder_;
+    WindowsPublications receipts_;
 
     void Pin(const std::wstring& path,const ObjectIdentity& expected,bool folderOnly)
     {
@@ -438,6 +439,7 @@ public:
     void Capture(Volume& volume,uint32_t parent,const std::vector<std::u16string>& names,
                  WindowsPublications& publications,Storage::Job& job)
     {
+        receipts_=publications;
         if(volume.Stat(parent).identity.primary.key!=folder_.key)
             throw Storage::MediaChanged("Windows destination folder was replaced; Cut sources were retained");
         for(const auto& name:names){
@@ -448,7 +450,7 @@ public:
             auto snapshot=Snapshot(volume,entry.id,job,false,[&](Volume& host,const Entry& actual){
                 const auto published=publications.find(host.HostPath(actual.id));
                 if(published==publications.end())return;
-                if(actual.identity.primary!=published->second.primary||actual.identity.companion!=published->second.companion)
+                if(actual.identity.primary!=published->second.identity.primary||actual.identity.companion!=published->second.identity.companion)
                     throw Storage::MediaChanged("A published Windows file changed; Cut sources were retained");
                 publications.erase(published);
             });
@@ -472,9 +474,16 @@ public:
             const auto observed=Snapshot(volume,actual.id,job,false,[&](Volume& host,const Entry& entry){
                 const auto path=host.HostPath(entry.id);
                 Pin(path,entry.identity.primary,false);
+                const auto published=receipts_.find(path);
+                if(published!=receipts_.end()&&
+                   WindowsMoveUndo::CapturePrimaryData(pins_.back(),&job)!=published->second.primaryData)
+                    throw Storage::MediaChanged("Windows destination primary data changed; Cut sources were retained");
                 if(!entry.identity.companion.key.empty()){
                     const auto separator=path.find_last_of(L'\\');
                     Pin(path.substr(0,separator+1)+L"%"+path.substr(separator+1),entry.identity.companion,false);
+                    if(published!=receipts_.end()&&
+                       WindowsMoveUndo::CapturePrimaryData(pins_.back(),&job)!=published->second.companionData)
+                        throw Storage::MediaChanged("Windows destination resource data changed; Cut sources were retained");
                 }
             });
             if(observed!=expected)
@@ -543,10 +552,12 @@ Storage::Result RunTransfer(const TransferPlan& transfer,const std::vector<ForkS
      inventory=[&](Volume& volume,const Entry& entry){
       WindowsCutEntry file{volume.HostPath(entry.id),entry.identity,entry.directory};
       file.primaryStreams=WindowsMoveUndo::CaptureNamedStreams(file.path);
+      if(!entry.directory)file.primaryData=WindowsMoveUndo::CapturePrimaryData(file.path,entry.identity.primary,&job);
       if(!entry.identity.companion.key.empty()){
        const auto separator=file.path.find_last_of(L'\\');
-       file.companionStreams=WindowsMoveUndo::CaptureNamedStreams(
-           file.path.substr(0,separator+1)+L"%"+file.path.substr(separator+1));
+       const auto companion=file.path.substr(0,separator+1)+L"%"+file.path.substr(separator+1);
+       file.companionStreams=WindowsMoveUndo::CaptureNamedStreams(companion);
+       file.companionData=WindowsMoveUndo::CapturePrimaryData(companion,entry.identity.companion,&job);
       }
       windowsPlans[i].push_back(std::move(file));
      };
