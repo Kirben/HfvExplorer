@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ClassicHfsBytes.h"
+#include "ClassicHfsCatalogRecord.h"
 #include "ClassicHfsNames.h"
 
 #include <string.h>
@@ -58,14 +59,8 @@ static inline int ClassicHfsCatalogPayload(const unsigned char *bytes, int avail
     int offset = (decoded.ckrKeyLen + 2) & ~1;
     if (offset >= available)
         return 0;
-    int size;
-    switch (bytes[offset]) {
-    case 1: size = 70; break;  // directory
-    case 2: size = 102; break; // file
-    case 3: case 4: size = 46; break; // directory and file threads
-    default: return 0;
-    }
-    if (available - offset < size)
+    int size = ClassicHfsRecordSize(bytes[offset]);
+    if (!size || available - offset < size)
         return 0;
     if ((bytes[offset] == 3 || bytes[offset] == 4) && bytes[offset + 14] > 31)
         return 0;

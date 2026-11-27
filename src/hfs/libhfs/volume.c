@@ -73,7 +73,7 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
   if (cname)
     strcpy(cname, key.ckrCName);
   if (data)
-    r_unpackcatdata(ptr + payload, data);
+    ClassicHfsDecodeCatalogRecord(ptr + payload, np->roff[np->rnum + 1] - np->roff[np->rnum] - payload, data);
 
   return 1;
 }
@@ -194,7 +194,7 @@ int v_putcatrec(CatDataRec *data, node *np)
   unsigned char pdata[HFS_CATDATALEN], *ptr;
   int len = 0;
 
-  r_packcatdata(data, pdata, &len);
+  len = ClassicHfsEncodeCatalogRecord(pdata, sizeof(pdata), data);
 
   ptr = HFS_NODEREC(*np, np->rnum);
   int available = np->roff[np->rnum + 1] - np->roff[np->rnum];
@@ -507,7 +507,11 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
     ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
     return -1;
   }
-  r_packcatdata(&data, HFS_RECDATA(record), &reclen);
+  {
+    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &data);
+    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
+    reclen += size;
+  }
 
   if (bt_insert(&vol->cat, record, reclen) < 0)
     return -1;
@@ -526,7 +530,11 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
     ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
     return -1;
   }
-  r_packcatdata(&data, HFS_RECDATA(record), &reclen);
+  {
+    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &data);
+    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
+    reclen += size;
+  }
 
   if (bt_insert(&vol->cat, record, reclen) < 0 ||
       v_adjvalence(vol, parid, 1, 1) < 0)
@@ -617,7 +625,7 @@ static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
                   CatDataRec data;
                   if (end - start - key_size < HFS_CATDATALEN)
                     goto invalid_record;
-                  r_unpackcatdata(record, &data);
+                  ClassicHfsDecodeCatalogRecord(record, end - start - key_size, &data);
                   if (markexts(vol, &data.u.fil.filExtRec) < 0 ||
                       markexts(vol, &data.u.fil.filRExtRec) < 0)
                     return -1;

@@ -20,8 +20,6 @@
 
 
 
-void r_packcatdata(CatDataRec *, unsigned char *, int *);
-void r_unpackcatdata(unsigned char *, CatDataRec *);
 
 
 

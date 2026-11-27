@@ -34,9 +34,7 @@
     ((n) ? REALLOC(type, n) : (FREE(ptr), (type *) 0))
 
 #include "../ClassicHfsBitmap.h"
-#include "../ClassicHfsCatalogThread.h"
-#include "../ClassicHfsDirectory.h"
-#include "../ClassicHfsCatalogFile.h"
+#include "../ClassicHfsCatalogRecord.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
@@ -149,24 +147,7 @@ typedef struct {
 # define HFS_ATRB_COPYPROT	(1 << 14)
 # define HFS_ATRB_SLOCKED	(1 << 15)
 
-typedef enum {
-  cdrDirRec  = 1,
-  cdrFilRec  = 2,
-  cdrThdRec  = 3,
-  cdrFThdRec = 4
-} CatDataType;
-
-#pragma pack(1)
-typedef struct {
-  SignedByte	cdrType;	/* record type */
-  SignedByte	cdrResrv2;	/* reserved */
-  union {
-    ClassicHfsDirectory dir;
-    ClassicHfsCatalogFile fil;
-    ClassicHfsCatalogThread dthd; /* directory or file thread */
-  } u;
-} CatDataRec;
-#pragma pack()
+typedef ClassicHfsCatalogRecord CatDataRec;
 
 struct _hfsfile_ {
   struct _hfsvol_ *vol;		/* pointer to volume descriptor */

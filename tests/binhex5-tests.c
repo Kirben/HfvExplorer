@@ -550,6 +550,21 @@ int main(int argc,char**argv){
   must(!memcmp(input,output,100) && !output[100], "complete catalog file body round trip");
  }
  {
+  ClassicHfsCatalogRecord record = {0};
+  unsigned char input[102] = {0}, output[103];
+  for (unsigned type=1;type<=4;++type) {
+   unsigned size=ClassicHfsRecordSize(type);
+   input[0]=(unsigned char)type; input[1]=0x91;
+   record.cdrType=0;
+   must(!ClassicHfsDecodeCatalogRecord(input,size-1,&record) && !record.cdrType &&
+        ClassicHfsDecodeCatalogRecord(input,size,&record)==size, "bounded catalog decode");
+   memset(output,0xcc,sizeof(output));
+   must(!ClassicHfsEncodeCatalogRecord(output,size-1,&record) && output[0]==0xcc &&
+        ClassicHfsEncodeCatalogRecord(output,size,&record)==size && !memcmp(input,output,size) &&
+        output[size]==0xcc, "bounded catalog encode and reserved type byte");
+  }
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

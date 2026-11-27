@@ -1184,7 +1184,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	  return -1;
 	}
 
-      r_unpackcatdata(ptr + payload, &data);
+      ClassicHfsDecodeCatalogRecord(ptr + payload, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum] - payload, &data);
 
       switch (data.cdrType)
 	{
@@ -1267,7 +1267,7 @@ int hfs_readdir2(
 		  ERROR(ENOENT, "no more entries");
 			return -1;
 		}
-    r_unpackcatdata(ptr + payload, pdata);
+    ClassicHfsDecodeCatalogRecord(ptr + payload, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum] - payload, pdata);
     switch (pdata->cdrType) {
 			case cdrDirRec:
 			case cdrFilRec:
@@ -1781,7 +1781,11 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
     ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
     return -1;
   }
-  r_packcatdata(&data, HFS_RECDATA(record), &reclen);
+  {
+    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &data);
+    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
+    reclen += size;
+  }
 
   if (bt_insert(&vol->cat, record, reclen) < 0 ||
       v_adjvalence(vol, parid, 0, 1) < 0)
@@ -2030,7 +2034,11 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
     ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
     return -1;
   }
-  r_packcatdata(&src, HFS_RECDATA(record), &reclen);
+  {
+    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &src);
+    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
+    reclen += size;
+  }
 
   if (bt_insert(&vol->cat, record, reclen) < 0)
     return -1;
@@ -2137,25 +2145,25 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
 }
 
 int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
- CatDataRec data;unsigned char raw[102];int length=0;
+ CatDataRec data;unsigned char raw[102];
  if(!finder||v_getvol(&vol)<0||v_resolve(vol,path,&data,0,0,0)<=0)return -1;
  if(data.cdrType!=cdrDirRec&&data.cdrType!=cdrFilRec){ERROR(EINVAL,"Finder information requires a file or folder");return -1;}
- r_packcatdata(&data,raw,&length);
+ ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);
  if(data.cdrType==cdrDirRec)memcpy(finder,raw+22,32);
  else {memcpy(finder,raw+4,16);memcpy(finder+16,raw+56,16);}return 0;
 }
 int hfs_fsetfinderinfo(hfsfile *file,const unsigned char *finder) {
- unsigned char raw[102];int length=0;
+ unsigned char raw[102];
  if(!file||!finder||file->cat.cdrType!=cdrFilRec){ERROR(EINVAL,"Missing file Finder information");return -1;}
  if(file->vol->flags&HFS_READONLY){ERROR(EROFS,0);return -1;}
- r_packcatdata(&file->cat,raw,&length);memcpy(raw+4,finder,16);memcpy(raw+56,finder+16,16);r_unpackcatdata(raw,&file->cat);file->flags|=HFS_UPDATE_CATREC;return 0;
+ ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&file->cat);memcpy(raw+4,finder,16);memcpy(raw+56,finder+16,16);ClassicHfsDecodeCatalogRecord(raw,sizeof(raw),&file->cat);file->flags|=HFS_UPDATE_CATREC;return 0;
 }
 int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates,const unsigned long *backup) {
- CatDataRec data;node n;unsigned char raw[70];int length=0,result=-1;
+ CatDataRec data;node n;unsigned char raw[70];int result=-1;
  if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
  if(v_resolve(vol,path,&data,0,0,&n)<=0)goto done;
  if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
- if(finder){r_packcatdata(&data,raw,&length);memcpy(raw+22,finder,32);r_unpackcatdata(raw,&data);}
+ if(finder){ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);memcpy(raw+22,finder,32);ClassicHfsDecodeCatalogRecord(raw,sizeof(raw),&data);}
  if(dates){data.u.dir.dirCrDat=ClassicHfsFromUnixSeconds(dates[0]);data.u.dir.dirMdDat=ClassicHfsFromUnixSeconds(dates[1]);}
  if(backup)data.u.dir.dirBkDat=*backup;
  result=v_putcatrec(&data,&n);
