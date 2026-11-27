@@ -82,51 +82,34 @@ void f_getptrs(hfsfile *file, unsigned long **lglen,
 int f_doblock(hfsfile *file, unsigned long num, block *bp,
 	       int (*func)(hfsvol *, unsigned int, unsigned int, block *))
 {
-  unsigned int abnum;
-  unsigned int blnum;
-  unsigned int fabn;
-  int i;
-
-  abnum = num / file->vol->lpa;
-  blnum = num % file->vol->lpa;
-
-  /* locate the appropriate extent record */
-
-  fabn = file->fabn;
-
-  if (abnum < fabn)
-    {
-      ExtDataRec *extrec;
-
-      f_getptrs(file, 0, 0, &extrec);
-
-      fabn = file->fabn = 0;
-      memcpy(file->ext, extrec, sizeof(ExtDataRec));
-    }
-  else
-    abnum -= fabn;
-
-  while (1)
-    {
-      unsigned int num;
-
-      for (i = 0; i < 3; ++i)
-	{
-	  num = file->ext[i].xdrNumABlks;
-
-	  if (abnum < num)
-	    return func(file->vol, file->ext[i].xdrStABN + abnum, blnum, bp);
-
-	  fabn  += num;
-	  abnum -= num;
-	}
-
-      if (fabn <= file->fabn) { ERROR(EIO, "empty extent record"); return -1; }
-      if (v_extsearch(file, fabn, &file->ext, 0) <= 0)
-	return -1;
-
-      file->fabn = fabn;
-    }
+  if (file->vol->lpa == 0) {
+      ERROR(EIO, "invalid classic HFS allocation block size");
+      return -1;
+  }
+  unsigned logical = num / file->vol->lpa;
+  unsigned sector = num % file->vol->lpa;
+  if (logical < file->fabn) {
+      ExtDataRec *inlineExtents;
+      f_getptrs(file, 0, 0, &inlineExtents);
+      memcpy(file->ext, inlineExtents, sizeof(file->ext));
+      file->fabn = 0;
+  }
+  for (;;) {
+      unsigned location;
+      switch (ClassicHfsLocateBlock(file->ext, file->vol->mdb.drNmAlBlks,
+                                    file->fabn, logical, &location)) {
+      case ClassicHfsMappedBlock:
+          return func(file->vol, location, sector, bp);
+      case ClassicHfsNextExtentRecord:
+          if (v_extsearch(file, location, &file->ext, 0) <= 0)
+              return -1;
+          file->fabn = location;
+          break;
+      default:
+          ERROR(EIO, "invalid classic HFS fork extent");
+          return -1;
+      }
+  }
 }
 
 /*

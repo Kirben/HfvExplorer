@@ -27,6 +27,37 @@ static inline int ClassicHfsDecodeExtents(const unsigned char *bytes, ClassicHfs
     return ClassicHfsExtentBytes;
 }
 
+enum ClassicHfsExtentLocation {
+    ClassicHfsInvalidExtent,
+    ClassicHfsMappedBlock,
+    ClassicHfsNextExtentRecord
+};
+
+// Resolve one extent record. On overflow, return the exact logical block
+// that must key the next record in the extents tree.
+static inline enum ClassicHfsExtentLocation ClassicHfsLocateBlock(
+    const ClassicHfsExtent *extents, unsigned volumeBlocks, unsigned recordStart,
+    unsigned logicalBlock, unsigned *location)
+{
+    if (logicalBlock < recordStart || logicalBlock >= volumeBlocks)
+        return ClassicHfsInvalidExtent;
+    unsigned base = recordStart;
+    for (unsigned i = 0; i < ClassicHfsExtentCount; ++i) {
+        unsigned start = extents[i].xdrStABN;
+        unsigned count = extents[i].xdrNumABlks;
+        if (!count || start >= volumeBlocks || count > volumeBlocks - start ||
+            count > volumeBlocks - base)
+            return ClassicHfsInvalidExtent;
+        if (logicalBlock - base < count) {
+            *location = start + (logicalBlock - base);
+            return ClassicHfsMappedBlock;
+        }
+        base += count;
+    }
+    *location = base;
+    return ClassicHfsNextExtentRecord;
+}
+
 static inline int ClassicHfsValidExtentRecord(const unsigned char *record, int size)
 {
     return size >= ClassicHfsExtentKeySize + ClassicHfsExtentBytes &&

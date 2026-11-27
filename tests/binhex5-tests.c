@@ -181,6 +181,23 @@ int main(int argc,char**argv){
   must(!ClassicHfsReleaseBlocks(map, 16, 5, 6, &freeBlocks) && freeBlocks == 16,
        "reject repeated release");
  }
+ {
+  ClassicHfsExtent runs[3] = {{18, 2}, {4, 3}, {0, 1}};
+  unsigned location = 99;
+  must(ClassicHfsLocateBlock(runs, 20, 7, 8, &location) == ClassicHfsMappedBlock && location == 19,
+       "last physical allocation block");
+  must(ClassicHfsLocateBlock(runs, 20, 7, 9, &location) == ClassicHfsMappedBlock && location == 4 &&
+       ClassicHfsLocateBlock(runs, 20, 7, 12, &location) == ClassicHfsMappedBlock && location == 0,
+       "fragment boundaries");
+  must(ClassicHfsLocateBlock(runs, 20, 7, 13, &location) == ClassicHfsNextExtentRecord && location == 13,
+       "next overflow key");
+  runs[0].xdrNumABlks = 3;
+  must(ClassicHfsLocateBlock(runs, 20, 7, 7, &location) == ClassicHfsInvalidExtent && location == 13,
+       "reject physically truncated run before I/O");
+  runs[0].xdrNumABlks = 0;
+  must(ClassicHfsLocateBlock(runs, 20, 7, 7, &location) == ClassicHfsInvalidExtent,
+       "missing mapping cannot advance overflow search");
+ }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
