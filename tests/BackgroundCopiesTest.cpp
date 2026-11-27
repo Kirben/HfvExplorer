@@ -183,8 +183,17 @@ int RunBackgroundCopiesTest(const char* directory){
   Check(enqueue(secondId)&&FileOperations::Pending().size()==2,"second job not queued independently");auto queue=FileOperations::Pending();queue.back().Job()->cancel();SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(Find(*target,u"QueuedOne")&&!Find(*target,u"QueuedTwo"),"queued cancellation wrote the canceled file");
 #ifdef HFV_FLOPPY_TESTING
   {CString image=host+"\\floppy.dsk";{CFile file;Check(file.Open(image,CFile::modeCreate|CFile::modeWrite),"create fake floppy image");file.SetLength(1474560);}char label[]="TestFloppy";Check(hfs_format(const_cast<char*>((LPCSTR)image),0,label)==0,"format fake floppy image");std::vector<BYTE> bytes(1474560);{CFile file;Check(file.Open(image,CFile::modeRead),"load fake floppy");Check(file.Read(bytes.data(),UINT(bytes.size()))==bytes.size(),"short fake floppy load");}
-   TestFloppy disk(std::move(bytes));readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach fake floppy");struct Detach{~Detach(){readonly_floppy_attach_api(25,nullptr);readonly_cd_backend_final();}}detach;
-   testStage="physical copy";char physical[MAX_PATH];get_floppy_volume_file_name(25,physical);auto doc=second.Document();int index=doc->insert_volume(physical,1,0,0,0);Check(index>=0&&doc->Mounts().OpenClassicForTest(index),"mount fake floppy browser");auto& mounted=doc->Mounts().ClassicAt(index);
+   TestFloppy disk(std::move(bytes));readonly_cd_backend_init();Check(readonly_floppy_attach_api(25,&disk),"attach fake floppy");struct Detach{
+    Gate& gate;
+    ~Detach(){
+     SetEvent(gate.release);
+     BackgroundCopies::CancelAll();
+     while(BackgroundCopies::Active()){Pump();Sleep(1);}
+     readonly_floppy_attach_api(25,nullptr);
+     readonly_cd_backend_final();
+    }
+   }detach{gate};
+   testStage="physical copy";storageUiTest.answer=Storage::ConflictChoice::Replace;char physical[MAX_PATH];get_floppy_volume_file_name(25,physical);auto doc=second.Document();int index=doc->insert_volume(physical,1,0,0,0);Check(index>=0&&doc->Mounts().OpenClassicForTest(index),"mount fake floppy browser");auto& mounted=doc->Mounts().ClassicAt(index);
    auto tree=second.Tree();doc->GetBrowserSession().SetMountRoot({BrowserMountInventory::Kind::ClassicVolume,index},tree->initialize_volume(index,mounted.m_volume_name,2,1,0,0,0));auto root=doc->GetBrowserSession().MountRoot({BrowserMountInventory::Kind::ClassicVolume,index});bool notifications=tree->SelectionNotificationsEnabled();tree->enable_selchange(0);tree->GetTreeCtrl().SelectItem(root);tree->enable_selchange(notifications);Check(doc->NavigateClassicFolder(index,2)&&second.AwaitNavigationForTest(),"open fake floppy through typed navigation");
    auto copyFloppy=[&](const std::u16string& name){auto id=Put(*source,name);gate.Reset();FileOperations::Location from,to;from.SetMounted(slow,id);to.SetClassic(physical,"TestFloppy:");return second.MacBrowser().TransferSelection({from},to);};
    Check(copyFloppy(u"FloppyCopy"),"start fake floppy browser copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(disk.locked&&mounted.m_opened&&!VolumeCoord::Readable(VolumeCoord::DeviceKey(25)),"floppy write did not lock and reserve the device independently of browser mount metadata");
