@@ -199,6 +199,15 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 
 int main(int argc,char**argv){
     {
+        hfsvol volume = {0};
+        hfsfile file = {0};
+        file.vol = &volume;
+        file.pos = 17;
+        file.cat.u.fil.filLgLen = file.cat.u.fil.filPyLen = 512;
+        must(hfs_setfork(&file, 1) < 0 && errno == EIO && hfs_getfork(&file) == 0 &&
+             file.pos == 17, "invalid allocation size preserves selected fork and position");
+    }
+    {
         hfsdir dir = {0};
         hfsdirent entry;
         dir.dirid = HFS_CNID_ROOTDIR;

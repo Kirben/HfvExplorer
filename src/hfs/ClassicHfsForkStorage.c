@@ -22,6 +22,8 @@
 
 # include "libhfs/internal.h"
 #include "ClassicHfsGeometry.h"
+#include "ClassicHfsForkIO.h"
+#include "ClassicHfsTime.h"
 #include "ClassicHfsNodeIO.h"
 # include "libhfs/block.h"
 # include "libhfs/file.h"
@@ -339,4 +341,230 @@ int ClassicHfsTrimForkAllocation(hfsfile *file)
   file->flags |= HFS_UPDATE_CATREC;
 
   return 0;
+}
+
+int ClassicHfsFlushOpenFile(hfsfile *file)
+{
+    if ((file->vol->flags & HFS_READONLY) || !(file->flags & HFS_UPDATE_CATREC))
+        return 0;
+    node leaf;
+    CatDataRec disk, update;
+    if (ClassicHfsFindCatalogEntry(file->vol, file->parid, file->name, &disk, NULL, &leaf) <= 0)
+        return -1;
+    if (!ClassicHfsPrepareFileUpdate(&disk, &file->cat, file->clump, &update)) {
+        ERROR(EIO, "classic HFS open file no longer matches its catalog entry");
+        return -1;
+    }
+    if (ClassicHfsStoreCatalogEntry(&update, &leaf) < 0)
+        return -1;
+    file->cat = update;
+    file->flags &= ~HFS_UPDATE_CATREC;
+    return 0;
+}
+
+/* High-Level File Routines ================================================ */
+
+hfsfile *hfs_open(hfsvol *vol, char *path)
+{
+  hfsfile *file;
+
+  if (ClassicHfsCurrentVolume(&vol) < 0)
+    return 0;
+
+  file = ALLOC(hfsfile, 1);
+  if (file == 0)
+    {
+      ERROR(ENOMEM, 0);
+      return 0;
+    }
+
+  if (ClassicHfsResolvePath(vol, path, &file->cat, &file->parid, file->name, 0) <= 0)
+    {
+      FREE(file);
+      return 0;
+    }
+
+  if (file->cat.cdrType != cdrFilRec)
+    {
+      FREE(file);
+      ERROR(EISDIR, 0);
+      return 0;
+    }
+
+  if (file->cat.u.fil.filLgLen > HFS_MAX_FORK_SIZE || file->cat.u.fil.filRLgLen > HFS_MAX_FORK_SIZE) {
+    FREE(file); ERROR(EFBIG, "classic HFS fork exceeds Apple's 2 GiB minus one limit"); return 0;
+  }
+  file->vol   = vol;
+  file->clump = file->cat.u.fil.filClpSize;
+  file->flags = 0;
+
+  ClassicHfsSelectFork(file, 0);
+
+  file->prev = 0;
+  file->next = vol->files;
+
+  if (vol->files)
+    vol->files->prev = file;
+
+  vol->files = file;
+
+  return file;
+}
+
+static int fork_needs_trim(hfsfile *file)
+{
+    ClassicHfsForkFields fields = ClassicHfsSelectedFork(file);
+    uint32_t rounded;
+    int status = ClassicHfsTruncatedSize(*fields.logical, *fields.physical,
+                                         file->vol->mdb.drAlBlkSiz, &rounded);
+    if (status != ClassicHfsForkSizeOk) {
+        ERROR(status == ClassicHfsForkSizeLimit ? EFBIG : EIO, "invalid classic HFS fork size");
+        return -1;
+    }
+    return rounded != *fields.physical;
+}
+
+int hfs_setfork(hfsfile *file, int fork)
+{
+  if (file->vol->flags & HFS_WRITE_FAILED) {
+    ERROR(EIO, "classic HFS volume requires repair");
+    return -1;
+  }
+  if (!(file->vol->flags & HFS_READONLY)) {
+    int trim = fork_needs_trim(file);
+    if (trim < 0)
+      return -1;
+    if (trim) {
+      if (ClassicHfsBeginTransaction(file->vol) < 0)
+        return -1;
+      int result = ClassicHfsTrimForkAllocation(file);
+      if (ClassicHfsEndTransaction(file->vol, result) < 0)
+        return -1;
+    }
+  }
+  ClassicHfsSelectFork(file, fork);
+  return 0;
+}
+
+int hfs_getfork(hfsfile *file)
+{
+  return file->fork != fkData;
+}
+
+long hfs_read(hfsfile *file, void *buf, unsigned long len)
+{
+  unsigned long *logicalLength;
+  logicalLength = ClassicHfsSelectedFork(file).logical;
+  return ClassicHfsReadFork(file, ClassicHfsReadForkSector, *logicalLength, &file->pos, buf, len);
+}
+
+static int grow_fork(void *context)
+{
+  hfsfile *file = (hfsfile *)context;
+  if (ClassicHfsReserveTreeSpace(&file->vol->ext, 1) < 0)
+    return -1;
+  return ClassicHfsExtendForkAllocation(file);
+}
+
+long hfs_write(hfsfile *file, void *buf, unsigned long len)
+{
+  unsigned long *lglen, *pylen;
+
+  if (file->vol->flags & HFS_READONLY)
+    {
+      ERROR(EROFS, 0);
+      return -1;
+    }
+
+  ClassicHfsForkFields forkFields = ClassicHfsSelectedFork(file);
+  lglen = forkFields.logical;
+  pylen = forkFields.physical;
+
+  if (len > 0x7fffffffUL) { ERROR(EINVAL, "transfer count exceeds signed API range"); return -1; }
+  if (file->pos > HFS_MAX_FORK_SIZE || len > HFS_MAX_FORK_SIZE - file->pos) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
+  if (len)
+    {
+      file->cat.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(0));
+      file->flags |= HFS_UPDATE_CATREC;
+    }
+
+  return ClassicHfsWriteFork(file, ClassicHfsReadForkSector, ClassicHfsWriteForkSector, grow_fork,
+                             pylen, lglen, &file->pos, buf, len);
+}
+
+static int hfs_truncate_impl(hfsfile *file, unsigned long len)
+{
+  if (len > HFS_MAX_FORK_SIZE) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
+  unsigned long *lglen;
+
+  lglen = ClassicHfsSelectedFork(file).logical;
+
+  if (*lglen > len)
+    {
+      if (file->vol->flags & HFS_READONLY)
+	{
+	  ERROR(EROFS, 0);
+	  return -1;
+	}
+
+      *lglen = len;
+
+      file->cat.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(0));
+      file->flags |= HFS_UPDATE_CATREC;
+
+      if (file->pos > len)
+	file->pos = len;
+    }
+
+  return 0;
+}
+
+hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
+{
+  unsigned long *lglen;
+  lglen = ClassicHfsSelectedFork(file).logical;
+  if (!ClassicHfsSeekFork(*lglen, &file->pos, offset, from)) {
+    ERROR(EINVAL, 0);
+    return -1;
+  }
+  return file->pos;
+}
+
+int hfs_close(hfsfile *file)
+{
+  hfsvol *vol=file->vol;int result=0;
+  if(vol->flags&HFS_WRITE_FAILED)result=-1;
+  else if(!(vol->flags&HFS_READONLY)) {
+    int trim = fork_needs_trim(file);
+    if (trim < 0)
+      return -1;
+    if ((file->flags & HFS_UPDATE_CATREC) || trim) {
+      if(ClassicHfsBeginTransaction(vol)<0) {
+        if(!(vol->flags&HFS_WRITE_FAILED))return -1; // Keep the view for retry.
+        result=-1;
+      } else {
+        if(ClassicHfsTrimForkAllocation(file)<0||ClassicHfsFlushOpenFile(file)<0)result=-1;
+        result=ClassicHfsEndTransaction(vol,result);
+        if(result<0&&!(vol->flags&HFS_WRITE_FAILED))return -1;
+      }
+    }
+  }
+  if(file->prev)file->prev->next=file->next;
+  if(file->next)file->next->prev=file->prev;
+  if(file==vol->files)vol->files=file->next;
+  FREE(file);return result;
+}
+
+int hfs_truncate(hfsfile *file,unsigned long length) {
+ unsigned long *logical;int result;hfsvol *vol;
+ /* Preserve the public range check before touching a caller-supplied file. */
+ if(length>HFS_MAX_FORK_SIZE){ERROR(EFBIG,"classic HFS fork exceeds Apple limit");return -1;}
+ logical = ClassicHfsSelectedFork(file).logical;
+ if(*logical<=length)return 0;
+ vol=file->vol;
+ if(ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_truncate_impl(file,length);
+ if(result==0&&ClassicHfsTrimForkAllocation(file)<0)result=-1;
+ if(result==0&&ClassicHfsFlushOpenFile(file)<0)result=-1;
+ return ClassicHfsEndTransaction(vol,result);
 }
