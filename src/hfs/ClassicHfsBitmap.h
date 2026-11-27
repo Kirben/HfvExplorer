@@ -67,3 +67,22 @@ static inline unsigned ClassicHfsFindFreeRun(const void *bitmap, unsigned count,
     }
     return best;
 }
+
+// Publish the extent and accounting only after validating the allocation.
+static inline unsigned ClassicHfsAllocateBlocks(void *bitmap, uint16_t count,
+                                               uint16_t *hint, uint16_t *freeBlocks,
+                                               uint16_t request, uint16_t *first)
+{
+    unsigned start = 0;
+    if (*freeBlocks > count || !*freeBlocks)
+        return 0;
+    unsigned length = ClassicHfsFindFreeRun(bitmap, count, *hint, request, &start);
+    if (!length || length > *freeBlocks)
+        return 0;
+    for (unsigned i = start; i < start + length; ++i)
+        ClassicHfsSetBit(bitmap, i);
+    *first = (uint16_t)start;
+    *hint = start + length == count ? 0 : (uint16_t)(start + length);
+    *freeBlocks -= (uint16_t)length;
+    return length;
+}

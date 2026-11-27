@@ -167,6 +167,17 @@ int main(int argc,char**argv){
   }
  }
  {
+  unsigned char map = 0xf0;
+  uint16_t hint = 4, freeBlocks = 9, first = 99;
+  must(!ClassicHfsAllocateBlocks(&map, 8, &hint, &freeBlocks, 4, &first) &&
+       map == 0xf0 && hint == 4 && freeBlocks == 9 && first == 99,
+       "impossible allocation count preserves bitmap, hint and extent");
+  freeBlocks = 4;
+  must(ClassicHfsAllocateBlocks(&map, 8, &hint, &freeBlocks, 6, &first) == 4 &&
+       map == 0xff && hint == 0 && freeBlocks == 0 && first == 4,
+       "partial allocation updates bitmap and wraps hint");
+ }
+ {
   unsigned char map[2] = {0x07, 0xe0};
   uint16_t freeBlocks = 10;
   must(!ClassicHfsReleaseBlocks(map, 16, 5, 7, &freeBlocks) &&

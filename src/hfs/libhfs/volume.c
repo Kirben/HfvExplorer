@@ -220,8 +220,7 @@ int v_putextrec(ExtDataRec *data, node *np)
  */
 int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
 {
-  unsigned int found, foundat, pt;
-  block *vbm;
+  unsigned int found;
 
   if (vol->mdb.drFreeBks == 0)
     {
@@ -229,23 +228,15 @@ int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
       return -1;
     }
 
-  vbm = vol->vbm;
-  found = ClassicHfsFindFreeRun(vbm, vol->mdb.drNmAlBlks, vol->mdb.drAllocPtr,
-                                blocks->xdrNumABlks, &foundat);
-  if (found == 0 || found > vol->mdb.drFreeBks)
+  found = ClassicHfsAllocateBlocks(vol->vbm, vol->mdb.drNmAlBlks,
+                                   &vol->mdb.drAllocPtr, &vol->mdb.drFreeBks,
+                                   blocks->xdrNumABlks, &blocks->xdrStABN);
+  if (!found)
     {
       ERROR(EIO, "bad volume bitmap or free block count");
       return -1;
     }
-
-  blocks->xdrStABN    = foundat;
-  blocks->xdrNumABlks = found;
-
-  vol->mdb.drAllocPtr = foundat + found == vol->mdb.drNmAlBlks ? 0 : foundat + found;
-  vol->mdb.drFreeBks -= found;
-
-  for (pt = foundat; pt < foundat + found; ++pt)
-    ClassicHfsSetBit(vbm, pt);
+  blocks->xdrNumABlks = (uint16_t)found;
 
   vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
 
