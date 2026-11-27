@@ -26,6 +26,7 @@
 # include "file.h"
 # include "btree.h"
 # include "volume.h"
+#include "../ClassicHfsVolumeAllocation.h"
 
 // The extents file can describe its own overflow. Walk readable leaves when
 // its root cannot be reached without first resolving the requested extent.
@@ -184,14 +185,14 @@ int ClassicHfsExtendForkAllocation(hfsfile *file)
   ExtDataRec tail;
   node leaf;
   if (ClassicHfsFindAppendRecord(file, end, &start, tail, &leaf) < 0 ||
-      v_allocblocks(vol, &blocks) < 0)
+      ClassicHfsClaimVolumeExtent(vol, &blocks) < 0)
     return -1;
 
   ExtDataRec updated;
   int append = ClassicHfsAppendExtent(tail, start, end, vol->mdb.drNmAlBlks,
                                       blocks, updated);
   if (append == ClassicHfsCannotAppend) {
-    v_freeblocks(vol, &blocks);
+    ClassicHfsReleaseVolumeExtent(vol, &blocks);
     ERROR(EIO, "inconsistent classic HFS fork extents at physical EOF");
     return -1;
   }
@@ -200,13 +201,13 @@ int ClassicHfsExtendForkAllocation(hfsfile *file)
     int reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
     reclen += ClassicHfsEncodeExtents(record + reclen, updated);
     if (bt_insert(&vol->ext, record, reclen) < 0) {
-      v_freeblocks(vol, &blocks);
+      ClassicHfsReleaseVolumeExtent(vol, &blocks);
       return -1;
     }
     start = end;
   } else if (start) {
     if (ClassicHfsStoreOverflow(file, start, updated, &leaf) < 0) {
-      v_freeblocks(vol, &blocks);
+      ClassicHfsReleaseVolumeExtent(vol, &blocks);
       return -1;
     }
   } else {
@@ -264,7 +265,7 @@ int f_trunc(hfsfile *file)
     }
     if (plan.next > keep) {
       for (unsigned i = 0; i < ClassicHfsExtentCount; ++i)
-        if (plan.released[i].xdrNumABlks && v_freeblocks(file->vol, &plan.released[i]) < 0)
+        if (plan.released[i].xdrNumABlks && ClassicHfsReleaseVolumeExtent(file->vol, &plan.released[i]) < 0)
           return -1;
       if (!start)
         memcpy(*extrec, plan.kept, sizeof(plan.kept));

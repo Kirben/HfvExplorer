@@ -112,50 +112,6 @@ int v_putcatrec(CatDataRec *data, node *np)
 }
 
 /*
- * NAME:	vol->allocblocks()
- * DESCRIPTION:	allocate a contiguous range of blocks
- */
-int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
-{
-  unsigned int found;
-
-  if (vol->mdb.drFreeBks == 0)
-    {
-      ERROR(ENOSPC, "volume full");
-      return -1;
-    }
-
-  found = ClassicHfsAllocateBlocks(vol->vbm, vol->mdb.drNmAlBlks,
-                                   &vol->mdb.drAllocPtr, &vol->mdb.drFreeBks,
-                                   blocks->xdrNumABlks, &blocks->xdrStABN);
-  if (!found)
-    {
-      ERROR(EIO, "bad volume bitmap or free block count");
-      return -1;
-    }
-  blocks->xdrNumABlks = (uint16_t)found;
-
-  vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
-
-  return 0;
-}
-
-/*
- * NAME:	vol->freeblocks()
- * DESCRIPTION:	deallocate a contiguous range of blocks
- */
-int v_freeblocks(hfsvol *vol, const ExtDescriptor *blocks)
-{
-  if (!ClassicHfsReleaseBlocks(vol->vbm, vol->mdb.drNmAlBlks, blocks->xdrStABN,
-                              blocks->xdrNumABlks, &vol->mdb.drFreeBks)) {
-      ERROR(EIO, "invalid classic HFS extent release");
-      return -1;
-  }
-  vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
-  return 0;
-}
-
-/*
  * NAME:	vol->resolve()
  * DESCRIPTION:	translate a pathname; return catalog information
  */

@@ -10,6 +10,7 @@
 #include "hfs/libhfs/internal.h"
 #include "hfs/libhfs/btree.h"
 #include "hfs/ClassicHfsTreeFlush.h"
+#include "hfs/ClassicHfsVolumeAllocation.h"
 #include "hfs/libhfs/node.h"
 #include "hfs/libhfs/file.h"
 #include "hfs/ClassicHfsGrowTreeMap.h"
@@ -158,6 +159,21 @@ static void verify_repeated_tree_map(char *image)
 }
 
 int main(int argc,char**argv){
+    {
+        hfsvol volume = {0};
+        block bitmap = {0};
+        ExtDescriptor extent = {7, 1};
+        volume.vbm = &bitmap;
+        volume.mdb.drNmAlBlks = 8;
+        must(ClassicHfsClaimVolumeExtent(&volume, &extent) < 0 && errno == EIO &&
+             !bitmap[0] && extent.xdrStABN == 7 && !volume.flags, "reject false full-volume count");
+        bitmap[0] = 0xff;
+        must(ClassicHfsClaimVolumeExtent(&volume, &extent) < 0 && errno == ENOSPC,
+             "report full bitmap as out of space");
+        volume.flags = HFS_WRITE_FAILED;
+        must(ClassicHfsReleaseVolumeExtent(&volume, &extent) < 0 && bitmap[0] == 0xff &&
+             !volume.mdb.drFreeBks && volume.flags == HFS_WRITE_FAILED, "quarantined volume retains extent");
+    }
     {
         ClassicHfsTreeHeader header = {0};
         must(ClassicHfsCheckSearchRoot(&header) == 0, "empty classic tree lookup");

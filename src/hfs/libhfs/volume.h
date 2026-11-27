@@ -28,9 +28,6 @@ int v_getthread(hfsvol *, long, CatDataRec *, node *, int);
 
 int v_putcatrec(CatDataRec *, node *);
 
-int v_allocblocks(hfsvol *, ExtDescriptor *);
-int v_freeblocks(hfsvol *, const ExtDescriptor *);
-
 int v_resolve(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
 void v_destruct(hfsvol *);

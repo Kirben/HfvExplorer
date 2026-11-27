@@ -11,6 +11,7 @@
 #include "hfs/libhfs/file.h"
 #include "hfs/libhfs/btree.h"
 #include "hfs/libhfs/volume.h"
+#include "hfs/ClassicHfsVolumeAllocation.h"
 #include "FragmentedTestData.h"
 
 static void must(int ok,const char* action) {
@@ -27,7 +28,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
  must(old[0].xdrNumABlks+old[1].xdrNumABlks+old[2].xdrNumABlks==blocks,"original overflow tree inline");
  for(i=0;i<10;++i) {
   v->mdb.drAllocPtr=(unsigned short)(20000+i*100); pieces[i].xdrNumABlks=(unsigned short)(i==9?blocks-9:1);
-  must(v_allocblocks(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate overflow-tree extent");
+  must(ClassicHfsClaimVolumeExtent(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate overflow-tree extent");
  }
  for(i=3;i<10;i+=3) {
   ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int reclen;
@@ -43,7 +44,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
   must(b_writeab(v,pieces[i].xdrStABN+j/v->lpa,j%v->lpa,(block*)(bytes+k*512))==0,"relocate overflow tree");
  memcpy(v->ext.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec)); memcpy(v->ext.f.ext,pieces,sizeof(ExtDataRec)); v->ext.f.fabn=0;
  memcpy(v->mdb.drXTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;
- for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(v_freeblocks(v,&old[i])==0,"release relocated extent");
+ for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(ClassicHfsReleaseVolumeExtent(v,&old[i])==0,"release relocated extent");
  out=fopen(oracle,"wb"); must(out!=NULL,"create extents oracle");
  must(fwrite(bytes,length,1,out)==1,"save pre-relocation extents oracle"); fclose(out);
  free(bytes); must(hfs_umount(v)==0,"persist self-fragmented overflow tree");
@@ -106,7 +107,7 @@ void CreateFragmentedFixture(const char* directory) {
  memcpy(old,v->cat.f.cat.u.fil.filExtRec,sizeof(old));
  for(i=0;i<10;++i) {
   v->mdb.drAllocPtr=(unsigned short)(16000+i*100); pieces[i].xdrNumABlks=(unsigned short)(i==9?blocks-9:1);
-  must(v_allocblocks(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate catalog extent");
+  must(ClassicHfsClaimVolumeExtent(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate catalog extent");
  }
  for(i=3;i<10;i+=3) {
   ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int length;
@@ -120,7 +121,7 @@ void CreateFragmentedFixture(const char* directory) {
  memcpy(v->cat.f.cat.u.fil.filExtRec,pieces,sizeof(ExtDataRec));
  memcpy(v->cat.f.ext,pieces,sizeof(ExtDataRec)); v->cat.f.fabn=0;
  memcpy(v->mdb.drCTExtRec,pieces,sizeof(ExtDataRec)); v->flags|=HFS_UPDATE_MDB;
- for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(v_freeblocks(v,&old[i])==0,"release relocated extent");
+ for(i=0;i<3;++i) if(old[i].xdrNumABlks) must(ClassicHfsReleaseVolumeExtent(v,&old[i])==0,"release relocated extent");
  free(catalog); must(hfs_umount(v)==0,"persist fragmented catalog");
  v=hfs_mount(m.image,0,O_RDONLY); must(v!=NULL,"independent reopen fragmented catalog");
  f=hfs_open(v,"Fragments:Fragment00"); must(f!=NULL,"find file through fragmented catalog");
