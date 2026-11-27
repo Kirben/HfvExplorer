@@ -15,6 +15,7 @@
 #include "BackgroundCopies.h"
 #include "MetadataDialogs.h"
 #include "DeviceWait.h"
+#include "DialogClose.h"
 #include "utils.h"
 #include <cstdio>
 namespace {
@@ -878,7 +879,14 @@ int RunBrowserWindowsTest(const char* directory){
   b->SendMessage(WM_COMMAND,ID_HFV_VIEW_DETAILS);Check((sb.List()->GetStyle()&LVS_TYPEMASK)==LVS_REPORT&&sb.MacBrowser().Refresh(),"remaining window is not usable after first closes");
   b->SendMessage(WM_COMMAND,ID_TOOLS_NEW_BROWSER);Check(app.m_browsers.size()==2,"remaining window cannot create another browser");
   // Explicit File/Exit closes the full collection; a title-bar close does not.
-  b->SendMessage(WM_COMMAND,ID_APP_EXIT);Check(app.m_browsers.empty()&&!IsWindow(bh)&&app.m_pMainWnd==nullptr&&app.ActiveBrowser()==nullptr,"File Exit did not close the remaining browser collection");
+  app.m_confirm_quit=TRUE;
+  DialogClose::test={};
+  DialogClose::test.answer=IDYES;
+  b->SendMessage(WM_COMMAND,ID_APP_EXIT);
+  Check(DialogClose::test.prompts==1&&DialogClose::test.kind==DialogClose::Kind::Quit,
+        "File Exit did not request quit confirmation");
+  DialogClose::test={};
+  Check(app.m_browsers.empty()&&!IsWindow(bh)&&app.m_pMainWnd==nullptr&&app.ActiveBrowser()==nullptr,"File Exit did not close the remaining browser collection");
   // WM_QUIT may be synthesized only after the remaining posted messages drain.
   bool quit=false;
   const auto exitStart=GetTickCount64();
