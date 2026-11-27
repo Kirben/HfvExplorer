@@ -28,6 +28,7 @@
 #include "ClassicHfsTreeFlush.h"
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsSystemFiles.h"
+#include "ClassicHfsFormatTree.h"
 #include "ClassicHfsGeometry.h"
 #include "ClassicHfsSectorIO.h"
 #include "ClassicHfsTime.h"
@@ -411,4 +412,72 @@ int ClassicHfsFlushVolumeMetadata(hfsvol *volume, int closing)
         return -1;
     }
     return 0;
+}
+
+int hfs_format(char *path, int partition, char *name)
+{
+    size_t length = name ? strlen(name) : 0;
+    if (!length || length > HFS_MAX_VLEN || strchr(name, ':') || partition < 0) {
+        ERROR(EINVAL, "invalid classic HFS format name or partition");
+        return -1;
+    }
+
+    block bitmap[16] = {0};
+    hfsvol volume = {0};
+    volume.vbm = bitmap;
+    volume.cwd = HFS_CNID_ROOTDIR;
+    volume.pnum = partition;
+    volume.fd = ClassicHfsOpenVolumeDevice(path, O_RDWR);
+    if (volume.fd < 0) {
+        if (volume.fd != -2) {
+            ERROR(errno, "error opening device for formatting");
+        }
+        return -1;
+    }
+
+    int result = -1;
+    // Obtain capacity from the open descriptor. A failed sector read must
+    // never be mistaken for the end of a smaller, writable device.
+    hfv_offset_t size = fhook_lseek(volume.fd, 0, SEEK_END);
+    if (size < 0) {
+        ERROR(errno, "cannot determine classic HFS format capacity");
+        goto done;
+    }
+    if ((uint64_t)size / HFS_BLOCKSZ > UINT32_MAX) {
+        ERROR(EFBIG, "image exceeds classic HFS sector range");
+        goto done;
+    }
+    volume.vlen = (uint32_t)((uint64_t)size / HFS_BLOCKSZ);
+    if (partition && (!volume.vlen || ClassicHfsSelectPartition(&volume) < 0))
+        goto done;
+    ClassicHfsFormatGeometry geometry;
+    if (!ClassicHfsPlanFormat(volume.vlen, &geometry)) {
+        ERROR(EINVAL, "volume size must be >= 800K");
+        goto done;
+    }
+    ClassicHfsEnableVolumeCache(&volume);
+    volume.lpa = geometry.sectorsPerBlock;
+    ClassicHfsInitMasterDirectory(&volume.mdb, &geometry, name, length, ClassicHfsFromUnixSeconds(time(NULL)));
+    ClassicHfsInitSystemFiles(&volume);
+    if (ClassicHfsInitFormatTree(&volume.ext, ClassicHfsExtentKeySize - 1, ClassicHfsCompareExtentKeys) < 0 ||
+        ClassicHfsInitFormatTree(&volume.cat, 37, ClassicHfsCompareCatalogKeys) < 0 ||
+        ClassicHfsReserveTreeSpace(&volume.ext, 1) < 0 || ClassicHfsReserveTreeSpace(&volume.cat, 1) < 0 ||
+        ClassicHfsCreateDirectoryRecords(&volume, HFS_CNID_ROOTPAR, name) < 0)
+        goto done;
+    volume.mdb.drNxtCNID = 16;
+    block boot = {0};
+    if (ClassicHfsWriteSector(&volume, 0, &boot) < 0 || ClassicHfsWriteSector(&volume, 1, &boot) < 0)
+        goto done;
+    volume.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
+    if (ClassicHfsFlushVolumeMetadata(&volume, 1) == 0 && ClassicHfsCloseVolumeCache(&volume) == 0)
+        result = 0;
+done:
+    free(volume.cache);
+    free(volume.ext.map);
+    free(volume.cat.map);
+    if (fhook_close(volume.fd) < 0 && result == 0) {
+        ERROR(errno, "error closing formatted classic HFS device");
+        result = -1;
+    }
+    return result;
 }

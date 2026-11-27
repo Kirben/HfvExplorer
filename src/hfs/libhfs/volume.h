@@ -30,6 +30,7 @@ int ClassicHfsStoreCatalogEntry(CatDataRec *, node *);
 
 int ClassicHfsResolvePath(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
+int ClassicHfsOpenVolumeDevice(char *, int);
 int ClassicHfsCurrentVolume(hfsvol **);
 void ClassicHfsReleaseVolume(hfsvol *);
 int ClassicHfsFlushVolumeMetadata(hfsvol *, int);

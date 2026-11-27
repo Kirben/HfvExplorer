@@ -109,7 +109,7 @@ int ClassicHfsCurrentVolume(hfsvol **volume)
 
 // Windows file hooks establish sharing when acquiring the descriptor. On
 // hosts with POSIX device locking, keep the advisory lock until close.
-static int open_volume_device(char *path, int flags)
+int ClassicHfsOpenVolumeDevice(char *path, int flags)
 {
 #ifdef __EMX__
     flags |= O_BINARY;
@@ -250,7 +250,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
         }
       else if (flags & (O_WRONLY | O_RDWR))
 	{
-	  vol->fd = open_volume_device(path, O_RDWR);
+	  vol->fd = ClassicHfsOpenVolumeDevice(path, O_RDWR);
 	}
 
       if (supplied_fd < 0 && (! (flags & (O_WRONLY | O_RDWR)) ||
@@ -259,7 +259,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	   (flags & O_RDWR))))
 	{
 	  vol->flags |= HFS_READONLY;
-	  vol->fd = open_volume_device(path, O_RDONLY);
+	  vol->fd = ClassicHfsOpenVolumeDevice(path, O_RDONLY);
 	}
 
       if (vol->fd < 0)
@@ -600,162 +600,6 @@ int hfs_vstat(hfsvol *vol, hfsvolent *ent)
   ent->bkdate    = ClassicHfsToUnixSeconds(vol->mdb.drVolBkUp);
 
   return 0;
-}
-
-/*
- * NAME:	hfs->format()
- * DESCRIPTION:	write a new filesystem
- */
-int hfs_format(char *path, int pnum, char *vname)
-{
-  hfsvol vol;
-  btree *ext = &vol.ext;
-  btree *cat = &vol.cat;
-  ClassicHfsFormatGeometry geometry;
-  size_t nameLength = vname ? strlen(vname) : 0;
-  int result = 0;
-  block vbm[16];
-
-  if (vname && strchr(vname, ':'))
-    {
-      ERROR(EINVAL, "volume name may not contain colons");
-      return -1;
-    }
-
-  if (!nameLength || nameLength > HFS_MAX_VLEN)
-    {
-      ERROR(EINVAL, "volume name must be 1-27 chars");
-      return -1;
-    }
-
-  vol.flags  = 0;
-  vol.failure_message = 0;
-  vol.pnum   = pnum;
-  vol.vstart = 0;
-  vol.vlen   = 0;
-  vol.lpa    = 0;
-
-  vol.cache  = 0;
-
-  vol.vbm    = vbm;
-  vol.cwd    = HFS_CNID_ROOTDIR;
-
-  vol.refs   = 0;
-  vol.files  = 0;
-  vol.dirs   = 0;
-
-  vol.prev   = 0;
-  vol.next   = 0;
-
-  vol.fd = open_volume_device(path, O_RDWR);
-  if (vol.fd < 0) {
-    if (vol.fd != -2) {
-      ERROR(errno, "error opening device for writing");
-    }
-    return -1;
-  }
-
-  if (pnum > 0)
-    {
-      if (ClassicHfsSelectPartition(&vol) < 0)
-	{
-	  close(vol.fd);
-	  return -1;
-	}
-    }
-  else  /* determine size of entire device */
-    {
-      unsigned long low, high, mid;
-      block b;
-
-      for (low = 0, high = 2879; ClassicHfsReadSector(&vol, high, &b) >= 0; ) {
-        low = high;
-        if (high == 0xffffffffUL) { close(vol.fd); ERROR(EFBIG, "image exceeds classic HFS sector range"); return -1; }
-        high = high > 0xffffffffUL / 2 ? 0xffffffffUL : high * 2;
-      }
-
-      while (low < high - 1)
-	{
-	  mid = low + (high - low) / 2;
-
-	  if (ClassicHfsReadSector(&vol, mid, &b) < 0)
-	    high = mid;
-	  else
-	    low = mid;
-	}
-
-      vol.vlen = low + 1;
-    }
-
-  if (!ClassicHfsPlanFormat(vol.vlen, &geometry))
-    {
-      close(vol.fd);
-
-      ERROR(EINVAL, "volume size must be >= 800K");
-      return -1;
-    }
-
-  /* initialize volume block cache (OK to fail) */
-
-  ClassicHfsEnableVolumeCache(&vol);
-
-  /* initialize volume geometry */
-
-  vol.lpa = geometry.sectorsPerBlock;
-
-  ClassicHfsInitMasterDirectory(&vol.mdb, &geometry, vname, nameLength,
-                                ClassicHfsFromUnixSeconds(time(0)));
-
-  /* initialize volume bitmap */
-
-  memset(vol.vbm, 0, sizeof(vbm));
-
-  ClassicHfsInitSystemFiles(&vol);
-
-  cat->map = NULL; // cleanup also runs if the first allocation fails
-  if (ClassicHfsInitFormatTree(ext, ClassicHfsExtentKeySize - 1, ClassicHfsCompareExtentKeys) < 0 ||
-      ClassicHfsInitFormatTree(cat, 37, ClassicHfsCompareCatalogKeys) < 0 ||
-      ClassicHfsReserveTreeSpace(ext, 1) < 0 || ClassicHfsReserveTreeSpace(cat, 1) < 0)
-    result = -1;
-
-  /* create root folder */
-
-  if (result == 0 && ClassicHfsCreateDirectoryRecords(&vol, HFS_CNID_ROOTPAR, vname) < 0)
-    result = -1;
-
-  vol.mdb.drNxtCNID = 16;
-
-  /* finish up */
-
-  if (result == 0)
-    {
-      block b;
-
-      /* write boot blocks */
-
-      memset(&b, 0, sizeof(b));
-      if (ClassicHfsWriteSector(&vol, 0, &b) < 0 || ClassicHfsWriteSector(&vol, 1, &b) < 0)
-	result = -1;
-    }
-
-  if (result == 0)
-    {
-      vol.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
-      if (ClassicHfsFlushVolumeMetadata(&vol, 1) < 0 || ClassicHfsCloseVolumeCache(&vol) < 0)
-	result = -1;
-    }
-  FREE(vol.cache);
-
-  if (close(vol.fd) < 0 && result == 0)
-    {
-      ERROR(errno, "error closing device");
-      result = -1;
-    }
-
-  FREE(vol.ext.map);
-  FREE(vol.cat.map);
-
-  return result;
 }
 
 /* High-Level Catalog Routines ============================================= */
