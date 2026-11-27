@@ -17,7 +17,7 @@ typedef struct {
   unsigned long	drAlBlkSiz;	/* size (in bytes) of allocation blocks */
   unsigned long	drClpSiz;	/* default clump size */
   uint16_t	drAlBlSt;	/* first allocation block in volume */
-  long	drNxtCNID;	/* next unused catalog node ID (dir/file ID) */
+  uint32_t	drNxtCNID;	/* next unused catalog node ID (dir/file ID) */
   uint16_t	drFreeBks;	/* number of unused allocation blocks */
   char		drVN[28];	/* volume name (1-27 chars) */
   long	drVolBkUp;	/* date and time of last backup */

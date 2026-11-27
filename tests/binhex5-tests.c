@@ -200,6 +200,18 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 int main(int argc,char**argv){
     {
         hfsvol volume = {0};
+        volume.mdb.drNxtCNID = 15;
+        must(ClassicHfsCreateDirectoryRecords(&volume, HFS_CNID_ROOTDIR, "Rejected") < 0 &&
+             errno == EIO && !volume.flags, "reserved folder ID rejected before tree reservation");
+        volume.mdb.drNxtCNID = UINT32_MAX;
+        must(ClassicHfsCreateDirectoryRecords(&volume, HFS_CNID_ROOTDIR, "Rejected") < 0 &&
+             errno == ENOSPC && volume.mdb.drNxtCNID == UINT32_MAX && !volume.flags,
+             "exhausted catalog ID cannot wrap into reserved IDs");
+        volume.mdb.drNxtCNID = 0x80000000u;
+        must(ClassicHfsCheckNewCatalogId(&volume, 0) == 0, "high-bit catalog IDs remain available");
+    }
+    {
+        hfsvol volume = {0};
         must(ClassicHfsAdjustEntryCount(&volume, HFS_CNID_ROOTPAR, 1, 1) == 0 &&
              !volume.mdb.drDirCnt, "root creation is excluded from volume directory count");
         volume.mdb.drFilCnt = 7;

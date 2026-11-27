@@ -729,7 +729,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   /* create root folder */
 
-  if (result == 0 && v_newfolder(&vol, HFS_CNID_ROOTPAR, vname) < 0)
+  if (result == 0 && ClassicHfsCreateDirectoryRecords(&vol, HFS_CNID_ROOTPAR, vname) < 0)
     result = -1;
 
   vol.mdb.drNxtCNID = 16;
@@ -1427,7 +1427,7 @@ static int hfs_mkdir_impl(hfsvol *vol, char *path)
       return -1;
     }
 
-  if (v_newfolder(vol, parid, name) < 0)
+  if (ClassicHfsCreateDirectoryRecords(vol, parid, name) < 0)
     return -1;
 
   return 0;
@@ -1530,6 +1530,9 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
     }
 
   /* create file `name' in parent `parid' */
+
+  if (ClassicHfsCheckNewCatalogId(vol, 0) < 0)
+    return -1;
 
   if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
     return -1;

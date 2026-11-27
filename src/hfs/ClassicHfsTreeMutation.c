@@ -479,3 +479,60 @@ int ClassicHfsAdjustEntryCount(hfsvol *volume, long parent, int directory, int d
     volume->flags |= HFS_UPDATE_MDB;
     return 0;
 }
+
+int ClassicHfsCheckNewCatalogId(hfsvol *volume, int root)
+{
+    uint32_t id = volume->mdb.drNxtCNID;
+    if (root ? id != HFS_CNID_ROOTDIR : id < 16) {
+        ERROR(EIO, "invalid classic HFS next catalog ID");
+        return -1;
+    }
+    if (id == UINT32_MAX) {
+        ERROR(ENOSPC, "classic HFS catalog IDs exhausted");
+        return -1;
+    }
+    return 0;
+}
+
+static int encode_catalog_entry(unsigned char bytes[HFS_CATRECMAXLEN], long parent,
+                                const char *name, const CatDataRec *entry)
+{
+    int keySize = ClassicHfsWriteCatalogKey(bytes, parent, name);
+    if (keySize < 0) {
+        ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+        return -1;
+    }
+    unsigned payload = ClassicHfsEncodeCatalogRecord(bytes + keySize, HFS_CATRECMAXLEN - keySize, entry);
+    if (!payload) {
+        ERROR(EIO, "invalid classic HFS catalog record size");
+        return -1;
+    }
+    return keySize + payload;
+}
+
+int ClassicHfsCreateDirectoryRecords(hfsvol *volume, long parent, char *name)
+{
+    if (ClassicHfsCheckNewCatalogId(volume, parent == HFS_CNID_ROOTPAR) < 0)
+        return -1;
+    uint32_t id = volume->mdb.drNxtCNID;
+    CatDataRec directory = {0}, thread = {0};
+    directory.cdrType = cdrDirRec;
+    directory.u.dir.dirDirID = id;
+    directory.u.dir.dirCrDat = directory.u.dir.dirMdDat = ClassicHfsFromUnixSeconds(time(NULL));
+    unsigned char entryBytes[HFS_CATRECMAXLEN], threadBytes[HFS_CATRECMAXLEN];
+    int entrySize = encode_catalog_entry(entryBytes, parent, name, &directory);
+    if (entrySize < 0)
+        return -1;
+    thread.cdrType = cdrThdRec;
+    thread.u.dthd.thdParID = parent;
+    strcpy(thread.u.dthd.thdCName, name); // Length checked by the catalog key encoder.
+    int threadSize = encode_catalog_entry(threadBytes, id, "", &thread);
+    if (threadSize < 0 || ClassicHfsReserveTreeSpace(&volume->cat, 2) < 0 ||
+        ClassicHfsInsertTreeRecord(&volume->cat, entryBytes, entrySize) < 0 ||
+        ClassicHfsInsertTreeRecord(&volume->cat, threadBytes, threadSize) < 0 ||
+        ClassicHfsAdjustEntryCount(volume, parent, 1, 1) < 0)
+        return -1;
+    volume->mdb.drNxtCNID = id + 1;
+    volume->flags |= HFS_UPDATE_MDB;
+    return 0;
+}
