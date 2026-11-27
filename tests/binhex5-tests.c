@@ -820,6 +820,13 @@ int main(int argc,char**argv){
   tree->hdr.bthNNodes = nodes;
   tree->hdrnd = before;
   tree->flags = flags;
+  uint32_t originalNodes = tree->hdr.bthNNodes;
+  must(ClassicHfsReserveTreeSpace(tree, UINT32_MAX) < 0 && tree->hdr.bthNNodes == originalNodes,
+       "reject impossible tree reservation before growth");
+  unsigned records = 1200;
+  must(ClassicHfsReserveTreeSpace(tree, records) == 0 &&
+       tree->hdr.bthFree >= records * (tree->hdr.bthDepth + 1u) &&
+       tree->mapsz > HFS_MAP1SZ, "multi-clump reservation accounts for new map nodes");
  }
  must(ClassicHfsCompareNames("A", "a") == 0 && ClassicHfsCompareNames("a", "ab") < 0 &&
       ClassicHfsCompareNames("\x80", "\x8a") == 0 && ClassicHfsCompareNames("a", "\x80") < 0 &&

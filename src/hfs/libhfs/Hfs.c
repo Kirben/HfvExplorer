@@ -728,7 +728,7 @@ int hfs_format(char *path, int pnum, char *vname)
   cat->map = NULL; // cleanup also runs if the first allocation fails
   if (ClassicHfsInitFormatTree(ext, ClassicHfsExtentKeySize - 1, ClassicHfsCompareExtentKeys) < 0 ||
       ClassicHfsInitFormatTree(cat, 37, ClassicHfsCompareCatalogKeys) < 0 ||
-      bt_space(ext, 1) < 0 || bt_space(cat, 1) < 0)
+      ClassicHfsReserveTreeSpace(ext, 1) < 0 || ClassicHfsReserveTreeSpace(cat, 1) < 0)
     result = -1;
 
   /* create root folder */
@@ -1220,7 +1220,7 @@ static int write_fork_block(void *context, uint32_t sector, block *bytes)
 static int grow_fork(void *context)
 {
   hfsfile *file = (hfsfile *)context;
-  if (bt_space(&file->vol->ext, 1) < 0)
+  if (ClassicHfsReserveTreeSpace(&file->vol->ext, 1) < 0)
     return -1;
   return f_alloc(file);
 }
@@ -1545,7 +1545,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 
   /* create file `name' in parent `parid' */
 
-  if (bt_space(&vol->cat, 1) < 0)
+  if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
     return -1;
 
   id = vol->mdb.drNxtCNID++;
@@ -1814,7 +1814,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 
   /* A longer key can split the destination leaf (and its ancestors).
      Reserve those nodes before removing the only catalog link to the forks. */
-  if (bt_space(&vol->cat, 1) < 0)
+  if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
     return -1;
 
   /* change volume name */

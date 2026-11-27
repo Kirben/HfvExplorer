@@ -367,7 +367,7 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   unsigned char record[HFS_CATRECMAXLEN];
   int i, reclen;
 
-  if (bt_space(&vol->cat, 2) < 0)
+  if (ClassicHfsReserveTreeSpace(&vol->cat, 2) < 0)
     return -1;
 
   id = vol->mdb.drNxtCNID++;

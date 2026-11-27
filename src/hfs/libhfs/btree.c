@@ -65,47 +65,42 @@ int bt_putnode(node *np)
 
 /* High-Level B*-Tree Routines ============================================= */
 
-/*
- * NAME:	btree->space()
- * DESCRIPTION:	assert space for new records, or extend the file
- */
-int bt_space(btree *bt, unsigned int nrecs)
+// Reserve enough free nodes for a split at every level. Growing either
+// tree's node bitmap can consume some of the nodes just allocated.
+int ClassicHfsReserveTreeSpace(btree *tree, unsigned records)
 {
-  unsigned int nnodes;
-  int space;
-
-  nnodes = nrecs * (bt->hdr.bthDepth + 1);
-
-  if (nnodes <= bt->hdr.bthFree)
-    return 0;
-
-  /* make sure the extents tree has room too */
-
-  if (bt != &bt->f.vol->ext)
-    {
-      if (bt_space(&bt->f.vol->ext, 1) < 0)
-	return -1;
+    uint64_t required = (uint64_t)records * (tree->hdr.bthDepth + 1u);
+    if (required > UINT32_MAX / ClassicHfsNodeSize) {
+        ERROR(EFBIG, "classic HFS tree reservation exceeds fork capacity");
+        return -1;
     }
-
-  space = f_alloc(&bt->f);
-  if (space < 0)
-    return -1;
-
-  nnodes = space * (bt->f.vol->mdb.drAlBlkSiz / bt->hdr.bthNodeSize);
-
-  if (!nnodes) {
-    ERROR(EIO, "classic HFS tree growth supplied no nodes");
-    return -1;
-  }
-  /* The formatter already marked node zero in the initial bitmap. */
-  bt->hdr.bthFree += nnodes - (bt->hdr.bthNNodes == 0);
-  bt->hdr.bthNNodes += nnodes;
-
-  bt->flags |= HFS_UPDATE_BTHDR;
-
-  bt->f.vol->flags |= HFS_UPDATE_ALTMDB;
-
-  return ClassicHfsGrowTreeMap(bt);
+    hfsvol *volume = tree->f.vol;
+    unsigned blockBytes = volume->mdb.drAlBlkSiz;
+    if (tree->hdr.bthNodeSize != ClassicHfsNodeSize || !blockBytes ||
+        blockBytes % ClassicHfsNodeSize || tree->hdr.bthFree > tree->hdr.bthNNodes) {
+        ERROR(EIO, "invalid classic HFS tree allocation geometry");
+        return -1;
+    }
+    while (tree->hdr.bthFree < required) {
+        if (tree != &volume->ext && ClassicHfsReserveTreeSpace(&volume->ext, 1) < 0)
+            return -1;
+        int blocks = f_alloc(&tree->f);
+        if (blocks < 0)
+            return -1;
+        uint64_t added = (uint64_t)blocks * (blockBytes / ClassicHfsNodeSize);
+        uint32_t previous = tree->hdr.bthNNodes;
+        if (!added || added + previous > tree->f.cat.u.fil.filPyLen / ClassicHfsNodeSize) {
+            ERROR(EIO, "classic HFS tree growth exceeds its backing fork");
+            return -1;
+        }
+        tree->hdr.bthNNodes += (uint32_t)added;
+        tree->hdr.bthFree += (uint32_t)added - (previous == 0);
+        tree->flags |= HFS_UPDATE_BTHDR;
+        volume->flags |= HFS_UPDATE_ALTMDB;
+        if (ClassicHfsGrowTreeMap(tree) < 0)
+            return -1;
+    }
+    return 0;
 }
 
 /*

@@ -21,7 +21,7 @@ int bt_getnode(node *);
 int bt_putnode(node *);
 
 
-int bt_space(btree *, unsigned int);
+int ClassicHfsReserveTreeSpace(btree *, unsigned int);
 
 int bt_insert(btree *, unsigned char *, int);
 
