@@ -305,18 +305,8 @@ struct _hfsdir_ {
   struct _hfsdir_ *next;
 };
 
-typedef struct {
-  UInteger	bthDepth;	/* current depth of tree */
-  ULongInt	bthRoot;	/* number of root node */
-  ULongInt	bthNRecs;	/* number of leaf records in tree */
-  ULongInt	bthFNode;	/* number of first leaf node */
-  ULongInt	bthLNode;	/* number of last leaf node */
-  UInteger	bthNodeSize;	/* size of a node */
-  UInteger	bthKeyLen;	/* maximum length of a key */
-  ULongInt	bthNNodes;	/* total number of nodes in tree */
-  ULongInt	bthFree;	/* number of free nodes */
-  SignedByte	bthResv[76];	/* reserved */
-} BTHdrRec;
+#include "../ClassicHfsTreeHeader.h"
+typedef ClassicHfsTreeHeader BTHdrRec;
 
 typedef struct _btree_ {
   hfsfile f;			/* subset file information */

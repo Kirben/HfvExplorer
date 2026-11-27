@@ -23,7 +23,6 @@
 
 # include "internal.h"
 #include "../ClassicHfsBytes.h"
-# include "../ClassicHfsRecordBytes.h"
 # include "block.h"
 # include "file.h"
 # include "btree.h"
@@ -104,7 +103,6 @@ int bt_readhdr(btree *bt)
 {
   unsigned char *ptr;
   char *map;
-  int i;
   unsigned long nnum;
 
   bt->hdrnd.bt   = bt;
@@ -128,18 +126,10 @@ int bt_readhdr(btree *bt)
 
   ptr = HFS_NODEREC(bt->hdrnd, 0);
 
-  bt->hdr.bthDepth = ClassicHfsTake16(&ptr);
-  bt->hdr.bthRoot = ClassicHfsTake32(&ptr);
-  bt->hdr.bthNRecs = ClassicHfsTake32(&ptr);
-  bt->hdr.bthFNode = ClassicHfsTake32(&ptr);
-  bt->hdr.bthLNode = ClassicHfsTake32(&ptr);
-  bt->hdr.bthNodeSize = ClassicHfsTake16(&ptr);
-  bt->hdr.bthKeyLen = ClassicHfsTake16(&ptr);
-  bt->hdr.bthNNodes = ClassicHfsTake32(&ptr);
-  bt->hdr.bthFree = ClassicHfsTake32(&ptr);
-
-  for (i = 0; i < 76; ++i)
-    bt->hdr.bthResv[i] = ClassicHfsTake8(&ptr);
+  if (!ClassicHfsDecodeTreeHeader(ptr, bt->hdrnd.roff[1] - bt->hdrnd.roff[0], &bt->hdr)) {
+      ERROR(EIO, "truncated b*-tree header record");
+      return -1;
+  }
 
   if (bt->hdr.bthNodeSize != HFS_BLOCKSZ)
     {
@@ -217,7 +207,6 @@ int bt_writehdr(btree *bt)
   unsigned char *ptr;
   char *map;
   unsigned long mapsz, nnum;
-  int i;
 
 # ifdef DEBUG
   if (bt->hdrnd.bt != bt ||
@@ -229,18 +218,10 @@ int bt_writehdr(btree *bt)
 
   ptr = HFS_NODEREC(bt->hdrnd, 0);
 
-  ClassicHfsAppend16(&ptr, bt->hdr.bthDepth);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthRoot);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthNRecs);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthFNode);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthLNode);
-  ClassicHfsAppend16(&ptr, bt->hdr.bthNodeSize);
-  ClassicHfsAppend16(&ptr, bt->hdr.bthKeyLen);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthNNodes);
-  ClassicHfsAppend32(&ptr, bt->hdr.bthFree);
-
-  for (i = 0; i < 76; ++i)
-    ClassicHfsAppend8(&ptr, bt->hdr.bthResv[i]);
+  if (!ClassicHfsEncodeTreeHeader(ptr, bt->hdrnd.roff[1] - bt->hdrnd.roff[0], &bt->hdr)) {
+      ERROR(EIO, "truncated b*-tree header record");
+      return -1;
+  }
 
   memcpy(HFS_NODEREC(bt->hdrnd, 2), bt->map, HFS_MAP1SZ);
 

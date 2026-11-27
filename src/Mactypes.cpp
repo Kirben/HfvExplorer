@@ -162,19 +162,6 @@ void macpc_ndescr( NodeDescriptor *pndescr )
 	MACPC_W(pndescr->ndResv2);
 }
 
-void macpc_header_rec( BTHdrRec *pheader_rec )
-{
-	MACPC_W(pheader_rec->bthDepth);
-	MACPC_D(pheader_rec->bthRoot);
-	MACPC_D(pheader_rec->bthNRecs);
-	MACPC_D(pheader_rec->bthFNode);
-	MACPC_D(pheader_rec->bthLNode);
-	MACPC_W(pheader_rec->bthNodeSize);
-	MACPC_W(pheader_rec->bthKeyLen);
-	MACPC_D(pheader_rec->bthNNodes);
-	MACPC_D(pheader_rec->bthFree);
-}
-
 void macpc_catkeyrec( CatKeyRec *pcatkeyrec )
 {
 	// length 
@@ -754,8 +741,12 @@ int CHFVFile::intern_open()
 		Seek( 0, CFile::begin );
 		if(Read( &ndescr, sizeof(NodeDescriptor) )!=sizeof(NodeDescriptor)) { Close(); return 0; }
 		macpc_ndescr( &ndescr );
-		if(Read( &m_header_rec, sizeof(BTHdrRec) )!=sizeof(BTHdrRec)) { Close(); return 0; }
-		macpc_header_rec( &m_header_rec );
+		unsigned char header[ClassicHfsTreeHeaderBytes];
+        if (Read(header, sizeof(header)) != sizeof(header) ||
+            !ClassicHfsDecodeTreeHeader(header, sizeof(header), &m_header_rec)) {
+            Close();
+            return 0;
+        }
 		if(ndescr.ndType!=ndHdrNode || m_header_rec.bthNodeSize!=NODESIZE ||
 		   (hfv_size_t)m_header_rec.bthNNodes*NODESIZE>m_file_size) { Close(); return 0; }
 		Seek( 128, CFile::current );

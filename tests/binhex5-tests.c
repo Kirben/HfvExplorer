@@ -11,6 +11,7 @@
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNode.h"
+#include "hfs/ClassicHfsTreeHeader.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
@@ -130,6 +131,19 @@ int main(int argc,char**argv){
   offsets[2] = 508;
   must(!ClassicHfsEncodeNode(bytes, &header, offsets) && ClassicHfsRead16(bytes + 508) == 12,
        "reject overlap with offset table before modifying node");
+ }
+ {
+  unsigned char source[106], output[107];
+  ClassicHfsTreeHeader header;
+  size_t i;
+  for (i = 0; i < sizeof(source); ++i) source[i] = (unsigned char)(0x80 + i);
+  memset(output, 0x55, sizeof(output));
+  must(!ClassicHfsDecodeTreeHeader(source, 105, &header) &&
+       ClassicHfsDecodeTreeHeader(source, 106, &header) && header.bthDepth == 0x8081 &&
+       header.bthFree == UINT32_C(0x9a9b9c9d), "tree header boundaries and field order");
+  must(!ClassicHfsEncodeTreeHeader(output, 105, &header) && output[0] == 0x55 &&
+       ClassicHfsEncodeTreeHeader(output, 106, &header) && !memcmp(output, source, 106) &&
+       output[106] == 0x55, "preserve tree header reserved bytes and following record");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

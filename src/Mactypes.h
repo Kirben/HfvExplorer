@@ -187,18 +187,8 @@ typedef struct {
 
 #define NODESIZE 512
 
-typedef struct {
-	Integer        bthDepth;    // current depth of tree
-	LongInt        bthRoot;     // number of root node
-	LongInt        bthNRecs;    // number of leaf records in tree
-	LongInt	       bthFNode;    // number of first leaf node
-	LongInt        bthLNode;    // number of last leaf node
-	Integer        bthNodeSize; // size of a node
-	Integer        bthKeyLen;   // maximum length of a key
-	LongInt        bthNNodes;   // total number of nodes in tree
-	LongInt        bthFree;     // number of free nodes
-	SignedByte     bthResv[76]; // reserved
-} BTHdrRec;    // B*-tree header
+#include "hfs/ClassicHfsTreeHeader.h"
+typedef ClassicHfsTreeHeader BTHdrRec;
 
 typedef struct {
 	SignedByte        ckrKeyLen;    // key length
@@ -282,7 +272,6 @@ void macpc_str( unsigned char *s, int max_len );
 
 void macpc_MDB( MDB *pMDB );
 void macpc_ndescr( NodeDescriptor *pndescr );
-void macpc_header_rec( BTHdrRec *pheader_rec );
 void macpc_catkeyrec( CatKeyRec *pcatkeyrec );
 void macpc_catdatarec( CatDataRec *pcatdatarec );
 
