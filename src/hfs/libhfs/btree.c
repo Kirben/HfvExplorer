@@ -236,73 +236,68 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
   return 0;
 }
 
-/*
- * NAME:	btree->deletex()
- * DESCRIPTION:	recursively locate a node and delete a record
- */
-static int bt_deletex(node *np, unsigned height, unsigned char *key, unsigned char *record, int *flag)
+// Read the path before changing the leaf. Keep each parent and its selected
+// slot until the child's separator has been updated or removed.
+static int ClassicHfsDeleteAlongPath(node *root, unsigned depth, unsigned char *key)
 {
-  node child;
-  unsigned char *rec;
-  uint32_t next;
-  int route = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
-                                    np->bt == &np->bt->f.vol->cat, key, np->bt->compare,
-                                    &np->rnum, np->bt->hdr.bthNNodes, &next, ClassicHfsDelete);
-  if (route == ClassicHfsInvalidSearch) {
-    ERROR(EIO, "invalid classic HFS B-tree mutation path");
-    return -1;
-  }
-
-  switch ((unsigned char) np->nd.ndType)
-    {
-    case ndIndxNode:
-      if (np->rnum < 0)
-	{
-	  ERROR(EIO, "b*-tree record not found");
-	  return -1;
-	}
-
-      rec = HFS_NODEREC(*np, np->rnum);
-
-      child.bt   = np->bt;
-      child.nnum = next;
-
-      if (bt_getnode(&child) < 0 ||
-	  bt_deletex(&child, height - 1, key, rec, flag) < 0)
-	return -1;
-
-      if (*flag)
-	{
-	  *flag = 0;
-
-	  if (HFS_RECKEYLEN(rec) == 0)
-	    return n_delete(np, record, flag);
-
-	  if (np->rnum == 0)
-	    {
-	      if (n_index(np, record, 0) < 0)
-	        return -1;
-	      *flag = 1;
-	    }
-
-	  return bt_putnode(np);
-	}
-
-      return 0;
-
-    case ndLeafNode:
-      if (route != ClassicHfsFoundKey)
-	{
-	  ERROR(EIO, "b*-tree record not found");
-	  return -1;
-	}
-
-      return n_delete(np, record, flag);
-
-    default:
-      ERROR(EIO, "unexpected b*-tree node");
-      return -1;
+    if (!depth || depth > INT8_MAX) {
+        ERROR(EIO, "invalid classic HFS deletion depth");
+        return -1;
     }
+    node *children = depth > 1 ? (node *)calloc(depth - 1, sizeof(node)) : NULL;
+    if (depth > 1 && !children) {
+        ERROR(ENOMEM, "cannot allocate classic HFS deletion path");
+        return -1;
+    }
+    btree *tree = root->bt;
+    node *current = root;
+    int result = -1;
+    for (unsigned level = 0; level < depth; ++level) {
+        uint32_t child;
+        int route = ClassicHfsLookupLevel(current->data, &current->nd, current->roff, depth - level,
+                                          tree == &tree->f.vol->cat, key, tree->compare, &current->rnum,
+                                          tree->hdr.bthNNodes, &child, ClassicHfsDelete);
+        if (route == ClassicHfsFoundKey)
+            break;
+        if (route != ClassicHfsVisitChild || level + 1 >= depth) {
+            ERROR(EIO, "invalid classic HFS deletion path or missing key");
+            goto done;
+        }
+        current = &children[level];
+        current->bt = tree;
+        current->nnum = child;
+        if (bt_getnode(current) < 0)
+            goto done;
+    }
+
+    unsigned char rootSeparator[HFS_MAXRECLEN];
+    int removeRecord = 1;
+    for (unsigned height = 1; height <= depth; ++height) {
+        unsigned level = depth - height;
+        node *parent = level > 1 ? &children[level - 2] : root;
+        unsigned char *separator = level ? HFS_NODEREC(*parent, parent->rnum) : rootSeparator;
+        int changed = 0;
+        if (removeRecord) {
+            if (n_delete(current, separator, &changed) < 0)
+                goto done;
+        } else {
+            if (current->rnum == 0) {
+                if (n_index(current, separator, NULL) < 0)
+                    goto done;
+                changed = 1;
+            }
+            if (bt_putnode(current) < 0)
+                goto done;
+        }
+        if (!level || !changed)
+            break;
+        removeRecord = separator[0] == 0;
+        current = parent;
+    }
+    result = 0;
+done:
+    free(children);
+    return result;
 }
 
 int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
@@ -323,9 +318,7 @@ int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
         ERROR(EIO, "inconsistent classic HFS deletion root");
         return -1;
     }
-    unsigned char record[HFS_MAXRECLEN];
-    int changed = 0;
-    if (bt_deletex(&root, depth, key, record, &changed) < 0)
+    if (ClassicHfsDeleteAlongPath(&root, depth, key) < 0)
         return -1;
     if (depth > 1 && root.nd.ndNRecs == 1) {
         uint32_t number;

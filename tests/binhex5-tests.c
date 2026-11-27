@@ -856,6 +856,12 @@ int main(int argc,char**argv){
   tree->hdr.bthNNodes = nodes;
   tree->hdrnd = before;
   tree->flags = flags;
+  unsigned char absent[40];
+  ClassicHfsWriteCatalogKey(absent, HFS_CNID_ROOTDIR, "missing deletion target");
+  ClassicHfsTreeHeader savedHeader = tree->hdr;
+  must(ClassicHfsDeleteTreeKey(tree, absent) < 0 &&
+       !memcmp(&savedHeader, &tree->hdr, sizeof(savedHeader)) && flags == tree->flags,
+       "unsuccessful delete descent leaves tree accounting unchanged");
   uint32_t originalNodes = tree->hdr.bthNNodes;
   must(ClassicHfsReserveTreeSpace(tree, UINT32_MAX) < 0 && tree->hdr.bthNNodes == originalNodes,
        "reject impossible tree reservation before growth");
