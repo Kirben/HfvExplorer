@@ -155,7 +155,7 @@ void Frame(HANDLE handle,const Data& data)
     WriteFrame(handle,data);
     Flush(handle);
 }
-enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel,RenameWithStreams,StageRename,TreeEntryWithStreams};
+enum class Op:uint64_t {Stage=1,Rename,Dates,Done,Owned,TreeEntry,Relabel,RenameWithStreams,StageRename,TreeEntryWithStreams,StageRenameWithData,TreeEntryWithData};
 uint64_t FileLength(const BY_HANDLE_FILE_INFORMATION& info)
 {
     return (uint64_t(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
@@ -166,13 +166,13 @@ struct Record {
     Identity object,fromParent,toParent;
     uint64_t creation=0,modified=0,length=0;
     bool directory=false;
-    std::string namedStreams;
+    std::string namedStreams,primaryData;
 };
 struct StagedEntry {
     Identity identity;
     std::optional<uint64_t> modified;
     std::optional<uint64_t> length;
-    std::optional<std::string> namedStreams;
+    std::optional<std::string> namedStreams,primaryData;
 };
 struct Loaded {
     std::wstring root;
@@ -228,7 +228,7 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                 record.object=Identity::Decode(data);
                 Check(record.object.file!=0,"Invalid Windows move file identity");
                 if(record.op==Op::Rename||record.op==Op::Relabel||
-                   record.op==Op::RenameWithStreams||record.op==Op::StageRename){
+                   record.op==Op::RenameWithStreams||record.op==Op::StageRename||record.op==Op::StageRenameWithData){
                     record.to=data.wide();
                     record.fromParent=Identity::Decode(data);
                     record.toParent=Identity::Decode(data);
@@ -240,36 +240,46 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
                         Check(!record.directory&&Under(record.from,stage)&&record.namedStreams.size()==32,
                               "Invalid Windows alternate stream recovery record");
                     }
-                    if(record.op==Op::StageRename){
+                    if(record.op==Op::StageRename||record.op==Op::StageRenameWithData){
                         record.namedStreams=data.text();
                         Check(Under(record.to,stage)&&(record.namedStreams.empty()||record.namedStreams.size()==32),
                               "Invalid Windows staged stream recovery record");
+                        if(record.op==Op::StageRenameWithData&&!record.directory){
+                            record.primaryData=data.text();
+                            Check(record.primaryData.size()==32,"Invalid Windows staged data digest");
+                        }
                     }
                     if(record.op==Op::Relabel)RelabelPaths(log.root,stage,record.from,record.to);
                     else {
                         Paths(log.root,stage,record.from,record.to);
                         StagedEntry owned{record.object};
-                        if(record.op==Op::StageRename){
+                        if(record.op==Op::StageRename||record.op==Op::StageRenameWithData){
                             owned.namedStreams=record.namedStreams;
                             if(!record.directory){
                                 owned.modified=record.modified;
                                 owned.length=record.length;
+                                if(record.op==Op::StageRenameWithData)owned.primaryData=record.primaryData;
                             }
                         }
                         AddOwned(log,stage,Under(record.from,stage)?record.from:record.to,std::move(owned));
                     }
                 }else if(record.op==Op::Owned){
                     AddOwned(log,stage,record.from,{record.object});
-                }else if(record.op==Op::TreeEntry||record.op==Op::TreeEntryWithStreams){
+                }else if(record.op==Op::TreeEntry||record.op==Op::TreeEntryWithStreams||record.op==Op::TreeEntryWithData){
                     StagedEntry entry{record.object};
-                    if(!data.flag()){
+                    const bool directory=data.flag();
+                    if(!directory){
                         entry.modified=data.get();
                         entry.length=data.get();
                     }
-                    if(record.op==Op::TreeEntryWithStreams){
+                    if(record.op==Op::TreeEntryWithStreams||record.op==Op::TreeEntryWithData){
                         entry.namedStreams=data.text();
                         Check(entry.namedStreams->empty()||entry.namedStreams->size()==32,
                               "Invalid Windows staged tree stream recovery record");
+                    }
+                    if(record.op==Op::TreeEntryWithData&&!directory){
+                        entry.primaryData=data.text();
+                        Check(entry.primaryData->size()==32,"Invalid Windows staged tree data digest");
                     }
                     AddOwned(log,stage,record.from,entry,true);
                 }else if(record.op==Op::Dates){
@@ -285,6 +295,46 @@ Loaded Load(HANDLE handle,const std::string& id,bool exportOnly)
     }
     return log;
 }
+class ContentHash {
+    BCRYPT_ALG_HANDLE algorithm=nullptr;
+    BCRYPT_HASH_HANDLE handle=nullptr;
+    Bytes object;
+
+public:
+    ~ContentHash()
+    {
+        if(handle)BCryptDestroyHash(handle);
+        if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);
+    }
+
+    void Start()
+    {
+        Check(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,
+              "Cannot initialize Windows content verification");
+        DWORD bytes=0,received=0;
+        Check(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<BYTE*>(&bytes),
+                                sizeof(bytes),&received,0)>=0&&received==sizeof(bytes)&&bytes,
+              "Cannot allocate Windows content verification");
+        object.resize(bytes);
+        Check(BCryptCreateHash(algorithm,&handle,object.data(),bytes,nullptr,0,0)>=0,
+              "Cannot start Windows content verification");
+    }
+
+    void Add(const void* data,DWORD count)
+    {
+        Check(BCryptHashData(handle,const_cast<BYTE*>(static_cast<const BYTE*>(data)),count,0)>=0,
+              "Cannot hash Windows file data");
+    }
+
+    std::string Finish()
+    {
+        std::string digest(32,'\0');
+        Check(BCryptFinishHash(handle,reinterpret_cast<BYTE*>(digest.data()),DWORD(digest.size()),0)>=0,
+              "Cannot finalize Windows content verification");
+        return digest;
+    }
+};
+
 std::string NamedStreamDigest(const std::wstring& path)
 {
     std::map<std::wstring,uint64_t> streams;
@@ -312,29 +362,12 @@ std::string NamedStreamDigest(const std::wstring& path)
         Check(GetLastError()==ERROR_HANDLE_EOF,"Cannot verify the Windows output streams");
     }
     if(streams.empty())return {};
-    struct Hash {
-        BCRYPT_ALG_HANDLE algorithm=nullptr;
-        BCRYPT_HASH_HANDLE handle=nullptr;
-        Bytes object;
-        ~Hash(){if(handle)BCryptDestroyHash(handle);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);}
-    } hash;
-    Check(BCryptOpenAlgorithmProvider(&hash.algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,
-          "Cannot initialize Windows stream verification");
-    DWORD bytes=0,received=0;
-    Check(BCryptGetProperty(hash.algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<BYTE*>(&bytes),
-                           sizeof(bytes),&received,0)>=0&&received==sizeof(bytes)&&bytes,
-          "Cannot allocate Windows stream verification");
-    hash.object.resize(bytes);
-    Check(BCryptCreateHash(hash.algorithm,&hash.handle,hash.object.data(),bytes,nullptr,0,0)>=0,
-          "Cannot start Windows stream verification");
-    const auto add=[&](const void* data,DWORD count){
-        Check(BCryptHashData(hash.handle,const_cast<BYTE*>(static_cast<const BYTE*>(data)),count,0)>=0,
-              "Cannot hash Windows alternate stream data");
-    };
+    ContentHash hash;
+    hash.Start();
     Bytes buffer(65536);
     for(const auto& stream:streams){
         const auto nameBytes=DWORD(stream.first.size()*sizeof(wchar_t));
-        add(&nameBytes,sizeof(nameBytes));add(stream.first.data(),nameBytes);add(&stream.second,sizeof(stream.second));
+        hash.Add(&nameBytes,sizeof(nameBytes));hash.Add(stream.first.data(),nameBytes);hash.Add(&stream.second,sizeof(stream.second));
         auto file=Open(path+stream.first,GENERIC_READ);
         Check(bool(file),"Cannot open a Windows alternate stream for verification");
         for(uint64_t left=stream.second;left;){
@@ -342,17 +375,14 @@ std::string NamedStreamDigest(const std::wstring& path)
             DWORD got=0;
             Check(ReadFile(file.value,buffer.data(),count,&got,nullptr)&&got==count,
                   "Cannot read a Windows alternate stream for verification");
-            add(buffer.data(),count);
+            hash.Add(buffer.data(),count);
             left-=count;
         }
         DWORD got=0;
         Check(ReadFile(file.value,buffer.data(),1,&got,nullptr)&&!got,
               "The Windows alternate stream changed during verification");
     }
-    std::string digest(32,'\0');
-    Check(BCryptFinishHash(hash.handle,reinterpret_cast<BYTE*>(digest.data()),DWORD(digest.size()),0)>=0,
-          "Cannot finalize Windows stream verification");
-    return digest;
+    return hash.Finish();
 }
 void UndoRename(const std::wstring& stage,const Record& record)
 {
@@ -411,6 +441,9 @@ void CheckStagedEntry(const Loaded& log,const std::wstring& path,
     if(committed&&known->second.namedStreams)
         Check(NamedStreamDigest(path)==*known->second.namedStreams,
               "Windows move staging contains changed alternate streams; they were retained");
+    if(committed&&known->second.primaryData)
+        Check(CapturePrimaryData(path,MacBrowser::WindowsIdentity(info))==*known->second.primaryData,
+              "Windows move staging contains changed primary data; it was retained");
 }
 void CheckStage(const std::wstring& stage,const Loaded& log,bool committed)
 {
@@ -464,7 +497,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
               "A Windows Cut source has changed alternate streams; it was retained");
         if(recording){
             Data record;
-            record.put(uint64_t(Op::TreeEntryWithStreams));
+            record.put(uint64_t(Op::TreeEntryWithData));
             record.wide(staged);
             IdentityOf(info).Encode(record);
             record.put(uint64_t(directory));
@@ -473,6 +506,7 @@ size_t InspectStagedTree(HANDLE journal,const std::wstring& folder,const std::ws
                 record.put(FileLength(info));
             }
             record.put(streams);
+            if(!directory)record.put(CapturePrimaryData(path,MacBrowser::WindowsIdentity(info)));
             // The rename frame flushes the full inventory before the folder moves.
             WriteFrame(journal,record);
         }
@@ -491,6 +525,34 @@ thread_local bool forceUnsupportedForTest=false;
 std::string CaptureNamedStreams(const std::wstring& path)
 {
     return NamedStreamDigest(path);
+}
+
+std::string CapturePrimaryData(HANDLE file,Storage::Job* job)
+{
+    LARGE_INTEGER length{},start{};
+    Check(GetFileSizeEx(file,&length)&&length.QuadPart>=0&&SetFilePointerEx(file,start,nullptr,FILE_BEGIN),
+          "Cannot read Windows primary data for verification");
+    ContentHash hash;
+    hash.Start();
+    Bytes buffer(65536);
+    for(uint64_t remaining=length.QuadPart;remaining;){
+        if(job&&job->cancelled())throw Storage::Cancelled();
+        const auto count=DWORD((std::min)(remaining,uint64_t(buffer.size())));
+        Read(file,buffer.data(),count);
+        hash.Add(buffer.data(),count);
+        remaining-=count;
+    }
+    DWORD got=0;
+    Check(ReadFile(file,buffer.data(),1,&got,nullptr)&&!got,"Windows primary data changed during verification");
+    return hash.Finish();
+}
+
+std::string CapturePrimaryData(const std::wstring& path,const MacBrowser::ObjectIdentity& expected,Storage::Job* job)
+{
+    auto file=Open(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE);
+    Check(file&&MacBrowser::WindowsIdentity(Info(file.value))==expected,
+          "Windows file changed before primary data verification");
+    return CapturePrimaryData(file.value,job);
 }
 
 bool Supported(const std::wstring& folder)
@@ -648,11 +710,14 @@ void Session::RenameChecked(const std::wstring& from,const std::wstring& to,
                        NamedStreamDigest(from):std::string{};
     Check(!expectedStreams||streams==*expectedStreams,
           "A Windows Cut source has changed alternate streams; it was retained");
-    record.put(uint64_t(relabel?Op::Relabel:staging?Op::StageRename:streams.empty()?Op::Rename:Op::RenameWithStreams));
+    const bool fileData=staging&&!(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY);
+    const auto primary=fileData?CapturePrimaryData(from,MacBrowser::WindowsIdentity(info)):std::string{};
+    record.put(uint64_t(relabel?Op::Relabel:staging?Op::StageRenameWithData:streams.empty()?Op::Rename:Op::RenameWithStreams));
     record.wide(from);id.Encode(record);record.wide(to);fromParent.Encode(record);toParent.Encode(record);
     record.put(uint64_t((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0));
     record.put(Date(info.ftLastWriteTime));record.put(FileLength(info));
     if(staging||!streams.empty())record.put(streams);
+    if(fileData)record.put(primary);
     Frame(state_->journal.value,record);
 #ifdef HFV_TESTING
     if(stagingTree&&MacBrowser::windowsPublicationFault)
@@ -731,7 +796,7 @@ void RecoverJournal(const std::string& id,bool committed,const std::wstring* exp
                     if(!committed){
                         for(auto i=log.records.rbegin();i!=log.records.rend();++i){
                             if(i->op==Op::Rename||i->op==Op::Relabel||
-                               i->op==Op::RenameWithStreams||i->op==Op::StageRename){
+                               i->op==Op::RenameWithStreams||i->op==Op::StageRename||i->op==Op::StageRenameWithData){
                                 UndoRename(stage,*i);
 #ifdef HFV_TESTING
                                 if(MacBrowser::windowsPublicationFault)

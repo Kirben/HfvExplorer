@@ -13,6 +13,8 @@ extern thread_local bool forceUnsupportedForTest;
 #endif
 bool Supported(const std::wstring& folder);
 std::string CaptureNamedStreams(const std::wstring& path);
+std::string CapturePrimaryData(HANDLE file,Storage::Job* job=nullptr);
+std::string CapturePrimaryData(const std::wstring& path,const MacBrowser::ObjectIdentity& expected,Storage::Job* job=nullptr);
 void Recover(const std::string& decision,bool committed);
 void RecoverExports(const std::wstring& folder);
 void RunExport(const std::wstring& folder,const std::function<void()>& work);
