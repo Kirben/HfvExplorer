@@ -19,6 +19,7 @@
 <ClCompile Include="..\src\hfs\ClassicHfsTransaction.c" />
     <ClCompile Include="..\src\hfs\ClassicHfsVolumeIO.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTreeMutation.c" />
+<ClCompile Include="..\src\hfs\ClassicHfsMetadata.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTime.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsForkStorage.c" />
 <ClCompile Include="..\src\hfs\libhfs\hfs.c" />

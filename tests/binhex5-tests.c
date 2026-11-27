@@ -1177,6 +1177,10 @@ int main(int argc,char**argv){
        hfs_rmdir(v, ":CountTest") == 0, "child and parent remain independently removable");
  }
  {
+  hfsdirent metadata;
+  errno = EINVAL;
+  must(hfs_stat(v, ":AbsentMetadata", &metadata) < 0 && errno == ENOENT,
+       "catalog metadata lookup reports a missing entry");
   uint32_t nextId = v->mdb.drNxtCNID;
   must(hfs_mkdir(v, ":MissingParent:Nested") < 0 && errno == ENOENT &&
        hfs_create(v, ":MissingParent:Nested", "TEXT", "TEST") < 0 && errno == ENOENT &&

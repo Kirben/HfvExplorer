@@ -27,7 +27,7 @@ ARFLAGS =	rcs
 
 NAME =		libhfs
 TARGET =	$(NAME).a
-OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o ../ClassicHfsAllocationRecovery.o ../ClassicHfsDirectoryIO.o ../ClassicHfsVolumeIO.o ../ClassicHfsForkStorage.o ../ClassicHfsTreeMutation.o ../ClassicHfsNodeMutation.o  \
+OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o ../ClassicHfsAllocationRecovery.o ../ClassicHfsDirectoryIO.o ../ClassicHfsVolumeIO.o ../ClassicHfsForkStorage.o ../ClassicHfsMetadata.o ../ClassicHfsTreeMutation.o ../ClassicHfsNodeMutation.o  \
 		hfs.o os2open.o
 
 ###############################################################################
@@ -49,6 +49,7 @@ $(TARGET): $(OBJS)
 ### DEPENDENCIES FOLLOW #######################################################
 
 ../ClassicHfsVolumeIO.o: ../ClassicHfsVolumeIO.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h
+../ClassicHfsMetadata.o: ../ClassicHfsMetadata.c internal.h hfs.h volume.h ../ClassicHfsEntry.h
 ../ClassicHfsTreeMutation.o: ../ClassicHfsTreeMutation.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h node.h
 ../ClassicHfsTime.o: ../ClassicHfsTime.c ../ClassicHfsTime.h
 ../ClassicHfsForkStorage.o: ../ClassicHfsForkStorage.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h \
