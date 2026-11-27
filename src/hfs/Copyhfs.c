@@ -36,7 +36,7 @@
 # include <fcntl.h>
 # include <string.h>
 
-#include "libhfs\internal.h"
+#include "ClassicHfsEngine.h"
 #include "ClassicHfsForkState.h"
 
 // # include "libhfs\hfs.h"

@@ -2,7 +2,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include "libhfs/internal.h"
+#include "ClassicHfsEngine.h"
 #include "ClassicHfsTreeLookup.h"
 #include "ClassicHfsCatalog.h"
 #include "ClassicHfsVolumeIO.h"

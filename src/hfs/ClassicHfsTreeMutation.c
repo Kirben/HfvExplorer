@@ -21,7 +21,7 @@
 # include <string.h>
 # include <errno.h>
 
-# include "libhfs/internal.h"
+# include "ClassicHfsEngine.h"
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsNodeIO.h"
 #include "ClassicHfsCatalogLeaf.h"

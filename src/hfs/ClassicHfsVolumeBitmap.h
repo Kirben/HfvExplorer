@@ -17,7 +17,7 @@ static inline int ClassicHfsLoadVolumeBitmap(hfsvol *volume)
     int sectors = ClassicHfsVolumeBitmapLength(volume);
     if (sectors < 0)
         return -1;
-    block *bitmap = ALLOC(block, sectors);
+    block *bitmap = (block *)calloc(sectors, sizeof(*bitmap));
     if (!bitmap) {
         ERROR(ENOMEM, "cannot allocate classic HFS volume bitmap");
         return -1;

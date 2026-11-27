@@ -20,7 +20,7 @@
 # include <string.h>
 # include <errno.h>
 
-# include "libhfs/internal.h"
+# include "ClassicHfsEngine.h"
 #include "ClassicHfsGeometry.h"
 #include "ClassicHfsForkIO.h"
 #include "ClassicHfsTime.h"
@@ -371,7 +371,7 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
   if (ClassicHfsCurrentVolume(&vol) < 0)
     return 0;
 
-  file = ALLOC(hfsfile, 1);
+  file = (hfsfile *)malloc(sizeof(*file));
   if (file == 0)
     {
       ERROR(ENOMEM, 0);
@@ -380,19 +380,19 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
 
   if (ClassicHfsResolvePath(vol, path, &file->cat, &file->parid, file->name, 0) <= 0)
     {
-      FREE(file);
+      free(file);
       return 0;
     }
 
   if (file->cat.cdrType != cdrFilRec)
     {
-      FREE(file);
+      free(file);
       ERROR(EISDIR, 0);
       return 0;
     }
 
   if (file->cat.u.fil.filLgLen > HFS_MAX_FORK_SIZE || file->cat.u.fil.filRLgLen > HFS_MAX_FORK_SIZE) {
-    FREE(file); ERROR(EFBIG, "classic HFS fork exceeds Apple's 2 GiB minus one limit"); return 0;
+    free(file); ERROR(EFBIG, "classic HFS fork exceeds Apple's 2 GiB minus one limit"); return 0;
   }
   file->vol   = vol;
   file->clump = file->cat.u.fil.filClpSize;
@@ -552,7 +552,7 @@ int hfs_close(hfsfile *file)
   if(file->prev)file->prev->next=file->next;
   if(file->next)file->next->prev=file->prev;
   if(file==vol->files)vol->files=file->next;
-  FREE(file);return result;
+  free(file);return result;
 }
 
 int hfs_truncate(hfsfile *file,unsigned long length) {

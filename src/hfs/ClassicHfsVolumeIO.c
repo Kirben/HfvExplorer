@@ -19,7 +19,7 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include "libhfs/internal.h"
+#include "ClassicHfsEngine.h"
 #include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsForkState.h"
 #include "ClassicHfsTreeLookup.h"

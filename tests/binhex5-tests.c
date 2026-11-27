@@ -7,7 +7,7 @@
 #include <io.h>
 #undef ERROR
 #include <errno.h>
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsTreeLookup.h"
 #include "hfs/ClassicHfsTreeFlush.h"

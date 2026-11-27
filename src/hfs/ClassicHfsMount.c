@@ -34,7 +34,7 @@
 # include <time.h>
 # include <sys/stat.h>
 
-#include "libhfs/internal.h"
+#include "ClassicHfsEngine.h"
 #include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsForkState.h"
 #include "ClassicHfsTreeLookup.h"
@@ -450,7 +450,7 @@ int hfs_umount(hfsvol *vol)
   }
   /* A failed finalization must not be retried outside undo by ClassicHfsCloseVolumeCache.
      Successful rollback has already restored and flushed the old sectors. */
-  if(result!=0){FREE(vol->cache);vol->cache=0;}
+  if(result!=0){free(vol->cache);vol->cache=0;}
   /* Always release the block cache, even after a metadata flush error. */
   if (ClassicHfsCloseVolumeCache(vol) < 0 && result == 0) {
     result = -1; saved_errno = errno; saved_error = hfs_error;

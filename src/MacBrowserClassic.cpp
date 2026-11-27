@@ -14,7 +14,7 @@
 #include <set>
 extern "C" {
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/Replacement.h"
 #include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsTime.h"

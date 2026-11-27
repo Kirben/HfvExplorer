@@ -6,7 +6,7 @@
 #include <stdexcept>
 extern "C" {
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/ClassicHfsVolumeIO.h"
 #define _FHOOK_INTERNAL_
 #include "Filehook.h"

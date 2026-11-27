@@ -16,7 +16,7 @@
 #include "FakeFloppy.h"
 extern "C" {
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/interface.h"
 #define _FHOOK_INTERNAL_
 #include "Filehook.h"

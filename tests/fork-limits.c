@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/ClassicHfsForkState.h"
 #include "hfs/copyin.h"
 #include "hfs/binhex.h"

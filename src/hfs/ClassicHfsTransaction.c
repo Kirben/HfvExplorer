@@ -6,7 +6,7 @@
 #endif
 #include <errno.h>
 #include <stdio.h>
-#include "libhfs/internal.h"
+#include "ClassicHfsEngine.h"
 #include "ClassicHfsVolumeIO.h"
 #include "../Filehook.h"
 
@@ -109,7 +109,7 @@ static int save_failed_undo(struct ClassicHfsTransaction *m,char *path) {
 }
 #endif
 void ClassicHfsQuarantineVolume(hfsvol *vol,const char *message) {
- FREE(vol->failure_message);vol->failure_message=(char*)ClassicHfsCopyMemory(message,strlen(message)+1);
+ free(vol->failure_message);vol->failure_message=(char*)ClassicHfsCopyMemory(message,strlen(message)+1);
  vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
 }
 static void quarantine_mutation(struct ClassicHfsTransaction *m,hfsvol *vol) {

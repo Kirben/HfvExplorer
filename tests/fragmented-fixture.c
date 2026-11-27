@@ -6,7 +6,7 @@
 #include <string.h>
 #include <fcntl.h>
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsForkState.h"
 #include "hfs/ClassicHfsTreeLookup.h"

@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/ClassicHfsForkState.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"

@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "Filehook.h"
 #include "LargeImageTestData.h"
 void readonly_cd_backend_init(void);

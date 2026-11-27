@@ -17,28 +17,20 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#pragma once
+#include <stdlib.h>
 # include <time.h>
 
-# include "hfs.h"
+# include "libhfs/hfs.h"
 
 # define ERROR(code, str)	(hfs_error = (str), errno = (code))
 
-# define SIZE(type, n)		((size_t) (sizeof(type) * (n)))
-# define ALLOC(type, n)		((type *) malloc(SIZE(type, n)))
-# define ALLOCX(type, n)	((n) ? ALLOC(type, n) : (type *) 0)
-# define FREE(ptr)		((ptr) ? (void) free((void *) ptr) : (void) 0)
-
-# define REALLOC(ptr, type, n)  \
-    ((type *) ((ptr) ? realloc(ptr, SIZE(type, n)) : malloc(SIZE(type, n))))
-# define REALLOCX(ptr, type, n)  \
-    ((n) ? REALLOC(type, n) : (FREE(ptr), (type *) 0))
-
-#include "../ClassicHfsBitmap.h"
-#include "../ClassicHfsCatalogRecord.h"
+#include "ClassicHfsBitmap.h"
+#include "ClassicHfsCatalogRecord.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
-#include "../ClassicHfsCache.h"
+#include "ClassicHfsCache.h"
 typedef ClassicHfsCacheEntry bucket;
 # define HFS_BLOCK_INUSE ClassicHfsCacheValid
 # define HFS_BLOCK_DIRTY ClassicHfsCacheDirty
@@ -56,11 +48,11 @@ typedef char		Str15[16];
 typedef char		Str31[32];
 typedef long		OSType;
 
-#include "../ClassicHfsExtents.h"
+#include "ClassicHfsExtents.h"
 typedef ClassicHfsExtent ExtDescriptor;
 typedef ClassicHfsExtent ExtDataRec[ClassicHfsExtentCount];
 
-#include "../ClassicHfsCatalogKey.h"
+#include "ClassicHfsCatalogKey.h"
 typedef ClassicHfsCatalogKey CatKeyRec;
 
 # define HFS_MAP1SZ  256
@@ -105,7 +97,7 @@ typedef struct {
   LongInt	fdPutAway;	/* home directory ID */
 } FXInfo;
 
-#include "../ClassicHfsMasterDirectory.h"
+#include "ClassicHfsMasterDirectory.h"
 typedef ClassicHfsMasterDirectory MDB;
 
 # define HFS_SIGWORD		0x4244
@@ -138,7 +130,7 @@ struct _hfsfile_ {
 # define HFS_EXT_BOOTSTRAP 0x02 /* extents-file lookup recursion guard */
 # define HFS_UPDATE_CATREC	0x01
 
-#include "../ClassicHfsNode.h"
+#include "ClassicHfsNode.h"
 typedef ClassicHfsNodeDescriptor NodeDescriptor;
 # define HFS_MAXRECS ClassicHfsMaxRecords
 
@@ -170,7 +162,7 @@ struct _hfsdir_ {
   struct _hfsdir_ *next;
 };
 
-#include "../ClassicHfsTreeHeader.h"
+#include "ClassicHfsTreeHeader.h"
 typedef ClassicHfsTreeHeader BTHdrRec;
 
 typedef struct _btree_ {

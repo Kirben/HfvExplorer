@@ -15,7 +15,7 @@ extern int fat_rename(char*,char*);
 extern std::function<void()> windowsDeleteEnumeratedForTest;
 extern "C" {
 #undef ERROR
-#include "hfs/libhfs/internal.h"
+#include "hfs/ClassicHfsEngine.h"
 #include "hfs/Replacement.h"
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
