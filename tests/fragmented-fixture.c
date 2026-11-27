@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #undef ERROR
 #include "hfs/libhfs/internal.h"
-#include "hfs/libhfs/block.h"
+#include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsForkState.h"
 #include "hfs/ClassicHfsTreeLookup.h"
 #include "hfs/libhfs/volume.h"

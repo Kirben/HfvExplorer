@@ -7,7 +7,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include "libhfs/internal.h"
-#include "libhfs/block.h"
+#include "ClassicHfsVolumeIO.h"
 #include "../Filehook.h"
 
 static HFV_THREAD_LOCAL int rollback_status;
@@ -48,7 +48,7 @@ int ClassicHfsBeginTransaction(hfsvol *vol) {
  }
  active_mutation=m;
  /* Earlier pending writes also need undo coverage before they reach disk. */
- if(hfs_flush_raw(vol)<0){ClassicHfsEndTransaction(vol,-1);return -1;}
+ if(ClassicHfsFlushPendingWrites(vol)<0){ClassicHfsEndTransaction(vol,-1);return -1;}
  return 0;
 }
 int ClassicHfsCaptureBeforeWrite(hfsvol *volume, unsigned long sector)
@@ -108,7 +108,7 @@ static int save_failed_undo(struct ClassicHfsTransaction *m,char *path) {
  CloseHandle(file);return ok;
 }
 #endif
-void b_quarantine_volume(hfsvol *vol,const char *message) {
+void ClassicHfsQuarantineVolume(hfsvol *vol,const char *message) {
  FREE(vol->failure_message);vol->failure_message=(char*)ClassicHfsCopyMemory(message,strlen(message)+1);
  vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
 }
@@ -120,7 +120,7 @@ static void quarantine_mutation(struct ClassicHfsTransaction *m,hfsvol *vol) {
  else
 #endif
  snprintf(message,sizeof(message),"Classic HFS rollback failed; writes disabled. Undo records could not be saved. Repair before writing.");
- b_quarantine_volume(vol,message);
+ ClassicHfsQuarantineVolume(vol,message);
 }
 static int sync_undo_volume(void *volume)
 {
@@ -130,7 +130,7 @@ static int sync_undo_volume(void *volume)
 int ClassicHfsEndTransaction(hfsvol *vol,int result) {
  struct ClassicHfsTransaction *m=active_mutation;int rollback=0,saved_errno;char *saved_error;
  if(!m||m->volume!=vol){ERROR(EIO,"Missing HFS undo state");return -1;}
- if(result==0&&hfs_flush_raw(vol)<0)result=-1;
+ if(result==0&&ClassicHfsFlushPendingWrites(vol)<0)result=-1;
  if(result==0&&m->undo.count&&fhook_sync(vol->fd)<0){ERROR(errno,"Error flushing HFS device");result=-1;}
  saved_errno=errno;
  saved_error=hfs_error;

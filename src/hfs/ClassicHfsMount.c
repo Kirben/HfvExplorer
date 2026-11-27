@@ -36,7 +36,7 @@
 
 #include "libhfs/internal.h"
 #include "libhfs/volume.h"
-#include "libhfs/block.h"
+#include "ClassicHfsVolumeIO.h"
 #include "ClassicHfsForkState.h"
 #include "ClassicHfsTreeLookup.h"
 #include "ClassicHfsCatalogKey.h"
@@ -372,7 +372,7 @@ int hfs_mark_session_clean(hfsvol *vol) {
  * NAME:	hfs->flush()
  * DESCRIPTION:	flush all pending changes to an HFS volume
  */
-int hfs_flush_raw(hfsvol *vol)
+int ClassicHfsFlushPendingWrites(hfsvol *vol)
 {
   hfsfile *file;
 
@@ -427,7 +427,7 @@ int hfs_umount(hfsvol *vol)
     if(hfs_close(file)<0) {
       if(result==0){result=-1;saved_errno=errno;saved_error=hfs_error;}
       if(vol->files==file&&hfs_close(file)<0&&vol->files==file) {
-        b_quarantine_volume(vol,"Pending HFS file could not be finalized; writes disabled; repair before writing");
+        ClassicHfsQuarantineVolume(vol,"Pending HFS file could not be finalized; writes disabled; repair before writing");
         hfs_close(file); // A quarantined close only releases memory.
       }
     }
@@ -514,7 +514,7 @@ void hfs_setvol(hfsvol *vol)
 
 int hfs_flush(hfsvol *vol) {
  if(ClassicHfsCurrentVolume(&vol)<0)return -1;
- if(vol->flags&HFS_READONLY)return hfs_flush_raw(vol);
+ if(vol->flags&HFS_READONLY)return ClassicHfsFlushPendingWrites(vol);
  if(ClassicHfsBeginTransaction(vol)<0)return -1;
  return ClassicHfsEndTransaction(vol,0);
 }

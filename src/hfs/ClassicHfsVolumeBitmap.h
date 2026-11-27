@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
-#include "libhfs/block.h"
+#include "ClassicHfsVolumeIO.h"
 
 static inline int ClassicHfsVolumeBitmapLength(const hfsvol *volume)
 {

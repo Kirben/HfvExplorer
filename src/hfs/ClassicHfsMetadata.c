@@ -22,6 +22,7 @@
 #include "libhfs/internal.h"
 #include "libhfs/volume.h"
 #include "ClassicHfsEntry.h"
+#include "ClassicHfsVolumeIO.h"
 
 /*
  * NAME:	hfs->vstat()

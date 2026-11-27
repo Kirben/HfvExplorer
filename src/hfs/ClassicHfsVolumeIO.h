@@ -17,6 +17,8 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#pragma once
+
 int ClassicHfsSelectPartition(hfsvol *);
 int ClassicHfsLocateVolume(hfsvol *);
 int ClassicHfsLoadVolumeHeader(hfsvol *);
@@ -36,5 +38,5 @@ int ClassicHfsStoreRawSector(void *, unsigned long, block *);
 int ClassicHfsBeginTransaction(hfsvol *);
 int ClassicHfsEndTransaction(hfsvol *, int);
 
-int hfs_flush_raw(hfsvol *);
-void b_quarantine_volume(hfsvol *, const char *);
+int ClassicHfsFlushPendingWrites(hfsvol *);
+void ClassicHfsQuarantineVolume(hfsvol *, const char *);

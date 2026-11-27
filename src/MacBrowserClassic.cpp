@@ -16,7 +16,7 @@ extern "C" {
 #undef ERROR
 #include "hfs/libhfs/internal.h"
 #include "hfs/Replacement.h"
-#include "hfs/libhfs/block.h"
+#include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsTime.h"
 int hfs_recognizes_image_fd(int);
 int hfs_readdir2(hfsdir*,hfsdirent*,CatKeyRec*,CatDataRec*);
@@ -625,7 +625,7 @@ private:
         const int partition=failed->pnum;
         const bool remount=!commitUncertain&&failed->refs==1;
         const int fd=remount&&!ndifRecovery_?_dup(failed->fd):-1;
-        b_quarantine_volume(failed,"Classic HFS write needs recovery. Close all views and reopen the image.");
+        ClassicHfsQuarantineVolume(failed,"Classic HFS write needs recovery. Close all views and reopen the image.");
         hfs_umount(failed);
         if(fd>=0)volume_=hfs_remount_for_recovery(fd,partition,session_);
         else if(remount&&ndifRecovery_){

@@ -8,7 +8,7 @@
 #undef ERROR
 #include <errno.h>
 #include "hfs/libhfs/internal.h"
-#include "hfs/libhfs/block.h"
+#include "hfs/ClassicHfsVolumeIO.h"
 #include "hfs/ClassicHfsTreeLookup.h"
 #include "hfs/ClassicHfsTreeFlush.h"
 #include "hfs/ClassicHfsVolumeAllocation.h"
