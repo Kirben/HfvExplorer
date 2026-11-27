@@ -145,49 +145,29 @@ int getblock(hfsvol *vol, unsigned long bnum, block *bp)
 /* Runtime undo for serialized classic-HFS metadata operations. This is not
  * a persistent journal: it handles reported errors, not process/power loss. */
 #include "../ClassicHfsSectorUndo.h"
-struct file_view { hfsfile *file; hfsfile saved; };
+#include "../ClassicHfsVolumeSnapshot.h"
 struct mutation {
  hfsvol *volume;
- hfsvol saved;
- block *bitmap;
- char *extmap,*catmap;
- bcache *cache;
+ ClassicHfsVolumeSnapshot snapshot;
  ClassicHfsSectorUndo undo;
- struct file_view *files;
- unsigned file_count;
 };
 #define active_mutation (hfs_context_get()->mutation)
 static int putblock(hfsvol *, unsigned long, block *);
 static void free_mutation(struct mutation *m) {
- FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->files);FREE(m->undo.records);FREE(m);
-}
-static void *save_memory(const void *p,size_t size) {
- void *copy;if(!p||!size)return 0;
- copy=malloc(size);if(copy)memcpy(copy,p,size);return copy;
+ ClassicHfsReleaseSnapshot(&m->snapshot);
+ free(m->undo.records);
+ free(m);
 }
 int b_begin_mutation(hfsvol *vol) {
- struct mutation *m;size_t bitmap_size;hfsfile *file;unsigned i;
+ struct mutation *m;
  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes disabled after rollback failure");return -1;}
  if(vol->flags&HFS_READONLY){ERROR(EROFS,"Volume is read-only");return -1;}
  if(active_mutation){ERROR(EBUSY,"Nested classic HFS mutation");return -1;}
  m=(struct mutation*)calloc(1,sizeof(*m));
  if(!m){ERROR(ENOMEM,"Cannot allocate HFS undo state");return -1;}
- m->volume=vol;m->saved=*vol;
- bitmap_size=SIZE(block,ClassicHfsBitmapSectors(vol->mdb.drNmAlBlks));
- m->bitmap=(block*)save_memory(vol->vbm,bitmap_size);
- m->extmap=(char*)save_memory(vol->ext.map,vol->ext.mapsz);
- m->catmap=(char*)save_memory(vol->cat.map,vol->cat.mapsz);
- m->cache=(bcache*)save_memory(vol->cache,sizeof(bcache));
- if((vol->vbm&&!m->bitmap)||(vol->ext.map&&!m->extmap)||(vol->cat.map&&!m->catmap)||(vol->cache&&!m->cache)) {
-  free_mutation(m);ERROR(ENOMEM,"Cannot snapshot HFS metadata");return -1;
- }
- for(file=vol->files;file;file=file->next) {
-  if(++m->file_count>65536){free_mutation(m);ERROR(ENOMEM,"Too many open HFS file views");return -1;}
- }
- if(m->file_count) {
-  m->files=ALLOC(struct file_view,m->file_count);
-  if(!m->files){free_mutation(m);ERROR(ENOMEM,"Cannot snapshot open HFS file views");return -1;}
-  for(file=vol->files,i=0;file;file=file->next,++i){m->files[i].file=file;m->files[i].saved=*file;}
+ m->volume=vol;
+ if(ClassicHfsCaptureVolume(&m->snapshot,vol)<0) {
+  free_mutation(m);ERROR(ENOMEM,"Cannot snapshot classic HFS volume and open files");return -1;
  }
  active_mutation=m;
  /* Earlier pending writes also need undo coverage before they reach disk. */
@@ -227,12 +207,12 @@ static int save_failed_undo(struct mutation *m,char *path) {
  file=CreateFileA(path,GENERIC_WRITE|DELETE,FILE_SHARE_READ,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
  if(file==INVALID_HANDLE_VALUE)return 0;
  memcpy(header,"HFSUNDO1",8);undo_u32(header+8,1);undo_u32(header+12,512);
- undo_u64(header+16,m->saved.vstart);undo_u64(header+24,m->saved.vlen);undo_u32(header+32,m->undo.count);
- undo_u64(header+56,((hfv_size_t)m->saved.vstart+m->saved.vlen)*512);
- memcpy(header+344,m->saved.mdb.drVN,sizeof(m->saved.mdb.drVN));undo_u32(header+376,m->saved.mdb.drCrDate);
+ undo_u64(header+16,m->snapshot.original.vstart);undo_u64(header+24,m->snapshot.original.vlen);undo_u32(header+32,m->undo.count);
+ undo_u64(header+56,((hfv_size_t)m->snapshot.original.vstart+m->snapshot.original.vlen)*512);
+ memcpy(header+344,m->snapshot.original.mdb.drVN,sizeof(m->snapshot.original.mdb.drVN));undo_u32(header+376,m->snapshot.original.mdb.drCrDate);
  /* The native media adapter reserves large descriptor values, not CRT fds. */
- if(m->saved.fd>=0&&m->saved.fd<0x10000000) {
-  HANDLE source=(HANDLE)_get_osfhandle(m->saved.fd);BY_HANDLE_FILE_INFORMATION info;LARGE_INTEGER size;
+ if(m->snapshot.original.fd>=0&&m->snapshot.original.fd<0x10000000) {
+  HANDLE source=(HANDLE)_get_osfhandle(m->snapshot.original.fd);BY_HANDLE_FILE_INFORMATION info;LARGE_INTEGER size;
   if(source!=INVALID_HANDLE_VALUE&&GetFileInformationByHandle(source,&info)) {
    undo_u32(header+40,info.dwVolumeSerialNumber);undo_u32(header+44,info.nFileIndexLow);undo_u32(header+48,info.nFileIndexHigh);
    memcpy(header+64,&info.ftCreationTime,8);memcpy(header+72,&info.ftLastWriteTime,8);
@@ -243,7 +223,7 @@ static int save_failed_undo(struct mutation *m,char *path) {
  undo_u32(header+36,undo_crc(header,sizeof(header)));
  if(!WriteFile(file,header,sizeof(header),&written,0)||written!=sizeof(header))ok=0;
  for(i=0;ok&&i<m->undo.count;++i) {
-  ClassicHfsUndoRecord *b=&m->undo.records[i];undo_u64(record,((hfv_size_t)m->saved.vstart+b->sector)*512);
+  ClassicHfsUndoRecord *b=&m->undo.records[i];undo_u64(record,((hfv_size_t)m->snapshot.original.vstart+b->sector)*512);
   undo_u32(record+8,undo_crc(b->before,512));undo_u32(record+12,512);memcpy(record+16,b->before,512);
   if(!WriteFile(file,record,sizeof(record),&written,0)||written!=sizeof(record))ok=0;
  }
@@ -253,7 +233,7 @@ static int save_failed_undo(struct mutation *m,char *path) {
 }
 #endif
 void b_quarantine_volume(hfsvol *vol,const char *message) {
- FREE(vol->failure_message);vol->failure_message=(char*)save_memory(message,strlen(message)+1);
+ FREE(vol->failure_message);vol->failure_message=(char*)ClassicHfsCopyMemory(message,strlen(message)+1);
  vol->flags|=HFS_WRITE_FAILED|HFS_READONLY;
 }
 static void quarantine_mutation(struct mutation *m,hfsvol *vol) {
@@ -277,20 +257,14 @@ static int sync_undo_volume(void *volume)
 }
 
 int b_end_mutation(hfsvol *vol,int result) {
- struct mutation *m=active_mutation;unsigned i;int rollback=0,saved_errno;char *saved_error;
+ struct mutation *m=active_mutation;int rollback=0,saved_errno;char *saved_error;
  if(!m||m->volume!=vol){ERROR(EIO,"Missing HFS undo state");return -1;}
  if(result==0&&hfs_flush_raw(vol)<0)result=-1;
  if(result==0&&m->undo.count&&fhook_sync(vol->fd)<0){ERROR(errno,"Error flushing HFS device");result=-1;}
  saved_errno=errno;saved_error=hfs_error;active_mutation=0;
  if(result<0) {
   rollback=ClassicHfsRestoreSectors(m->undo.records,m->undo.count,vol,store_cached_sector,read_undo_sector,sync_undo_volume);
-  /* Restore deep-owned maps as well as the B-tree headers, bitmap and cache.
-     The copied cache links still refer to this same original cache allocation. */
-  FREE(vol->ext.map);FREE(vol->cat.map);
-  *vol=m->saved;vol->ext.map=m->extmap;vol->cat.map=m->catmap;m->extmap=m->catmap=0;
-  if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,ClassicHfsBitmapSectors(vol->mdb.drNmAlBlks)));
-  if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
-  for(i=0;i<m->file_count;++i)*m->files[i].file=m->files[i].saved;
+  ClassicHfsRestoreVolume(&m->snapshot,vol);
   if(m->undo.count)hfs_note_rollback(rollback?3:1);
   if(rollback)quarantine_mutation(m,vol);
  }
