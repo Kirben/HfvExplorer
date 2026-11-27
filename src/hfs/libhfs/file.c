@@ -272,7 +272,7 @@ int f_trunc(hfsfile *file)
       else if (plan.kept[0].xdrNumABlks) {
         if (ClassicHfsStoreOverflow(file, start, plan.kept, &n) < 0)
           return -1;
-      } else if (bt_delete(&file->vol->ext, HFS_NODEREC(n, n.rnum)) < 0)
+      } else if (ClassicHfsDeleteTreeKey(&file->vol->ext, HFS_NODEREC(n, n.rnum)) < 0)
         return -1;
     }
     start = plan.next;

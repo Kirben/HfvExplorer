@@ -1493,14 +1493,14 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
     return -1;
   }
 
-  if (bt_delete(&vol->cat, pkey) < 0)
+  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0)
     return -1;
 
   /* delete thread record */
 
   ClassicHfsWriteCatalogKey(pkey, data.u.dir.dirDirID, "");
 
-  if (bt_delete(&vol->cat, pkey) < 0 ||
+  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
       v_adjvalence(vol, parid, 1, -1) < 0)
     return -1;
 
@@ -1673,7 +1673,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
     return -1;
   }
 
-  if (bt_delete(&vol->cat, pkey) < 0 ||
+  if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0 ||
       v_adjvalence(vol, file.parid, 0, -1) < 0)
     return -1;
 
@@ -1687,7 +1687,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
     {
       ClassicHfsWriteCatalogKey(pkey, file.cat.u.fil.filFlNum, "");
 
-      if (bt_delete(&vol->cat, pkey) < 0)
+      if (ClassicHfsDeleteTreeKey(&vol->cat, pkey) < 0)
 	return -1;
     }
 
@@ -1838,7 +1838,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
     return -1;
   }
 
-  if (bt_delete(&vol->cat, record) < 0)
+  if (ClassicHfsDeleteTreeKey(&vol->cat, record) < 0)
     return -1;
 
   /* insert destination record */

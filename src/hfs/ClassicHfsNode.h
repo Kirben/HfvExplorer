@@ -249,6 +249,19 @@ static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNo
     return ClassicHfsVisitChild;
 }
 
+// A promoted child is the only remaining node at its level.
+static inline int ClassicHfsPromotableChild(const ClassicHfsNodeDescriptor *child,
+                                           unsigned depth, uint32_t number,
+                                           uint32_t firstLeaf, uint32_t lastLeaf)
+{
+    if (depth < 2 || child->ndNHeight != (int)(depth - 1) || !child->ndNRecs ||
+        child->ndFLink || child->ndBLink)
+        return 0;
+    if (depth == 2)
+        return child->ndType == -1 && number == firstLeaf && number == lastLeaf;
+    return child->ndType == 0 && number != firstLeaf && number != lastLeaf;
+}
+
 static inline int ClassicHfsDecodeNode(const unsigned char *bytes, ClassicHfsNodeDescriptor *node,
                                       uint16_t *offsets)
 {

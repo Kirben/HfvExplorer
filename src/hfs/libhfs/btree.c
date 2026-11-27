@@ -305,56 +305,58 @@ static int bt_deletex(node *np, unsigned height, unsigned char *key, unsigned ch
     }
 }
 
-/*
- * NAME:	btree->delete()
- * DESCRIPTION:	remove a node record from a tree
- */
-int bt_delete(btree *bt, unsigned char *key)
+int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
 {
-  node root;
-  unsigned char record[HFS_MAXRECLEN];
-  int flag = 0;
-
-  root.bt   = bt;
-  root.nnum = bt->hdr.bthRoot;
-
-  if (root.nnum == 0)
-    {
-      ERROR(EIO, "empty b*-tree");
-      return -1;
-    }
-
-  if (bt_getnode(&root) < 0 ||
-      bt_deletex(&root, bt->hdr.bthDepth, key, record, &flag) < 0)
-    return -1;
-
-  if (bt->hdr.bthDepth > 1 && root.nd.ndNRecs == 1)
-    {
-      unsigned char *rec;
-
-      /* chop the root */
-
-      rec = HFS_NODEREC(root, 0);
-
-      if (ClassicHfsFreeTreeNode(&root) < 0)
+    node root;
+    root.bt = tree;
+    root.nnum = tree->hdr.bthRoot;
+    unsigned depth = tree->hdr.bthDepth;
+    if (ClassicHfsCheckSearchRoot(&tree->hdr) != 1 || !tree->hdr.bthNRecs) {
+        ERROR(EIO, "invalid or empty classic HFS deletion root");
         return -1;
-      --bt->hdr.bthDepth;
-      bt->hdr.bthRoot = ClassicHfsRead32(HFS_RECDATA(rec));
     }
-  else if (bt->hdr.bthDepth == 1 && root.nd.ndNRecs == 0)
-    {
-      /* delete the root node */
-
-      if (ClassicHfsFreeTreeNode(&root) < 0)
+    if (bt_getnode(&root) < 0)
         return -1;
-      bt->hdr.bthDepth = 0;
-      bt->hdr.bthRoot  = 0;
-      bt->hdr.bthFNode = 0;
-      bt->hdr.bthLNode = 0;
+    if (root.nd.ndFLink || root.nd.ndBLink ||
+        (depth == 1 && (tree->hdr.bthFNode != root.nnum || tree->hdr.bthLNode != root.nnum ||
+                        tree->hdr.bthNRecs != root.nd.ndNRecs))) {
+        ERROR(EIO, "inconsistent classic HFS deletion root");
+        return -1;
     }
-
-  --bt->hdr.bthNRecs;
-  bt->flags |= HFS_UPDATE_BTHDR;
-
-  return 0;
+    unsigned char record[HFS_MAXRECLEN];
+    int changed = 0;
+    if (bt_deletex(&root, depth, key, record, &changed) < 0)
+        return -1;
+    if (depth > 1 && root.nd.ndNRecs == 1) {
+        uint32_t number;
+        int slot;
+        int route = ClassicHfsLookupLevel(root.data, &root.nd, root.roff, depth,
+            tree == &tree->f.vol->cat, HFS_NODEREC(root, 0), tree->compare,
+            &slot, tree->hdr.bthNNodes, &number, ClassicHfsDelete);
+        if (route != ClassicHfsVisitChild || number == root.nnum) {
+            ERROR(EIO, "invalid classic HFS root child reference");
+            return -1;
+        }
+        node child;
+        child.bt = tree;
+        child.nnum = number;
+        if (bt_getnode(&child) < 0)
+            return -1;
+        if (!ClassicHfsPromotableChild(&child.nd, depth, number, tree->hdr.bthFNode, tree->hdr.bthLNode)) {
+            ERROR(EIO, "invalid classic HFS child for root promotion");
+            return -1;
+        }
+        if (ClassicHfsFreeTreeNode(&root) < 0)
+            return -1;
+        tree->hdr.bthRoot = number;
+        --tree->hdr.bthDepth;
+    } else if (depth == 1 && !root.nd.ndNRecs) {
+        if (ClassicHfsFreeTreeNode(&root) < 0)
+            return -1;
+        tree->hdr.bthDepth = 0;
+        tree->hdr.bthRoot = tree->hdr.bthFNode = tree->hdr.bthLNode = 0;
+    }
+    --tree->hdr.bthNRecs;
+    tree->flags |= HFS_UPDATE_BTHDR;
+    return 0;
 }

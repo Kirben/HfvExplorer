@@ -25,6 +25,6 @@ int ClassicHfsReserveTreeSpace(btree *, unsigned int);
 
 int bt_insert(btree *, unsigned char *, int);
 
-int bt_delete(btree *, unsigned char *);
+int ClassicHfsDeleteTreeKey(btree *, unsigned char *);
 
 #include "../ClassicHfsTreeLookup.h"

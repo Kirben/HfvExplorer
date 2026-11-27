@@ -160,6 +160,15 @@ static void verify_repeated_tree_map(char *image)
 
 int main(int argc,char**argv){
     {
+        ClassicHfsNodeDescriptor child = {0};
+        child.ndNHeight = 1; child.ndType = -1; child.ndNRecs = 1;
+        must(ClassicHfsPromotableChild(&child, 2, 7, 7, 7) &&
+             !ClassicHfsPromotableChild(&child, 2, 7, 7, 9) &&
+             !ClassicHfsPromotableChild(&child, 3, 7, 3, 9), "root promotion checks leaf identity and height");
+        child.ndFLink = 9;
+        must(!ClassicHfsPromotableChild(&child, 2, 7, 7, 7), "root promotion rejects a linked child");
+    }
+    {
         hfsvol volume = {0};
         block bitmap = {0};
         ExtDescriptor extent = {7, 1};
