@@ -10,6 +10,7 @@
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsCatalogThread.h"
+#include "hfs/ClassicHfsDirectory.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNodeIO.h"
 #include "hfs/ClassicHfsGeometry.h"
@@ -522,6 +523,18 @@ int main(int argc,char**argv){
   ClassicHfsEncodeThread(encoded,&thread);
   must(thread.thdParID==UINT32_C(0x88898a8b) && thread.thdCName[31]==0 &&
        !memcmp(body,encoded,44) && encoded[44]==0, "thread reserved fields, parent and full MacRoman name");
+ }
+ {
+  unsigned char input[68], output[69] = {0};
+  ClassicHfsDirectory dir;
+  for (unsigned i=0;i<68;++i) input[i]=(unsigned char)(0x80+i);
+  ClassicHfsDecodeDirectory(input,&dir);
+  must(dir.dirDirID==UINT32_C(0x84858687) && (uint32_t)dir.dirBkDat==UINT32_C(0x90919293) &&
+       (uint16_t)dir.dirUsrInfo.frRect.top==0x9495 &&
+       (uint32_t)dir.dirFndrInfo.frOpenChain==UINT32_C(0xa8a9aaab),
+       "directory ID, backup date, and Finder fields at wire offsets");
+  ClassicHfsEncodeDirectory(output,&dir);
+  must(!memcmp(input,output,68) && !output[68], "directory body round trip includes reserved fields");
  }
  {
   unsigned char source[106], output[107];

@@ -42,32 +42,8 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
   switch (data->cdrType)
     {
     case cdrDirRec:
-      ClassicHfsAppend16(&pdata, data->u.dir.dirFlags);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirVal);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirDirID);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirCrDat);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirMdDat);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirBkDat);
-
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.top);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.left);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.bottom);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.right);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frFlags);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frLocation.v);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frLocation.h);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frView);
-
-      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frScroll.v);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frScroll.h);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirFndrInfo.frOpenChain);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frUnused);
-      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frComment);
-      ClassicHfsAppend32(&pdata, data->u.dir.dirFndrInfo.frPutAway);
-
-      for (i = 0; i < 4; ++i)
-	ClassicHfsAppend32(&pdata, data->u.dir.dirResrv[i]);
-
+      ClassicHfsEncodeDirectory(pdata, &data->u.dir);
+      pdata += ClassicHfsDirectoryBodySize;
       break;
 
     case cdrFilRec:
@@ -140,32 +116,7 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
   switch (data->cdrType)
     {
     case cdrDirRec:
-      data->u.dir.dirFlags = ClassicHfsTake16(&pdata);
-      data->u.dir.dirVal = ClassicHfsTake16(&pdata);
-      data->u.dir.dirDirID = ClassicHfsTake32(&pdata);
-      data->u.dir.dirCrDat = ClassicHfsTake32(&pdata);
-      data->u.dir.dirMdDat = ClassicHfsTake32(&pdata);
-      data->u.dir.dirBkDat = ClassicHfsTake32(&pdata);
-
-      data->u.dir.dirUsrInfo.frRect.top = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frRect.left = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frRect.bottom = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frRect.right = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frFlags = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frLocation.v = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frLocation.h = ClassicHfsTake16(&pdata);
-      data->u.dir.dirUsrInfo.frView = ClassicHfsTake16(&pdata);
-
-      data->u.dir.dirFndrInfo.frScroll.v = ClassicHfsTake16(&pdata);
-      data->u.dir.dirFndrInfo.frScroll.h = ClassicHfsTake16(&pdata);
-      data->u.dir.dirFndrInfo.frOpenChain = ClassicHfsTake32(&pdata);
-      data->u.dir.dirFndrInfo.frUnused = ClassicHfsTake16(&pdata);
-      data->u.dir.dirFndrInfo.frComment = ClassicHfsTake16(&pdata);
-      data->u.dir.dirFndrInfo.frPutAway = ClassicHfsTake32(&pdata);
-
-      for (i = 0; i < 4; ++i)
-	data->u.dir.dirResrv[i] = ClassicHfsTake32(&pdata);
-
+      ClassicHfsDecodeDirectory(pdata, &data->u.dir);
       break;
 
     case cdrFilRec:

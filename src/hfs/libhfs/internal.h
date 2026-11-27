@@ -35,6 +35,7 @@
 
 #include "../ClassicHfsBitmap.h"
 #include "../ClassicHfsCatalogThread.h"
+#include "../ClassicHfsDirectory.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 
@@ -88,27 +89,7 @@ typedef struct {
   Integer	h;		/* horizontal coordinate */
 } Point;
 
-typedef struct {
-  Integer	top;		/* top edge of rectangle */
-  Integer	left;		/* left edge */
-  Integer	bottom;		/* bottom edge */
-  Integer	right;		/* right edge */
-} Rect;
 
-typedef struct {
-  Rect		frRect;		/* folder's rectangle */
-  Integer	frFlags;	/* flags */
-  Point		frLocation;	/* folder's location */
-  Integer	frView;		/* folder's view */
-} DInfo;
-
-typedef struct {
-  Point		frScroll;	/* scroll position */
-  LongInt	frOpenChain;	/* directory ID chain of open folders */
-  Integer	frUnused;	/* reserved */
-  Integer	frComment;	/* comment ID */
-  LongInt	frPutAway;	/* directory ID */
-} DXInfo;
 
 typedef struct {
   OSType	fdType;		/* file type */
@@ -179,17 +160,7 @@ typedef struct {
   SignedByte	cdrType;	/* record type */
   SignedByte	cdrResrv2;	/* reserved */
   union {
-    struct {  /* cdrDirRec */
-      Integer	dirFlags;	/* directory flags */
-      UInteger	dirVal;		/* directory valence */
-      ULongInt	dirDirID;	/* directory ID */
-      LongInt	dirCrDat;	/* date and time of creation */
-      LongInt	dirMdDat;	/* date and time of last modification */
-      LongInt	dirBkDat;	/* date and time of last backup */
-      DInfo	dirUsrInfo;	/* Finder information */
-      DXInfo	dirFndrInfo;	/* additional Finder information */
-      LongInt	dirResrv[4];	/* reserved */
-    } dir;
+    ClassicHfsDirectory dir;
     struct {  /* cdrFilRec */
       SignedByte
 		filFlags;	/* file flags */
