@@ -594,7 +594,7 @@ int hfs_format(char *path, int pnum, char *vname)
   hfsvol vol;
   btree *ext = &vol.ext;
   btree *cat = &vol.cat;
-  unsigned int vbmsz;
+  ClassicHfsFormatGeometry geometry;
   int i, result = 0;
   block vbm[16];
 
@@ -679,7 +679,7 @@ int hfs_format(char *path, int pnum, char *vname)
       vol.vlen = low + 1;
     }
 
-  if (vol.vlen < 800 * (1024 >> HFS_BLOCKSZ_BITS))
+  if (!ClassicHfsPlanFormat(vol.vlen, &geometry))
     {
       close(vol.fd);
 
@@ -693,9 +693,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   /* initialize volume geometry */
 
-  vol.lpa = 1 + vol.vlen / 65536;
-
-  vbmsz = ClassicHfsBitmapSectors(vol.vlen / vol.lpa);
+  vol.lpa = geometry.sectorsPerBlock;
 
   vol.mdb.drSigWord  = HFS_SIGWORD;
   vol.mdb.drCrDate   = ClassicHfsFromUnixSeconds(time(0));
@@ -704,10 +702,10 @@ int hfs_format(char *path, int pnum, char *vname)
   vol.mdb.drNmFls    = 0;
   vol.mdb.drVBMSt    = 3;
   vol.mdb.drAllocPtr = 0;
-  vol.mdb.drNmAlBlks = (vol.vlen - 5 - vbmsz) / vol.lpa;
-  vol.mdb.drAlBlkSiz = vol.lpa << HFS_BLOCKSZ_BITS;
+  vol.mdb.drNmAlBlks = geometry.allocationBlocks;
+  vol.mdb.drAlBlkSiz = geometry.blockBytes;
   vol.mdb.drClpSiz   = vol.mdb.drAlBlkSiz * 4;
-  vol.mdb.drAlBlSt   = 3 + vbmsz;
+  vol.mdb.drAlBlSt   = geometry.firstAllocationSector;
   vol.mdb.drNxtCNID  = HFS_CNID_ROOTDIR;  /* modified later */
   vol.mdb.drFreeBks  = vol.mdb.drNmAlBlks;
 
@@ -716,7 +714,7 @@ int hfs_format(char *path, int pnum, char *vname)
   vol.mdb.drVolBkUp  = 0;
   vol.mdb.drVSeqNum  = 0;
   vol.mdb.drWrCnt    = 0;
-  vol.mdb.drXTClpSiz = vol.mdb.drNmAlBlks / 128 * vol.mdb.drAlBlkSiz;
+  vol.mdb.drXTClpSiz = geometry.treeClumpBytes;
   vol.mdb.drCTClpSiz = vol.mdb.drXTClpSiz;
   vol.mdb.drNmRtDirs = 0;
   vol.mdb.drFilCnt   = 0;

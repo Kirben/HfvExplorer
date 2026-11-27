@@ -114,6 +114,17 @@ static void verify_formatted_tree_headers(const char *image)
 }
 
 int main(int argc,char**argv){
+    ClassicHfsFormatGeometry geometry;
+    must(!ClassicHfsPlanFormat(1599, &geometry) && ClassicHfsPlanFormat(1600, &geometry) &&
+         geometry.allocationBlocks == 1594 && geometry.firstAllocationSector == 4,
+         "minimum classic format geometry");
+    must(ClassicHfsPlanFormat(65535, &geometry) && geometry.sectorsPerBlock == 1 &&
+         geometry.allocationBlocks == 65514 && ClassicHfsPlanFormat(65536, &geometry) &&
+         geometry.sectorsPerBlock == 2 && geometry.firstAllocationSector == 11 &&
+         geometry.allocationBlocks == 32761, "classic format allocation-size transition");
+    must(ClassicHfsPlanFormat(UINT32_MAX, &geometry) && geometry.blockBytes == 33554432 &&
+         geometry.treeClumpBytes == 127u * geometry.blockBytes &&
+         geometry.allocationBlocks == 65535, "classic format clump stays aligned and representable");
     must(ClassicHfsBitmapSectors(4096) == 1 && ClassicHfsBitmapSectors(4097) == 2 &&
          ClassicHfsBitmapSectors(65535) == 16, "bitmap sector rounding");
     must(ClassicHfsBitmapFits(3, 2, 5, 100) && !ClassicHfsBitmapFits(2, 1, 5, 100) &&

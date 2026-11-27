@@ -1,6 +1,36 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <stdint.h>
+#include "ClassicHfsBitmap.h"
+
+typedef struct {
+    uint32_t sectorsPerBlock;
+    uint32_t blockBytes;
+    uint16_t firstAllocationSector;
+    uint16_t allocationBlocks;
+    uint32_t treeClumpBytes;
+} ClassicHfsFormatGeometry;
+
+static inline int ClassicHfsPlanFormat(uint32_t sectors, ClassicHfsFormatGeometry *plan)
+{
+    if (sectors < 1600) // minimum supported format is 800 KiB
+        return 0;
+    uint32_t perBlock = 1 + sectors / 65536;
+    uint32_t bitmap = ClassicHfsBitmapSectors(sectors / perBlock);
+    uint32_t first = 3 + bitmap;
+    uint32_t blocks = (sectors - first - 2) / perBlock;
+    uint32_t bytes = perBlock * 512;
+    // The master directory stores clump sizes in unsigned 32-bit bytes.
+    uint32_t clumpBlocks = blocks / 128;
+    if (clumpBlocks > UINT32_MAX / bytes)
+        clumpBlocks = UINT32_MAX / bytes;
+    plan->sectorsPerBlock = perBlock;
+    plan->blockBytes = bytes;
+    plan->firstAllocationSector = (uint16_t)first;
+    plan->allocationBlocks = (uint16_t)blocks;
+    plan->treeClumpBytes = clumpBlocks * bytes;
+    return 1;
+}
 
 enum { ClassicHfsBadForkSize = -1, ClassicHfsForkSizeLimit = 0, ClassicHfsForkSizeOk = 1 };
 
