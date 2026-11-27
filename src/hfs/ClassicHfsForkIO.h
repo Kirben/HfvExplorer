@@ -1,7 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+
+// Classic fork seeks clamp to the logical file bounds. Compare the signed
+// displacement with the available distance before adding it to the base.
+static inline int ClassicHfsSeekFork(uint32_t eof, unsigned long *position,
+                                    int64_t displacement, int origin)
+{
+    int64_t base;
+    switch (origin) {
+    case SEEK_SET: base = 0; break;
+    case SEEK_CUR: base = *position; break;
+    case SEEK_END: base = eof; break;
+    default: return 0;
+    }
+    if (displacement <= -base)
+        *position = 0;
+    else if (displacement >= (int64_t)eof - base)
+        *position = eof;
+    else
+        *position = (unsigned long)(base + displacement);
+    return 1;
+}
 
 typedef int (*ClassicHfsReadForkBlock)(void *, uint32_t, unsigned char (*)[512]);
 

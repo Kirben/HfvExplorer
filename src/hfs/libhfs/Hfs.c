@@ -1476,37 +1476,12 @@ static int hfs_truncate_impl(hfsfile *file, unsigned long len)
 hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
 {
   unsigned long *lglen;
-  hfv_offset_t newpos;
-
   f_getptrs(file, &lglen, 0, 0);
-
-  switch (from)
-    {
-    case SEEK_SET:
-      newpos = offset;
-      break;
-
-    case SEEK_CUR:
-      newpos = offset > (hfv_offset_t)*lglen - file->pos ? *lglen : (hfv_offset_t)file->pos + offset;
-      break;
-
-    case SEEK_END:
-      newpos = offset > 0 ? *lglen : (hfv_offset_t)*lglen + offset;
-      break;
-
-    default:
-      ERROR(EINVAL, 0);
-      return -1;
-    }
-
-  if (newpos < 0)
-    newpos = 0;
-  else if (newpos > *lglen)
-    newpos = *lglen;
-
-  file->pos = (unsigned long)newpos;
-
-  return newpos;
+  if (!ClassicHfsSeekFork(*lglen, &file->pos, offset, from)) {
+    ERROR(EINVAL, 0);
+    return -1;
+  }
+  return file->pos;
 }
 
 /*

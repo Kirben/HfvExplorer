@@ -472,6 +472,18 @@ int main(int argc,char**argv){
        bytes == 1024, "round retained physical EOF without 32-bit wraparound");
  }
  {
+  unsigned long position = 3;
+  must(ClassicHfsSeekFork(UINT32_MAX, &position, INT64_MAX, SEEK_CUR) &&
+       position == UINT32_MAX && ClassicHfsSeekFork(UINT32_MAX, &position, -1, SEEK_END) &&
+       position == UINT32_MAX - 1, "relative fork seek clamps before signed overflow");
+  must(!ClassicHfsSeekFork(UINT32_MAX, &position, 0, -1) && position == UINT32_MAX - 1 &&
+       ClassicHfsSeekFork(UINT32_MAX, &position, INT64_MIN, SEEK_CUR) && !position,
+       "invalid origin preserves position and minimum displacement clamps to start");
+  must(ClassicHfsSeekFork(10, &position, 4, SEEK_SET) && position == 4 &&
+       ClassicHfsSeekFork(10, &position, -3, SEEK_CUR) && position == 1,
+       "absolute and relative fork seeks preserve interior offsets");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;
