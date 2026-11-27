@@ -28,6 +28,7 @@
 # include "file.h"
 # include "btree.h"
 # include "node.h"
+#include "../ClassicHfsGrowTreeMap.h"
 
 static int read_node_block(void *file, uint32_t number, block *bytes)
 {
@@ -104,69 +105,7 @@ int bt_space(btree *bt, unsigned int nrecs)
 
   bt->f.vol->flags |= HFS_UPDATE_ALTMDB;
 
-  while (bt->hdr.bthNNodes > bt->mapsz * 8)
-    {
-      char *newmap;
-      node mapnd;
-
-      /* extend tree map */
-
-      newmap = REALLOC(bt->map, char, bt->mapsz + HFS_MAPXSZ);
-      if (newmap == 0)
-	{
-	  ERROR(ENOMEM, 0);
-	  return -1;
-	}
-
-      memset(newmap + bt->mapsz, 0, HFS_MAPXSZ);
-
-      bt->map    = newmap;
-      bt->mapsz += HFS_MAPXSZ;
-
-      n_init(&mapnd, bt, ndMapNode, 0);
-      if (n_new(&mapnd) < 0)
-	return -1;
-
-      /* link the new map node */
-
-      if (bt->hdrnd.nd.ndFLink == 0)
-	{
-	  bt->hdrnd.nd.ndFLink = mapnd.nnum;
-	  mapnd.nd.ndBLink     = 0;
-	}
-      else
-	{
-	  node n;
-
-	  n.bt   = bt;
-	  n.nnum = bt->hdrnd.nd.ndFLink;
-
-	  while (1)
-	    {
-	      if (bt_getnode(&n) < 0)
-		return -1;
-
-	      if (n.nd.ndFLink == 0)
-		break;
-
-	      n.nnum = n.nd.ndFLink;
-	    }
-
-	  n.nd.ndFLink     = mapnd.nnum;
-	  mapnd.nd.ndBLink = n.nnum;
-
-	  if (bt_putnode(&n) < 0)
-	    return -1;
-	}
-
-      mapnd.nd.ndNRecs = 1;
-      mapnd.roff[1]    = 0x1fa;
-
-      if (bt_putnode(&mapnd) < 0)
-	return -1;
-    }
-
-  return 0;
+  return ClassicHfsGrowTreeMap(bt);
 }
 
 /*

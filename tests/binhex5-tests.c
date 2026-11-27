@@ -10,6 +10,8 @@
 #include "hfs/libhfs/internal.h"
 #include "hfs/libhfs/btree.h"
 #include "hfs/ClassicHfsTreeFlush.h"
+#include "hfs/libhfs/node.h"
+#include "hfs/ClassicHfsGrowTreeMap.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsCatalogLeaf.h"
@@ -810,6 +812,12 @@ int main(int argc,char**argv){
   must(tree->mapsz == HFS_MAP1SZ && ClassicHfsFlushTreeHeader(tree) < 0 &&
        (tree->flags & HFS_UPDATE_BTHDR) && !memcmp(before.data, tree->hdrnd.data, sizeof(before.data)),
        "reject unexpected map continuation before publishing header");
+  uint32_t nodes = tree->hdr.bthNNodes;
+  tree->hdr.bthNNodes = HFS_MAP1SZ * 8 + 1;
+  char *originalMap = tree->map;
+  must(ClassicHfsGrowTreeMap(tree) < 0 && tree->map == originalMap && tree->mapsz == HFS_MAP1SZ,
+       "reject unexpected map tail before reallocating or linking a new node");
+  tree->hdr.bthNNodes = nodes;
   tree->hdrnd = before;
   tree->flags = flags;
  }
