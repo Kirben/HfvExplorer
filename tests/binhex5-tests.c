@@ -200,6 +200,14 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 int main(int argc,char**argv){
     {
         hfsvol volume = {0};
+        volume.flags = HFS_UPDATE_ALTMDB;
+        volume.vlen = 4;
+        must(ClassicHfsFlushVolumeMetadata(&volume, 1) < 0 && errno == EIO &&
+             !(volume.mdb.drAtrb & HFS_ATRB_UMOUNTED) && (volume.flags & HFS_UPDATE_MDB),
+             "failed alternate header preflight keeps volume unclean and pending for retry");
+    }
+    {
+        hfsvol volume = {0};
         block bitmap = {0x01}, original;
         memcpy(original, bitmap, sizeof(bitmap));
         volume.vbm = &bitmap;

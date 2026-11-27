@@ -116,6 +116,16 @@ int hfs_recognizes_image_fd(int fd) {
  * NAME:	hfs->mount()
  * DESCRIPTION:	open an HFS volume; return volume descriptor or 0 (error)
  */
+static int resolve_current_volume(hfsvol **volume)
+{
+    if (!*volume)
+        *volume = hfs_curvol;
+    if (*volume)
+        return 0;
+    ERROR(EINVAL, "no volume is current");
+    return -1;
+}
+
 // Windows file hooks establish sharing when acquiring the descriptor. On
 // hosts with POSIX device locking, keep the advisory lock until close.
 static int open_volume_device(char *path, int flags)
@@ -276,7 +286,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  if (vol->fd != -2)
 	    ERROR(errno, errno==EBUSY ? "image is in use by another storage session" : "error opening device");
 
-	  v_destruct(vol);
+	  ClassicHfsReleaseVolume(vol);
 
 	  return 0;
 	}
@@ -286,7 +296,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       if (recovered < 0)
         {
           close(vol->fd);
-          v_destruct(vol);
+          ClassicHfsReleaseVolume(vol);
           ERROR(EIO,"Classic HFS recovery could not complete. Keep the image and reopen with exclusive writable access.");
           return 0;
         }
@@ -298,7 +308,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  ClassicHfsLoadVolumeHeader(vol) < 0)
 	{
 	  close(vol->fd);
-	  v_destruct(vol);
+	  ClassicHfsReleaseVolume(vol);
 
 	  return 0;
 	}
@@ -309,7 +319,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
           (session && (vol->mdb.drVCSize == 0x482b || vol->mdb.drVCSize == 0x4858)))
 	{
 	  close(vol->fd);
-	  v_destruct(vol);
+	  ClassicHfsReleaseVolume(vol);
 
 	  ERROR(EINVAL, "not a Macintosh HFS volume");
 	  return 0;
@@ -320,7 +330,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       if (!vol->mdb.drAlBlkSiz || vol->mdb.drAlBlkSiz % HFS_BLOCKSZ != 0)
 	{
 	  close(vol->fd);
-	  v_destruct(vol);
+	  ClassicHfsReleaseVolume(vol);
 
 	  ERROR(EINVAL, "bad volume allocation block size");
 	  return 0;
@@ -331,7 +341,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
           if (!ClassicHfsVolumeSectors(vol->mdb.drAlBlSt, vol->mdb.drNmAlBlks,
                                        vol->mdb.drAlBlkSiz >> HFS_BLOCKSZ_BITS, &sectors)) {
               close(vol->fd);
-              v_destruct(vol);
+              ClassicHfsReleaseVolume(vol);
               ERROR(EINVAL, "invalid classic HFS volume length");
               return 0;
           }
@@ -349,7 +359,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  ClassicHfsLoadTreeHeader(&vol->cat) < 0)
 	{
 	  close(vol->fd);
-	  v_destruct(vol);
+	  ClassicHfsReleaseVolume(vol);
 	  return 0;
 	}
 
@@ -362,7 +372,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  if (ClassicHfsRecoverAllocationBitmap(vol) < 0)
 	    {
 	      close(vol->fd);
-	      v_destruct(vol);
+	      ClassicHfsReleaseVolume(vol);
 	      return 0;
 	    }
 	}
@@ -435,7 +445,7 @@ int hfs_mark_session_dirty(hfsvol *vol) {
 /* Publish a clean marker while the caller still owns the durable undo log. */
 int hfs_mark_session_clean(hfsvol *vol) {
   if (hfs_flush(vol)<0 || ClassicHfsBeginTransaction(vol)<0) return -1;
-  return ClassicHfsEndTransaction(vol,v_flush(vol,1));
+  return ClassicHfsEndTransaction(vol,ClassicHfsFlushVolumeMetadata(vol,1));
 }
 
 /*
@@ -446,7 +456,7 @@ int hfs_flush_raw(hfsvol *vol)
 {
   hfsfile *file;
 
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return -1;
 
   if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled after rollback failure");return -1;}
@@ -457,7 +467,7 @@ int hfs_flush_raw(hfsvol *vol)
 	return -1;
     }
 
-  if (v_flush(vol, 0) < 0 ||
+  if (ClassicHfsFlushVolumeMetadata(vol, 0) < 0 ||
       ClassicHfsFlushVolumeCache(vol) < 0)
     return -1;
 
@@ -484,7 +494,7 @@ int hfs_umount(hfsvol *vol)
 {
   int result = 0, saved_errno = 0;
   char *saved_error = 0;
-  if (v_getvol(&vol) < 0) return -1;
+  if (resolve_current_volume(&vol) < 0) return -1;
   if(vol->flags&HFS_WRITE_FAILED) {
     result=-1;saved_errno=EIO;saved_error=vol->failure_message?vol->failure_message:"Classic HFS rollback failed; volume was not cleanly closed";
   }
@@ -513,7 +523,7 @@ int hfs_umount(hfsvol *vol)
     } else if(ClassicHfsBeginTransaction(vol)<0) {
       result=-1;saved_errno=errno;saved_error=hfs_error;
     } else {
-      int marked=v_flush(vol,1);
+      int marked=ClassicHfsFlushVolumeMetadata(vol,1);
       if(ClassicHfsEndTransaction(vol,marked)<0) {
         result=-1;saved_errno=errno;saved_error=hfs_error;
       }
@@ -538,7 +548,7 @@ int hfs_umount(hfsvol *vol)
     strncpy(failure_after_close,saved_error,511);
     failure_after_close[511]=0;saved_error=failure_after_close;
   }
-  v_destruct(vol);
+  ClassicHfsReleaseVolume(vol);
   if (result) { errno = saved_errno; hfs_error = saved_error; }
   return result;
 }
@@ -588,7 +598,7 @@ void hfs_setvol(hfsvol *vol)
  */
 int hfs_vstat(hfsvol *vol, hfsvolent *ent)
 {
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return -1;
 
   strcpy(ent->name, vol->mdb.drVN);
@@ -750,7 +760,7 @@ int hfs_format(char *path, int pnum, char *vname)
   if (result == 0)
     {
       vol.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
-      if (v_flush(&vol, 1) < 0 || ClassicHfsCloseVolumeCache(&vol) < 0)
+      if (ClassicHfsFlushVolumeMetadata(&vol, 1) < 0 || ClassicHfsCloseVolumeCache(&vol) < 0)
 	result = -1;
     }
   FREE(vol.cache);
@@ -777,7 +787,7 @@ int hfs_chdir(hfsvol *vol, char *path)
 {
   CatDataRec data;
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, 0, 0, 0) <= 0)
     return -1;
 
@@ -798,7 +808,7 @@ int hfs_chdir(hfsvol *vol, char *path)
  */
 long hfs_getcwd(hfsvol *vol)
 {
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return 0;
 
   return vol->cwd;
@@ -810,7 +820,7 @@ long hfs_getcwd(hfsvol *vol)
  */
 int hfs_setcwd(hfsvol *vol, long id)
 {
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return -1;
 
   if (id == vol->cwd)
@@ -834,7 +844,7 @@ int hfs_dirinfo(hfsvol *vol, long *id, char *name)
 {
   CatDataRec thread;
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       v_getdthread(vol, *id, &thread, 0) <= 0)
     return -1;
 
@@ -856,7 +866,7 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
   CatDataRec data;
   unsigned char pkey[HFS_CATKEYLEN];
 
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return 0;
 
   dir = ALLOC(hfsdir, 1);
@@ -1119,7 +1129,7 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
 {
   hfsfile *file;
 
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return 0;
 
   file = ALLOC(hfsfile, 1);
@@ -1326,7 +1336,7 @@ int hfs_stat(hfsvol *vol, char *path, hfsdirent *ent)
   long parid;
   char name[HFS_MAX_FLEN + 1];
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
@@ -1355,7 +1365,7 @@ static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
   CatDataRec data;
   node n;
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, 0, 0, &n) <= 0)
     return -1;
 
@@ -1403,7 +1413,7 @@ static int hfs_mkdir_impl(hfsvol *vol, char *path)
   char name[HFS_MAX_FLEN + 1];
   int found;
 
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return -1;
 
   found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
@@ -1444,7 +1454,7 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
   char name[HFS_MAX_FLEN + 1];
   unsigned char pkey[HFS_CATKEYLEN];
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &data, &parid, name, 0) <= 0)
     return -1;
 
@@ -1505,7 +1515,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
   unsigned char record[HFS_CATRECMAXLEN];
   int found, i, reclen;
 
-  if (v_getvol(&vol) < 0)
+  if (resolve_current_volume(&vol) < 0)
     return -1;
 
   found = ClassicHfsResolvePath(vol, path, &data, &parid, name, 0);
@@ -1606,7 +1616,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   unsigned char pkey[HFS_CATKEYLEN];
   int found;
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, path, &file.cat, &file.parid, file.name, 0) <= 0)
     return -1;
 
@@ -1696,7 +1706,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
   int found, isdir, moving, reclen;
   node n;
 
-  if (v_getvol(&vol) < 0 ||
+  if (resolve_current_volume(&vol) < 0 ||
       ClassicHfsResolvePath(vol, srcpath, &src, &srcid, srcname, 0) <= 0)
     return -1;
 
@@ -1889,7 +1899,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 /* Resolve the default mount, then validate the path before starting undo. */
 static int mutation_source(hfsvol **vol,char *path) {
  CatDataRec data;int found;
- if(v_getvol(vol)<0)return -1;
+ if(resolve_current_volume(vol)<0)return -1;
  found=ClassicHfsResolvePath(*vol,path,&data,0,0,0);
  if(found==0)ERROR(ENOENT,"HFS entry not found");
  return found>0?0:-1;
@@ -1907,7 +1917,7 @@ int hfs_rename(hfsvol *vol,char *source,char *destination) {
 
 static int mutation_target(hfsvol **vol,char *path) {
  CatDataRec data;long parent;int found;
- if(v_getvol(vol)<0)return -1;
+ if(resolve_current_volume(vol)<0)return -1;
  found=ClassicHfsResolvePath(*vol,path,&data,&parent,0,0);
  if(found<0)return -1;
  if(!parent){ERROR(ENOENT,"HFS parent directory not found");return -1;}
@@ -1948,7 +1958,7 @@ int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
 
 int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
  CatDataRec data;unsigned char raw[102];
- if(!finder||v_getvol(&vol)<0||ClassicHfsResolvePath(vol,path,&data,0,0,0)<=0)return -1;
+ if(!finder||resolve_current_volume(&vol)<0||ClassicHfsResolvePath(vol,path,&data,0,0,0)<=0)return -1;
  if(data.cdrType!=cdrDirRec&&data.cdrType!=cdrFilRec){ERROR(EINVAL,"Finder information requires a file or folder");return -1;}
  ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);
  if(data.cdrType==cdrDirRec)memcpy(finder,raw+22,32);
@@ -1987,7 +1997,7 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
 }
 
 int hfs_flush(hfsvol *vol) {
- if(v_getvol(&vol)<0)return -1;
+ if(resolve_current_volume(&vol)<0)return -1;
  if(vol->flags&HFS_READONLY)return hfs_flush_raw(vol);
  if(ClassicHfsBeginTransaction(vol)<0)return -1;
  return ClassicHfsEndTransaction(vol,0);

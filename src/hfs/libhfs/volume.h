@@ -30,9 +30,8 @@ int ClassicHfsStoreCatalogEntry(CatDataRec *, node *);
 
 int ClassicHfsResolvePath(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
-void v_destruct(hfsvol *);
-int v_getvol(hfsvol **);
-int v_flush(hfsvol *, int);
+void ClassicHfsReleaseVolume(hfsvol *);
+int ClassicHfsFlushVolumeMetadata(hfsvol *, int);
 
 int ClassicHfsAdjustEntryCount(hfsvol *, long, int, int);
 int ClassicHfsCheckNewCatalogId(hfsvol *, int);

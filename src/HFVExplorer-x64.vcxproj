@@ -68,7 +68,6 @@
     <ClCompile Include="hfs\hcwd.c" />
     <ClCompile Include="hfs\libhfs\hfs.c" />
     <ClCompile Include="hfs\ClassicHfsNodeMutation.c" />
-    <ClCompile Include="hfs\libhfs\volume.c" />
     <ClCompile Include="filehook.c" />
     <ClCompile Include="hfs\interface.c" />
     <ClCompile Include="ImageOnly.cpp" />

@@ -27,7 +27,7 @@ ARFLAGS =	rcs
 
 NAME =		libhfs
 TARGET =	$(NAME).a
-OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o ../ClassicHfsAllocationRecovery.o ../ClassicHfsVolumeIO.o ../ClassicHfsForkStorage.o ../ClassicHfsTreeMutation.o ../ClassicHfsNodeMutation.o volume.o  \
+OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o ../ClassicHfsAllocationRecovery.o ../ClassicHfsVolumeIO.o ../ClassicHfsForkStorage.o ../ClassicHfsTreeMutation.o ../ClassicHfsNodeMutation.o  \
 		hfs.o os2open.o
 
 ###############################################################################
@@ -56,6 +56,4 @@ $(TARGET): $(OBJS)
 hfs.o: hfs.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h \
  node.h volume.h os2open.h
 ../ClassicHfsNodeMutation.o: ../ClassicHfsNodeMutation.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h btree.h node.h
-volume.o: volume.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h btree.h \
- volume.h
 os2open.c: os2open.h

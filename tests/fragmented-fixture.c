@@ -36,7 +36,7 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
   reclen = ClassicHfsWriteExtentKey(rec,0,3,i); reclen += ClassicHfsEncodeExtents(rec + reclen, data);
   must(ClassicHfsInsertTreeRecord(&v->ext,rec,reclen)==0,"insert self-mapping overflow record");
  }
- must(v_flush(v,0)==0 && v->mdb.drXTFlSize==length,"flush self-records without growing allocation");
+ must(ClassicHfsFlushVolumeMetadata(v,0)==0 && v->mdb.drXTFlSize==length,"flush self-records without growing allocation");
  bytes=malloc(length); must(bytes!=NULL,"overflow tree snapshot allocation");
  for(i=0;i<length/512;++i) must(ClassicHfsReadForkSector(&v->ext.f,i,(block*)(bytes+i*512))==0,"snapshot overflow tree");
  k=0;
@@ -96,7 +96,7 @@ void CreateFragmentedFixture(const char* directory) {
  free(payload);
  // Grow an actual, searchable multi-level catalog before relocating it.
  for(i=0;i<100;++i) { sprintf(name,"Fragments:CatalogEntry%03u",i); must(hfs_create(v,name,type,creator)==0,"grow catalog"); }
- must(v_flush(v,0)==0,"flush before catalog relocation");
+ must(ClassicHfsFlushVolumeMetadata(v,0)==0,"flush before catalog relocation");
  must(v->ext.hdr.bthDepth>=2,"overflow fixture exercises index descent");
  m.catalogSize=v->mdb.drCTFlSize; blocks=m.catalogSize/v->mdb.drAlBlkSiz;
  must(blocks>=10,"catalog large enough for ten extents");

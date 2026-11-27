@@ -22,6 +22,10 @@
 #include "libhfs/internal.h"
 #include "libhfs/block.h"
 #include "libhfs/file.h"
+#include "libhfs/btree.h"
+#include "libhfs/volume.h"
+#include "ClassicHfsVolumeBitmap.h"
+#include "ClassicHfsTreeFlush.h"
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsSystemFiles.h"
 #include "ClassicHfsGeometry.h"
@@ -371,5 +375,40 @@ int ClassicHfsTransferAllocationSector(hfsvol *volume, unsigned number, unsigned
     volume->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));
     ++volume->mdb.drWrCnt;
     volume->flags |= HFS_UPDATE_MDB;
+    return 0;
+}
+
+void ClassicHfsReleaseVolume(hfsvol *volume)
+{
+    // Mount failures can reach here after allocating a cache but before
+    // registering the volume. Disposal must never submit pending writes.
+    free(volume->cache);
+    free(volume->failure_message);
+    free(volume->vbm);
+    free(volume->ext.map);
+    free(volume->cat.map);
+    free(volume);
+}
+
+int ClassicHfsFlushVolumeMetadata(hfsvol *volume, int closing)
+{
+    if (volume->flags & HFS_READONLY)
+        return 0;
+    if ((volume->ext.flags & HFS_UPDATE_BTHDR) && ClassicHfsFlushTreeHeader(&volume->ext) < 0)
+        return -1;
+    if ((volume->cat.flags & HFS_UPDATE_BTHDR) && ClassicHfsFlushTreeHeader(&volume->cat) < 0)
+        return -1;
+    if ((volume->flags & HFS_UPDATE_VBM) && ClassicHfsFlushVolumeBitmap(volume) < 0)
+        return -1;
+
+    unsigned originalAttributes = volume->mdb.drAtrb;
+    if (closing && !(originalAttributes & HFS_ATRB_UMOUNTED)) {
+        volume->mdb.drAtrb |= HFS_ATRB_UMOUNTED;
+        volume->flags |= HFS_UPDATE_MDB;
+    }
+    if ((volume->flags & (HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB)) && ClassicHfsStoreVolumeHeader(volume) < 0) {
+        volume->mdb.drAtrb = originalAttributes;
+        return -1;
+    }
     return 0;
 }

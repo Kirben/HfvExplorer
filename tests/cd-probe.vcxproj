@@ -22,7 +22,6 @@
 <ClCompile Include="..\src\hfs\ClassicHfsForkStorage.c" />
 <ClCompile Include="..\src\hfs\libhfs\hfs.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsNodeMutation.c" />
-<ClCompile Include="..\src\hfs\libhfs\volume.c" />
 <ClCompile Include="..\src\Filehook.c" /><ClCompile Include="cd-probe.cpp" /><ClCompile Include="..\src\ReadOnlyCd.cpp" /><ClCompile Include="..\src\ReadOnlyCdBackend.cpp" /><ClCompile Include="..\src\ReadOnlySource.cpp" /><ClCompile Include="..\src\ReadOnlyFloppy.cpp" /><ClCompile Include="..\src\DirectFloppy.cpp" /><ClCompile Include="..\src\ImageOnly.cpp" /><ClCompile Include="..\src\cache.cpp"><PreprocessorDefinitions>HFV_STANDALONE_CACHE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
