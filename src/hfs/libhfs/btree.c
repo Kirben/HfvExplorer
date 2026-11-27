@@ -278,7 +278,7 @@ static int ClassicHfsDeleteAlongPath(node *root, unsigned depth, unsigned char *
         unsigned char *separator = level ? HFS_NODEREC(*parent, parent->rnum) : rootSeparator;
         int changed = 0;
         if (removeRecord) {
-            if (n_delete(current, separator, &changed) < 0)
+            if (ClassicHfsDeleteNodeRecord(current, separator, &changed) < 0)
                 goto done;
         } else {
             if (current->rnum == 0) {

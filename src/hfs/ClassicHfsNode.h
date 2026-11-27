@@ -49,6 +49,21 @@ static inline int ClassicHfsCompactNode(unsigned char *bytes, uint16_t *offsets,
     return 1;
 }
 
+// An index slot can already have a zero key when its child was merged.
+static inline int ClassicHfsRemoveNodeRecord(unsigned char *bytes, uint16_t *offsets,
+                                             uint16_t *count, int slot)
+{
+    if (slot < 0 || (unsigned)slot >= *count || !ClassicHfsValidOffsets(*count, offsets))
+        return 0;
+    unsigned start = offsets[slot], next = offsets[slot + 1];
+    memmove(bytes + start, bytes + next, offsets[*count] - next);
+    unsigned removed = next - start;
+    for (unsigned i = (unsigned)slot; i < *count; ++i)
+        offsets[i] = (uint16_t)(offsets[i + 1] - removed);
+    --*count;
+    return 1;
+}
+
 // Insert an external record at a slot, leaving room for the enlarged offset table.
 static inline int ClassicHfsInsertNodeRecord(unsigned char *bytes, uint16_t *offsets,
                                              uint16_t *count, unsigned slot,

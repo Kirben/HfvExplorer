@@ -159,6 +159,17 @@ static void verify_repeated_tree_map(char *image)
 }
 
 int main(int argc,char**argv){
+    for (int slot = 0; slot < 3; ++slot) {
+        unsigned char sector[512] = {0};
+        uint16_t offsets[] = {14, 18, 22, 26}, count = 3;
+        sector[14] = 1; sector[18] = 2; sector[22] = 3;
+        must(!ClassicHfsRemoveNodeRecord(sector, offsets, &count, 3) && count == 3 &&
+             offsets[3] == 26 && sector[22] == 3, "reject removal past the last node slot");
+        must(ClassicHfsRemoveNodeRecord(sector, offsets, &count, slot) && count == 2 &&
+             offsets[0] == 14 && offsets[1] == 18 && offsets[2] == 22 &&
+             sector[14] == (slot == 0 ? 2 : 1) && sector[18] == (slot == 2 ? 2 : 3),
+             "first, middle and last node deletions preserve the surviving records");
+    }
     {
         ClassicHfsNodeDescriptor child = {0};
         child.ndNHeight = 1; child.ndType = -1; child.ndNRecs = 1;

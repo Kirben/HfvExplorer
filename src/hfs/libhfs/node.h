@@ -30,4 +30,4 @@ int n_split(node *, unsigned char *, int *);
 int n_insertx(node *, unsigned char *, int);
 int n_insert(node *, unsigned char *, int *);
 
-int n_delete(node *, unsigned char *, int *);
+int ClassicHfsDeleteNodeRecord(node *, unsigned char *, int *);

@@ -242,49 +242,39 @@ static int ClassicHfsFinishNodeMerge(node *right, node *left, unsigned char *rec
     return 0;
 }
 
-/*
- * NAME:	node->delete()
- * DESCRIPTION:	remove a record from a node
- */
-int n_delete(node *np, unsigned char *record, int *flag)
+int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, int *changed)
 {
-  node left;
-  unsigned char *rec;
-
-  rec = HFS_NODEREC(*np, np->rnum);
-
-  HFS_RECKEYLEN(rec) = 0;
-  if (compact_node(np) < 0)
-    return -1;
-
-  /* see if we can merge with our left sibling */
-
-  left.bt   = np->bt;
-  left.nnum = np->nd.ndBLink;
-
-  if (left.nnum > 0)
-    {
-      if (bt_getnode(&left) < 0)
-	return -1;
-
-      if (left.nnum == np->nnum || left.nd.ndFLink != np->nnum ||
-          left.nd.ndType != np->nd.ndType || left.nd.ndNHeight != np->nd.ndNHeight) {
-        ERROR(EIO, "inconsistent classic HFS B-tree left sibling");
+    node remaining = *current;
+    if (!ClassicHfsRemoveNodeRecord(remaining.data, remaining.roff, &remaining.nd.ndNRecs,
+                                    remaining.rnum)) {
+        ERROR(EIO, "invalid classic HFS deletion slot or node offsets");
         return -1;
-      }
-      if (ClassicHfsMergeNodeRecords(left.data, left.roff, &left.nd.ndNRecs,
-                                     np->data, np->roff, np->nd.ndNRecs))
-        return ClassicHfsFinishNodeMerge(np, &left, record, flag);
     }
-
-  if (np->rnum == 0 && np->nd.ndNRecs)
-    {
-      /* special case: first record changed; update parent record key */
-
-      if (n_index(np, record, 0) < 0)
+    if (remaining.nd.ndBLink) {
+        node left;
+        left.bt = remaining.bt;
+        left.nnum = remaining.nd.ndBLink;
+        if (bt_getnode(&left) < 0)
+            return -1;
+        if (left.nnum == remaining.nnum || left.nd.ndFLink != remaining.nnum ||
+            left.nd.ndType != remaining.nd.ndType || left.nd.ndNHeight != remaining.nd.ndNHeight) {
+            ERROR(EIO, "inconsistent classic HFS B-tree left sibling");
+            return -1;
+        }
+        if (ClassicHfsMergeNodeRecords(left.data, left.roff, &left.nd.ndNRecs,
+                                       remaining.data, remaining.roff, remaining.nd.ndNRecs))
+            return ClassicHfsFinishNodeMerge(&remaining, &left, separator, changed);
+    }
+    unsigned char replacement[HFS_MAXRECLEN];
+    int length = 0;
+    if (remaining.rnum == 0 && remaining.nd.ndNRecs && n_index(&remaining, replacement, &length) < 0)
         return -1;
-      *flag = 1;
+    if (bt_putnode(&remaining) < 0)
+        return -1;
+    if (length) {
+        memcpy(separator, replacement, length);
+        *changed = 1;
     }
-
-  return bt_putnode(np);
+    *current = remaining;
+    return 0;
 }
