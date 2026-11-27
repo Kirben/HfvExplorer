@@ -123,9 +123,29 @@ int RunMainMacBrowserTest(const char* directory){
         std::string classicPath=root+"\\classic.dsk";{CFile f;Check(f.Open(classicPath.c_str(),CFile::modeCreate|CFile::modeWrite)!=FALSE,"create classic image");f.SetLength(4*1024*1024);}
         char label[]="Classic";Check(hfs_format(const_cast<char*>(classicPath.c_str()),0,label)==0,"format classic transfer fixture");
         auto classic=OpenClassic(classicPath,"Classic:",true);uint32_t shortFile=source->Put(2,File(u"Short"),Payload(),false);
-        Storage::Job toClassic;Check(Copy(*source,shortFile,*classic,2,toClassic),"HFS+ to classic HFS");Verify(*classic,classic->List()[0].id);
+        auto copyToClassic=[&](uint32_t id,Storage::CopyPrompt expected,Storage::ConflictChoice answer){
+            auto job=Storage::copyWorker().submit([&](Storage::Job& work){
+                Check(Copy(*source,id,*classic,2,work),"classic copy incomplete");
+                return Storage::Result{};
+            });
+            bool sawPrompt=false;
+            const auto start=GetTickCount64();
+            while(!job->done()){
+                const auto prompt=job->conflictState();
+                if(!prompt.path.empty()){
+                    if(prompt.kind!=expected){job->cancel();job->wait();Check(false,"unexpected classic copy prompt");}
+                    sawPrompt=true;
+                    job->resolve(prompt.id,answer);
+                }
+                if(GetTickCount64()-start>15000){job->cancel();job->wait();Check(false,"classic copy timed out");}
+                Sleep(1);
+            }
+            Check(sawPrompt,"classic copy omitted its preflight decision");
+            return job->result();
+        };
+        Check(!copyToClassic(shortFile,Storage::CopyPrompt::ClassicMetadataLoss,Storage::ConflictChoice::Replace).code,"HFS+ to classic HFS");Verify(*classic,classic->List()[0].id);
         Storage::Job fromClassic;Check(Copy(*classic,classic->List()[0].id,*target,2,fromClassic),"classic HFS to HFSX");Verify(*target,Find(*target,2,u"Short"));
-        Reject([&]{Storage::Job job;Copy(*source,file,*classic,2,job);},"classic filename was silently shortened");
+        Check(copyToClassic(file,Storage::CopyPrompt::ClassicArchiveNames,Storage::ConflictChoice::Cancel).error==ERROR_CANCELLED&&classic->List().size()==1,"declined archive name preview changed classic destination");
         auto windowsAgain=OpenWindows(W(host));Reject([&]{Storage::Job job;Copy(*windows,exported[0].id,*windowsAgain,2,job,true);},"same Windows destination accepted across adapters");Verify(*windows,exported[0].id);
         auto classicAgain=OpenClassic(classicPath,"Classic:",true);Reject([&]{Storage::Job job;Copy(*classic,classic->List()[0].id,*classicAgain,2,job,true);},"same classic destination accepted across adapters");
         MainMfsFixture::Fixture mfsFixture;std::string mfsPath=root+"\\mfs.dsk";
@@ -200,11 +220,11 @@ int RunMainMacBrowserTest(const char* directory){
             auto feature=MacBrowser::OpenImage(featurePath);int featureIndex=browser.AttachTestVolume(feature,"links");
             Check(browser.ShowTestFolder(featureIndex,2),"show link fixture");int linkRow=-1;
             for(int row=0;row<lc.GetItemCount();++row)if(Text(lc,row)==L"Linked folder")linkRow=row;
-            Check(linkRow>=0&&browser.Activate(linkRow),"open directory hard link in main browser");bool child=false;
+            Check(linkRow>=0&&browser.Activate(linkRow)&&session.AwaitNavigationForTest(),"open directory hard link in main browser");bool child=false;
             for(int row=0;row<lc.GetItemCount();++row)child|=Text(lc,row)==L"Child";
             Check(child&&!browser.Writable(),"linked folder contents and mutation restrictions");
             auto selected=tree.GetTreeCtrl().GetSelectedItem();auto parent=tree.GetTreeCtrl().GetParentItem(selected);
-            tree.GetTreeCtrl().SelectItem(parent);browser.Select(tree.GetTreeCtrl().GetItemData(parent));
+            tree.GetTreeCtrl().SelectItem(parent);browser.Select(tree.GetTreeCtrl().GetItemData(parent));Check(session.AwaitNavigationForTest(),"return from directory hard link");
             bool returned=false;for(int row=0;row<lc.GetItemCount();++row)returned|=Text(lc,row)==L"Linked folder";
             Check(returned,"directory hard-link navigation returns to visible parent");
             fprintf(report,"PASS: main-browser directory hard-link navigation returns to visible parent.\n");
