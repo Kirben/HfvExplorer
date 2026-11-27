@@ -37,8 +37,6 @@ int bt_getnode(node *np)
 {
   btree *bt = np->bt;
   block *bp = &np->data;
-  unsigned char *ptr;
-  int i;
 
   /* verify the node exists and is marked as in-use */
 
@@ -57,27 +55,10 @@ int bt_getnode(node *np)
   if (f_getblock(&bt->f, np->nnum, bp) < 0)
     return -1;
 
-  ptr = *bp;
-
-  np->nd.ndFLink = ClassicHfsTake32(&ptr);
-  np->nd.ndBLink = ClassicHfsTake32(&ptr);
-  np->nd.ndType = ClassicHfsTake8(&ptr);
-  np->nd.ndNHeight = ClassicHfsTake8(&ptr);
-  np->nd.ndNRecs = ClassicHfsTake16(&ptr);
-  np->nd.ndResv2 = ClassicHfsTake16(&ptr);
-
-  if (np->nd.ndNRecs > HFS_MAXRECS)
-    {
-      ERROR(EIO, "too many b*-tree node records");
+  if (!ClassicHfsDecodeNode(*bp, &np->nd, np->roff)) {
+      ERROR(EIO, "invalid b*-tree node record offsets");
       return -1;
-    }
-
-  i = np->nd.ndNRecs + 1;
-
-  ptr = *bp + HFS_BLOCKSZ - (2 * i);
-
-  while (i--)
-    np->roff[i] = ClassicHfsTake16(&ptr);
+  }
 
   return 0;
 }
@@ -90,8 +71,6 @@ int bt_putnode(node *np)
 {
   btree *bt = np->bt;
   block *bp = &np->data;
-  unsigned char *ptr;
-  int i;
 
   /* verify the node exists and is marked as in-use */
 
@@ -106,27 +85,10 @@ int bt_putnode(node *np)
       return -1;
     }
 
-  ptr = *bp;
-
-  ClassicHfsAppend32(&ptr, np->nd.ndFLink);
-  ClassicHfsAppend32(&ptr, np->nd.ndBLink);
-  ClassicHfsAppend8(&ptr, np->nd.ndType);
-  ClassicHfsAppend8(&ptr, np->nd.ndNHeight);
-  ClassicHfsAppend16(&ptr, np->nd.ndNRecs);
-  ClassicHfsAppend16(&ptr, np->nd.ndResv2);
-
-  if (np->nd.ndNRecs > HFS_MAXRECS)
-    {
-      ERROR(EIO, "too many b*-tree node records");
+  if (!ClassicHfsEncodeNode(*bp, &np->nd, np->roff)) {
+      ERROR(EIO, "invalid b*-tree node record offsets");
       return -1;
-    }
-
-  i = np->nd.ndNRecs + 1;
-
-  ptr = *bp + HFS_BLOCKSZ - (2 * i);
-
-  while (i--)
-    ClassicHfsAppend16(&ptr, np->roff[i]);
+  }
 
   if (f_putblock(&bt->f, np->nnum, bp) < 0)
     return -1;

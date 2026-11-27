@@ -10,6 +10,7 @@
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtents.h"
+#include "hfs/ClassicHfsNode.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
@@ -112,6 +113,23 @@ int main(int argc,char**argv){
        "overflow extent record boundary");
   bytes[0] = 6;
   must(!ClassicHfsValidExtentRecord(bytes, 20), "invalid overflow extent key length");
+ }
+ {
+  unsigned char bytes[ClassicHfsNodeSize];
+  ClassicHfsNodeDescriptor header = {0xabcdef01, 3, -1, 1, 2, -2}, decoded;
+  uint16_t offsets[ClassicHfsMaxRecords+1] = {14, 32, 506}, readback[ClassicHfsMaxRecords+1];
+  memset(bytes, 0x55, sizeof(bytes));
+  must(ClassicHfsEncodeNode(bytes, &header, offsets) && bytes[14] == 0x55 &&
+       ClassicHfsRead16(bytes + 506) == 506 && ClassicHfsRead16(bytes + 510) == 14,
+       "reverse node offsets leave payload intact");
+  must(ClassicHfsDecodeNode(bytes, &decoded, readback) && decoded.ndType == -1 &&
+       decoded.ndFLink == header.ndFLink && decoded.ndResv2 == -2 &&
+       !memcmp(offsets, readback, 6), "classic node descriptor round trip");
+  ClassicHfsWrite16(bytes + 508, 12);
+  must(!ClassicHfsDecodeNode(bytes, &decoded, readback), "reject descending node offsets");
+  offsets[2] = 508;
+  must(!ClassicHfsEncodeNode(bytes, &header, offsets) && ClassicHfsRead16(bytes + 508) == 12,
+       "reject overlap with offset table before modifying node");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

@@ -274,16 +274,9 @@ struct _hfsfile_ {
 # define HFS_EXT_BOOTSTRAP 0x02 /* extents-file lookup recursion guard */
 # define HFS_UPDATE_CATREC	0x01
 
-typedef struct {
-  ULongInt	ndFLink;	/* forward link */
-  ULongInt	ndBLink;	/* backward link */
-  SignedByte	ndType;		/* node type */
-  SignedByte	ndNHeight;	/* node level */
-  UInteger	ndNRecs;	/* number of records in node */
-  Integer	ndResv2;	/* reserved */
-} NodeDescriptor;
-
-# define HFS_MAXRECS	35	/* maximum based on minimum record size */
+#include "../ClassicHfsNode.h"
+typedef ClassicHfsNodeDescriptor NodeDescriptor;
+# define HFS_MAXRECS ClassicHfsMaxRecords
 
 typedef struct _node_ {
   struct _btree_ *bt;		/* btree to which this node belongs */
