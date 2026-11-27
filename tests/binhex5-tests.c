@@ -92,6 +92,27 @@ static int compare_test_keys(unsigned char *left, unsigned char *right)
 {
  return (int)left[1] - right[1];
 }
+static void verify_formatted_tree_headers(const char *image)
+{
+    unsigned char mdb[512], node[512];
+    FILE *file = fopen(image, "rb");
+    must(file && fseek(file, 1024, SEEK_SET) == 0 &&
+         fread(mdb, 1, sizeof(mdb), file) == sizeof(mdb), "read formatted MDB");
+    for (unsigned tree = 0; tree < 2; ++tree) {
+        long offset = 512L * ClassicHfsRead16(mdb + 28) +
+            ClassicHfsRead32(mdb + 20) * ClassicHfsRead16(mdb + (tree ? 150 : 134));
+        must(fseek(file, offset, SEEK_SET) == 0 &&
+             fread(node, 1, sizeof(node), file) == sizeof(node), "read formatted tree header");
+        must(node[8] == 1 && ClassicHfsRead16(node + 10) == 3 &&
+             ClassicHfsRead16(node + 32) == 512 && ClassicHfsRead16(node + 34) == (tree ? 37 : 7),
+             "formatted tree type, record count and key length");
+        must(ClassicHfsRead16(node + 510) == 14 && ClassicHfsRead16(node + 508) == 120 &&
+             ClassicHfsRead16(node + 506) == 248 && ClassicHfsRead16(node + 504) == 504 &&
+             (node[248] & 0x80), "formatted tree offsets and reserved header bit");
+    }
+    fclose(file);
+}
+
 int main(int argc,char**argv){
     must(ClassicHfsBitmapSectors(4096) == 1 && ClassicHfsBitmapSectors(4097) == 2 &&
          ClassicHfsBitmapSectors(65535) == 16, "bitmap sector rounding");
@@ -677,7 +698,7 @@ int main(int argc,char**argv){
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
- must(hfs_format(image,0,label)==0,"format image");v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
+ must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  must(ClassicHfsCompareNames("A", "a") == 0 && ClassicHfsCompareNames("a", "ab") < 0 &&
       ClassicHfsCompareNames("\x80", "\x8a") == 0 && ClassicHfsCompareNames("a", "\x80") < 0 &&
       ClassicHfsCompareNames(" ", "\xca") == 0, "classic MacRoman name ordering");

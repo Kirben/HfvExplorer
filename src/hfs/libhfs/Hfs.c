@@ -63,6 +63,7 @@
 #include "../ClassicHfsVolumeBitmap.h"
 # include "file.h"
 #include "../ClassicHfsSystemFiles.h"
+#include "../ClassicHfsFormatTree.h"
 # include "btree.h"
 # include "node.h"
 #include "../ClassicHfsEntry.h"
@@ -596,7 +597,6 @@ int hfs_format(char *path, int pnum, char *vname)
   unsigned int vbmsz;
   int i, result = 0;
   block vbm[16];
-  char *map;
 
   if (strchr(vname, ':'))
     {
@@ -747,94 +747,10 @@ int hfs_format(char *path, int pnum, char *vname)
 
   ClassicHfsInitSystemFiles(&vol);
 
-  n_init(&ext->hdrnd, ext, ndHdrNode, 0);
-
-  ext->hdrnd.nnum       = 0;
-  ext->hdrnd.nd.ndNRecs = 3;
-  ext->hdrnd.roff[1]    = 0x078;
-  ext->hdrnd.roff[2]    = 0x0f8;
-  ext->hdrnd.roff[3]    = 0x1f8;
-
-  memset(HFS_NODEREC(ext->hdrnd, 1), 0, 128);
-
-  ext->hdr.bthDepth    = 0;
-  ext->hdr.bthRoot     = 0;
-  ext->hdr.bthNRecs    = 0;
-  ext->hdr.bthFNode    = 0;
-  ext->hdr.bthLNode    = 0;
-  ext->hdr.bthNodeSize = HFS_BLOCKSZ;
-  ext->hdr.bthKeyLen   = 0x07;
-  ext->hdr.bthNNodes   = 0;
-  ext->hdr.bthFree     = 0;
-  for (i = 0; i < 76; ++i)
-    ext->hdr.bthResv[i] = 0;
-
-  map = ALLOC(char, HFS_MAP1SZ);
-  if (map == 0)
-    {
-      if (result == 0)
-	{
-	  ERROR(ENOMEM, 0);
-	  result = -1;
-	}
-    }
-  else
-    {
-      memset(map, 0, HFS_MAP1SZ);
-      ClassicHfsSetBit(map, 0);
-    }
-
-  ext->map     = map;
-  ext->mapsz   = HFS_MAP1SZ;
-  ext->flags   = HFS_UPDATE_BTHDR;
-  ext->compare = ClassicHfsCompareExtentKeys;
-
-  if (result == 0 && bt_space(ext, 1) < 0)
-    result = -1;
-
-  n_init(&cat->hdrnd, cat, ndHdrNode, 0);
-
-  cat->hdrnd.nnum       = 0;
-  cat->hdrnd.nd.ndNRecs = 3;
-  cat->hdrnd.roff[1]    = 0x078;
-  cat->hdrnd.roff[2]    = 0x0f8;
-  cat->hdrnd.roff[3]    = 0x1f8;
-
-  memset(HFS_NODEREC(cat->hdrnd, 1), 0, 128);
-
-  cat->hdr.bthDepth    = 0;
-  cat->hdr.bthRoot     = 0;
-  cat->hdr.bthNRecs    = 0;
-  cat->hdr.bthFNode    = 0;
-  cat->hdr.bthLNode    = 0;
-  cat->hdr.bthNodeSize = HFS_BLOCKSZ;
-  cat->hdr.bthKeyLen   = 0x25;
-  cat->hdr.bthNNodes   = 0;
-  cat->hdr.bthFree     = 0;
-  for (i = 0; i < 76; ++i)
-    cat->hdr.bthResv[i] = 0;
-
-  map = ALLOC(char, HFS_MAP1SZ);
-  if (map == 0)
-    {
-      if (result == 0)
-	{
-	  ERROR(ENOMEM, 0);
-	  result = -1;
-	}
-    }
-  else
-    {
-      memset(map, 0, HFS_MAP1SZ);
-      ClassicHfsSetBit(map, 0);
-    }
-
-  cat->map     = map;
-  cat->mapsz   = HFS_MAP1SZ;
-  cat->flags   = HFS_UPDATE_BTHDR;
-  cat->compare = ClassicHfsCompareCatalogKeys;
-
-  if (result == 0 && bt_space(cat, 1) < 0)
+  cat->map = NULL; // cleanup also runs if the first allocation fails
+  if (ClassicHfsInitFormatTree(ext, ClassicHfsExtentKeySize - 1, ClassicHfsCompareExtentKeys) < 0 ||
+      ClassicHfsInitFormatTree(cat, 37, ClassicHfsCompareCatalogKeys) < 0 ||
+      bt_space(ext, 1) < 0 || bt_space(cat, 1) < 0)
     result = -1;
 
   /* create root folder */
