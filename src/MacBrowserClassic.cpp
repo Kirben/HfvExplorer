@@ -40,7 +40,7 @@ int AttachImage(HANDLE opened,int mode)
 hfsvol* MountHostImage(const std::wstring& path,const std::string& expected,bool write,bool session)
 {
     // Legacy aliases share one catalog cache. Match its held handle, since
-    // asking libhfs to resolve the pathname again can select a different file.
+    // asking the classic HFS engine to resolve the pathname again can select a different file.
     if(!session){
         for(auto* mounted=hfs_mounts;mounted;mounted=mounted->next){
             if(mounted->fd<0||mounted->fd>=0x10000000||(mounted->pnum!=0&&mounted->pnum!=1)||
@@ -789,7 +789,7 @@ bool RecognizesClassicImage(HANDLE opened) {
 std::string ClassicCopyNameKey(const std::u16string& name)
 {
     auto key=Encode(name);
-    // Match the catalog collation used by libhfs.
+    // Match classic HFS catalog collation.
     for(auto& byte:key)byte=char(ClassicHfsNameWeight(static_cast<unsigned char>(byte)));
     return key;
 }

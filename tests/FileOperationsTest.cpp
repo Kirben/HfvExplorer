@@ -135,7 +135,7 @@ void VerifyImageReopenIdentity(const std::string& root,FILE* report)
   swapped=true;
  });
  // The first pathname lookup selected the old image. A later open must
- // verify its descriptor before libhfs is allowed to read or recover it.
+ // verify its descriptor before the classic HFS engine reads or recovers it.
  refused=false;
  try{OpenClassic(legacy,":",true);}
  catch(const Storage::MediaChanged&){refused=true;}

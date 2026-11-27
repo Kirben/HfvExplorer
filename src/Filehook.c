@@ -50,7 +50,7 @@
 
 // Native sharing is enforced by file identity, including hard links and path aliases.
 // Read handles share with readers; writers deny every other write-capable open.
-// A read-only libhfs session also denies a later writer while its caches are alive.
+// A read-only classic HFS session also denies a later writer while its caches are alive.
 static int encoded_image_path(const char* path)
 {
  return path&&strncmp(path,HFV_CLASSIC_IMAGE_PREFIX,sizeof(HFV_CLASSIC_IMAGE_PREFIX)-1)==0;
