@@ -130,13 +130,34 @@ int n_index(node *child, unsigned char *record, int *reclen)
   return 0;
 }
 
+// Load and validate the old forward link before publishing either sibling.
+static int prepare_successor(node *next, node *previous, unsigned long replacement)
+{
+  next->bt = previous->bt;
+  next->nnum = previous->nd.ndFLink;
+  if (previous->nd.ndType == -1 &&
+      ((next->nnum == 0) != (previous->bt->hdr.bthLNode == previous->nnum))) {
+    ERROR(EIO, "inconsistent classic HFS last leaf");
+    return -1;
+  }
+  if (!next->nnum)
+    return 0;
+  if (bt_getnode(next) < 0)
+    return -1;
+  if (!ClassicHfsRelinkSuccessor(&next->nd, next->nnum, &previous->nd, previous->nnum, replacement)) {
+    ERROR(EIO, "inconsistent classic HFS successor link");
+    return -1;
+  }
+  return 0;
+}
+
 /*
  * NAME:	node->split()
  * DESCRIPTION:	divide a node into two and insert a record
  */
 int n_split(node *left, unsigned char *record, int *reclen)
 {
-  node right;
+  node right, next;
   right = *left;
   if (!ClassicHfsSplitNodeRecords(left->data, left->roff, &left->nd.ndNRecs,
                                   right.data, right.roff, &right.nd.ndNRecs,
@@ -146,6 +167,8 @@ int n_split(node *left, unsigned char *record, int *reclen)
   }
   right.nd.ndBLink = left->nnum;
   if (n_new(&right) < 0)
+    return -1;
+  if (prepare_successor(&next, left, right.nnum) < 0)
     return -1;
   left->nd.ndFLink = right.nnum;
 
@@ -168,21 +191,8 @@ int n_split(node *left, unsigned char *record, int *reclen)
       left->bt->flags |= HFS_UPDATE_BTHDR;
     }
 
-  if (right.nd.ndFLink)
-    {
-      node n;
-
-      n.bt   = right.bt;
-      n.nnum = right.nd.ndFLink;
-
-      if (bt_getnode(&n) < 0)
-	return -1;
-
-      n.nd.ndBLink = right.nnum;
-
-      if (bt_putnode(&n) < 0)
-	return -1;
-    }
+  if (next.nnum && bt_putnode(&next) < 0)
+    return -1;
 
   return 0;
 }
@@ -231,6 +241,9 @@ static int finish_merge(node *right, node *left, unsigned char *record, int *fla
 {
   /* update link pointers */
 
+  node next;
+  if (prepare_successor(&next, right, left->nnum) < 0)
+    return -1;
   left->nd.ndFLink = right->nd.ndFLink;
 
   if (bt_putnode(left) < 0)
@@ -242,21 +255,8 @@ static int finish_merge(node *right, node *left, unsigned char *record, int *fla
       right->bt->flags |= HFS_UPDATE_BTHDR;
     }
 
-  if (right->nd.ndFLink)
-    {
-      node n;
-
-      n.bt   = right->bt;
-      n.nnum = right->nd.ndFLink;
-
-      if (bt_getnode(&n) < 0)
-	return -1;
-
-      n.nd.ndBLink = left->nnum;
-
-      if (bt_putnode(&n) < 0)
-	return -1;
-    }
+  if (next.nnum && bt_putnode(&next) < 0)
+    return -1;
 
   if (n_free(right) < 0)
     return -1;

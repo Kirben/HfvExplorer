@@ -174,6 +174,20 @@ static inline int ClassicHfsSearchNode(unsigned char *bytes, const uint16_t *off
 
 typedef enum { ClassicHfsLookup, ClassicHfsInsert, ClassicHfsDelete } ClassicHfsSearchPurpose;
 
+// A split inserts a new predecessor; a merge removes the old one.
+static inline int ClassicHfsRelinkSuccessor(ClassicHfsNodeDescriptor *next, uint32_t nextNumber,
+                                            const ClassicHfsNodeDescriptor *previous,
+                                            uint32_t previousNumber, uint32_t replacement)
+{
+    if (!previousNumber || !replacement || previousNumber == replacement ||
+        !nextNumber || nextNumber == previousNumber || nextNumber == replacement ||
+        next->ndBLink != previousNumber || next->ndType != previous->ndType ||
+        next->ndNHeight != previous->ndNHeight)
+        return 0;
+    next->ndBLink = replacement;
+    return 1;
+}
+
 // Index keys occupy fixed-width slots. Validate the source record before
 // publishing the padded separator and its big-endian child pointer.
 static inline int ClassicHfsWriteIndexRecord(unsigned char *out, unsigned capacity,

@@ -260,6 +260,17 @@ int main(int argc,char**argv){
        right[other[0]] == 3 && right[other[2]] == 5, "split uneven records by occupied bytes");
  }
  {
+  ClassicHfsNodeDescriptor previous = {0}, next = {0};
+  previous.ndType = next.ndType = -1;
+  previous.ndNHeight = next.ndNHeight = 1;
+  next.ndBLink = 6;
+  must(!ClassicHfsRelinkSuccessor(&next, 9, &previous, 5, 8) && next.ndBLink == 6,
+       "mismatched successor backlink remains intact");
+  must(!ClassicHfsRelinkSuccessor(&next, 8, &previous, 6, 8) &&
+       ClassicHfsRelinkSuccessor(&next, 9, &previous, 6, 8) && next.ndBLink == 8,
+       "reject successor self-link and install valid replacement");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;
@@ -399,5 +410,13 @@ int main(int argc,char**argv){
  for(int i=0;i<80;++i){char name[32];hfsdirent entry;sprintf(name,"BH5:Descending%03d",i);
   must(hfs_stat(v,name,&entry)==0,"reopen and locate every split catalog record");}
  must(hfs_umount(v)==0,"close image");
+ v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"reopen for catalog merges");
+ for(int i=10;i<70;++i){char name[32];sprintf(name,"BH5:Descending%03d",i);
+  must(hfs_delete(v,name)==0,"delete middle range across catalog siblings");}
+ must(hfs_umount(v)==0,"persist catalog merges");
+ v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen merged catalog");
+ for(int i=0;i<80;++i){char name[32];hfsdirent entry;sprintf(name,"BH5:Descending%03d",i);
+  must((hfs_stat(v,name,&entry)==0)==(i<10 || i>=70),"catalog survivors after sibling merges");}
+ verify(v,target,4097,3073);must(hfs_umount(v)==0,"close merged catalog");
  puts("PASS: BinHex 5/MacBinary I import/export, empty and aligned/unaligned forks, metadata/protected flag, Pascal names, unpadded final fork, preflight preservation, II CRC downgrade protection, secondary headers and Apple fork limits; synthetic files only");return 0;
 }
