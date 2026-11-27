@@ -17,13 +17,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-enum {
-  fkData = 0x00,
-  fkRsrc = 0xff
-};
-
-void f_selectfork(hfsfile *, int);
-void f_getptrs(hfsfile *, unsigned long **, unsigned long **, ExtDataRec **);
+#include "../ClassicHfsForkState.h"
 
 int f_doblock(hfsfile *, unsigned long, block *,
 	      int (*)(hfsvol *, unsigned int, unsigned int, block *));

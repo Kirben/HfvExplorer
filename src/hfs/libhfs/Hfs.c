@@ -1141,7 +1141,7 @@ hfsfile *hfs_open(hfsvol *vol, char *path)
   file->clump = file->cat.u.fil.filClpSize;
   file->flags = 0;
 
-  f_selectfork(file, 0);
+  ClassicHfsSelectFork(file, 0);
 
   file->prev = 0;
   file->next = vol->files;
@@ -1166,7 +1166,7 @@ int hfs_setfork(hfsfile *file, int fork)
       f_trunc(file) < 0)
     result = -1;
 
-  f_selectfork(file, fork);
+  ClassicHfsSelectFork(file, fork);
 
   return result;
 }
@@ -1192,7 +1192,7 @@ static int read_fork_block(void *context, uint32_t sector, block *bytes)
 long hfs_read(hfsfile *file, void *buf, unsigned long len)
 {
   unsigned long *logicalLength;
-  f_getptrs(file, &logicalLength, 0, 0);
+  logicalLength = ClassicHfsSelectedFork(file).logical;
   return ClassicHfsReadFork(file, read_fork_block, *logicalLength, &file->pos, buf, len);
 }
 
@@ -1223,7 +1223,9 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
       return -1;
     }
 
-  f_getptrs(file, &lglen, &pylen, 0);
+  ClassicHfsForkFields forkFields = ClassicHfsSelectedFork(file);
+  lglen = forkFields.logical;
+  pylen = forkFields.physical;
 
   if (len > 0x7fffffffUL) { ERROR(EINVAL, "transfer count exceeds signed API range"); return -1; }
   if (file->pos > HFS_MAX_FORK_SIZE || len > HFS_MAX_FORK_SIZE - file->pos) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
@@ -1246,7 +1248,7 @@ static int hfs_truncate_impl(hfsfile *file, unsigned long len)
   if (len > HFS_MAX_FORK_SIZE) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
   unsigned long *lglen;
 
-  f_getptrs(file, &lglen, 0, 0);
+  lglen = ClassicHfsSelectedFork(file).logical;
 
   if (*lglen > len)
     {
@@ -1275,7 +1277,7 @@ static int hfs_truncate_impl(hfsfile *file, unsigned long len)
 hfv_offset_t hfs_lseek(hfsfile *file, hfv_offset_t offset, int from)
 {
   unsigned long *lglen;
-  f_getptrs(file, &lglen, 0, 0);
+  lglen = ClassicHfsSelectedFork(file).logical;
   if (!ClassicHfsSeekFork(*lglen, &file->pos, offset, from)) {
     ERROR(EINVAL, 0);
     return -1;
@@ -1293,7 +1295,9 @@ int hfs_close(hfsfile *file)
   if(vol->flags&HFS_WRITE_FAILED)result=-1;
   else if(!(vol->flags&HFS_READONLY)) {
     unsigned long *logical,*physical;hfv_size_t rounded;
-    f_getptrs(file,&logical,&physical,0);
+    ClassicHfsForkFields forkFields = ClassicHfsSelectedFork(file);
+    logical = forkFields.logical;
+    physical = forkFields.physical;
     rounded=((hfv_size_t)*logical+vol->mdb.drAlBlkSiz-1)/vol->mdb.drAlBlkSiz*vol->mdb.drAlBlkSiz;
     if((file->flags&HFS_UPDATE_CATREC)||*physical!=rounded) {
       if(b_begin_mutation(vol)<0) {
@@ -1642,11 +1646,11 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
   file.cat.u.fil.filLgLen  = 0;
   file.cat.u.fil.filRLgLen = 0;
 
-  f_selectfork(&file, 0);
+  ClassicHfsSelectFork(&file, 0);
   if (f_trunc(&file) < 0)
     return -1;
 
-  f_selectfork(&file, 1);
+  ClassicHfsSelectFork(&file, 1);
   if (f_trunc(&file) < 0)
     return -1;
 
@@ -1971,7 +1975,7 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
  unsigned long *logical;int result;hfsvol *vol;
  /* Preserve the public range check before touching a caller-supplied file. */
  if(length>HFS_MAX_FORK_SIZE){ERROR(EFBIG,"classic HFS fork exceeds Apple limit");return -1;}
- f_getptrs(file,&logical,0,0);
+ logical = ClassicHfsSelectedFork(file).logical;
  if(*logical<=length)return 0;
  vol=file->vol;
  if(b_begin_mutation(vol)<0)return -1;

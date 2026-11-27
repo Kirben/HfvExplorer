@@ -19,8 +19,7 @@ static inline void ClassicHfsInitSystemFile(hfsfile *file, hfsvol *volume,
     file->cat.u.fil.filLgLen = length;
     file->cat.u.fil.filPyLen = length;
     memcpy(file->cat.u.fil.filExtRec, extents, sizeof(ExtDataRec));
-    file->fork = fkData;
-    memcpy(file->ext, extents, sizeof(ExtDataRec));
+    ClassicHfsSelectFork(file, 0);
     file->clump = clump;
 }
 

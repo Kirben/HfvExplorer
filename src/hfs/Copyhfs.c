@@ -227,12 +227,12 @@ int cphfs_raw( hfsvol *vol1, hfsvol *vol2, char *srcname, char *dstname )
   }
 
 
-	f_selectfork(ifile, 0);
-	f_selectfork(ofile, 0);
+	ClassicHfsSelectFork(ifile, 0);
+	ClassicHfsSelectFork(ofile, 0);
   result = do_raw(ifile, ofile);
 	if(result == 0) {
-		f_selectfork(ifile, 1);
-		f_selectfork(ofile, 1);
+		ClassicHfsSelectFork(ifile, 1);
+		ClassicHfsSelectFork(ofile, 1);
 		result = do_raw(ifile, ofile);
 	}
 

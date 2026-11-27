@@ -28,54 +28,6 @@
 # include "volume.h"
 
 /*
- * NAME:	file->selectfork()
- * DESCRIPTION:	choose a fork for file operations
- */
-void f_selectfork(hfsfile *file, int fork)
-{
-  if (fork == 0)
-    {
-      file->fork = fkData;
-      memcpy(file->ext, file->cat.u.fil.filExtRec, sizeof(ExtDataRec));
-    }
-  else
-    {
-      file->fork = fkRsrc;
-      memcpy(file->ext, file->cat.u.fil.filRExtRec, sizeof(ExtDataRec));
-    }
-
-  file->fabn = 0;
-  file->pos  = 0;
-}
-
-/*
- * NAME:	file->getptrs()
- * DESCRIPTION:	make pointers to the current fork's lengths and extents
- */
-void f_getptrs(hfsfile *file, unsigned long **lglen,
-	       unsigned long **pylen, ExtDataRec **extrec)
-{
-  if (file->fork == fkData)
-    {
-      if (lglen)
-	*lglen  = &file->cat.u.fil.filLgLen;
-      if (pylen)
-	*pylen  = &file->cat.u.fil.filPyLen;
-      if (extrec)
-	*extrec = &file->cat.u.fil.filExtRec;
-    }
-  else
-    {
-      if (lglen)
-	*lglen  = &file->cat.u.fil.filRLgLen;
-      if (pylen)
-	*pylen  = &file->cat.u.fil.filRPyLen;
-      if (extrec)
-	*extrec = &file->cat.u.fil.filRExtRec;
-    }
-}
-
-/*
  * NAME:	file->doblock()
  * DESCRIPTION:	read or write a numbered block from a file
  */
@@ -89,7 +41,7 @@ int f_doblock(hfsfile *file, unsigned long num, block *bp,
 {
   ExtDataRec *initial;
   unsigned physical, sector;
-  f_getptrs(file, 0, 0, &initial);
+  initial = ClassicHfsSelectedFork(file).extents;
   int mapped = ClassicHfsResolveForkSector(num, file->vol->lpa, file->vol->mdb.drNmAlBlks,
       *initial, file->ext, &file->fabn, load_fork_extents, file, &physical, &sector);
   if (mapped < 0)
@@ -115,7 +67,7 @@ int f_alloc(hfsfile *file)
   if (clumpsz == 0)
     clumpsz = vol->mdb.drClpSiz;
 
-  f_getptrs(file, 0, &pylen, 0);
+  pylen = ClassicHfsSelectedFork(file).physical;
   int sizeStatus = ClassicHfsGrowthRequest(*pylen, vol->mdb.drAlBlkSiz, clumpsz,
                                           &blocks.xdrNumABlks);
   if (sizeStatus != ClassicHfsForkSizeOk) {
@@ -131,7 +83,7 @@ int f_alloc(hfsfile *file)
 
   /* update the file's extents */
 
-  f_getptrs(file, 0, &pylen, &extrec);
+  extrec = ClassicHfsSelectedFork(file).extents;
 
   start  = file->fabn;
   end    = *pylen / vol->mdb.drAlBlkSiz;
@@ -227,7 +179,10 @@ int f_trunc(hfsfile *file)
   ExtDataRec *extrec;
   unsigned long *lglen, *pylen, alblksz;
   uint32_t newpylen;
-  f_getptrs(file, &lglen, &pylen, &extrec);
+  ClassicHfsForkFields forkFields = ClassicHfsSelectedFork(file);
+  lglen = forkFields.logical;
+  pylen = forkFields.physical;
+  extrec = forkFields.extents;
   alblksz = file->vol->mdb.drAlBlkSiz;
   int sizeStatus = ClassicHfsTruncatedSize(*lglen, *pylen, alblksz, &newpylen);
   if (sizeStatus != ClassicHfsForkSizeOk) {
