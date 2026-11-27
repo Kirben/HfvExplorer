@@ -21,14 +21,14 @@
 # include <string.h>
 # include <errno.h>
 
-# include "internal.h"
-#include "../ClassicHfsBytes.h"
-#include "../ClassicHfsNodeIO.h"
-# include "block.h"
-# include "file.h"
-# include "btree.h"
-# include "node.h"
-#include "../ClassicHfsGrowTreeMap.h"
+# include "libhfs/internal.h"
+#include "ClassicHfsBytes.h"
+#include "ClassicHfsNodeIO.h"
+# include "libhfs/block.h"
+# include "libhfs/file.h"
+# include "libhfs/btree.h"
+# include "libhfs/node.h"
+#include "ClassicHfsGrowTreeMap.h"
 
 /* High-Level B*-Tree Routines ============================================= */
 
@@ -143,6 +143,18 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
     return result;
 }
 
+static int read_mutation_root(node *root)
+{
+    if (ClassicHfsReadTreeNode(root) < 0)
+        return -1;
+    if (!ClassicHfsValidMutationRoot(&root->bt->hdr, root->nd.ndFLink, root->nd.ndBLink,
+                                     root->nd.ndNRecs)) {
+        ERROR(EIO, "inconsistent classic HFS mutation root");
+        return -1;
+    }
+    return 0;
+}
+
 int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int length)
 {
     unsigned char record[HFS_MAXRECLEN];
@@ -172,7 +184,7 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
         root.bt = tree;
         root.nnum = tree->hdr.bthRoot;
         memcpy(record, input, length);
-        if (ClassicHfsReadTreeNode(&root) < 0 ||
+        if (read_mutation_root(&root) < 0 ||
             ClassicHfsInsertAlongPath(&root, tree->hdr.bthDepth, record, &length) < 0)
             return -1;
         if (length) {
@@ -252,14 +264,8 @@ int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
         ERROR(EIO, "invalid or empty classic HFS deletion root");
         return -1;
     }
-    if (ClassicHfsReadTreeNode(&root) < 0)
+    if (read_mutation_root(&root) < 0)
         return -1;
-    if (root.nd.ndFLink || root.nd.ndBLink ||
-        (depth == 1 && (tree->hdr.bthFNode != root.nnum || tree->hdr.bthLNode != root.nnum ||
-                        tree->hdr.bthNRecs != root.nd.ndNRecs))) {
-        ERROR(EIO, "inconsistent classic HFS deletion root");
-        return -1;
-    }
     if (ClassicHfsDeleteAlongPath(&root, depth, key) < 0)
         return -1;
     if (depth > 1 && root.nd.ndNRecs == 1) {

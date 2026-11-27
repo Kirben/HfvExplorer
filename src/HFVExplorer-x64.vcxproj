@@ -56,7 +56,7 @@
     <ClCompile Include="hfs\binhex.c" />
     <ClCompile Include="hfs\ClassicHfsTransaction.c" />
     <ClCompile Include="hfs\ClassicHfsVolumeIO.c" />
-    <ClCompile Include="hfs\libhfs\btree.c" />
+    <ClCompile Include="hfs\ClassicHfsTreeMutation.c" />
     <ClCompile Include="hfs\copyhfs.c" />
     <ClCompile Include="hfs\copyin.c" />
     <ClCompile Include="hfs\copyout.c" />

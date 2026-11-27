@@ -198,6 +198,18 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 
 int main(int argc,char**argv){
     {
+        ClassicHfsTreeHeader header = {0};
+        header.bthRoot = header.bthFNode = header.bthLNode = 1;
+        header.bthNNodes = 4; header.bthDepth = 1; header.bthNRecs = 3;
+        must(ClassicHfsValidMutationRoot(&header, 0, 0, 3) &&
+             !ClassicHfsValidMutationRoot(&header, 0, 0, 2) &&
+             !ClassicHfsValidMutationRoot(&header, 2, 0, 3), "validate record totals and root sibling links");
+        header.bthDepth = 2; header.bthRoot = 2; header.bthLNode = 3;
+        must(ClassicHfsValidMutationRoot(&header, 0, 0, 2), "accept bounded index root");
+        header.bthLNode = header.bthNNodes;
+        must(!ClassicHfsValidMutationRoot(&header, 0, 0, 2), "reject out-of-range leaf endpoint before mutation");
+    }
+    {
         hfsvol volume = {0};
         node child = {0};
         unsigned char dest[42], original[42];

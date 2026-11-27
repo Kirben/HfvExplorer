@@ -32,6 +32,21 @@ static inline int ClassicHfsCheckSearchRoot(const ClassicHfsTreeHeader *header)
     return 1;
 }
 
+// Before changing a nonempty tree, its root must have no siblings. For
+// a one-leaf tree the root accounts for every record in the header.
+static inline int ClassicHfsValidMutationRoot(const ClassicHfsTreeHeader *header,
+    unsigned long forward, unsigned long backward, unsigned records)
+{
+    if (ClassicHfsCheckSearchRoot(header) != 1 || forward || backward ||
+        !records || !header->bthNRecs || !header->bthFNode || !header->bthLNode ||
+        header->bthFNode >= header->bthNNodes || header->bthLNode >= header->bthNNodes)
+        return 0;
+    if (header->bthDepth == 1)
+        return header->bthFNode == header->bthRoot && header->bthLNode == header->bthRoot &&
+               header->bthNRecs == records;
+    return header->bthFNode != header->bthRoot && header->bthLNode != header->bthRoot;
+}
+
 static inline int ClassicHfsDecodeTreeHeader(const unsigned char *bytes, int size,
                                              ClassicHfsTreeHeader *header)
 {
