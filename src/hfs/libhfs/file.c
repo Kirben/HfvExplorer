@@ -200,7 +200,7 @@ int ClassicHfsExtendForkAllocation(hfsfile *file)
     unsigned char record[HFS_EXTRECMAXLEN];
     int reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
     reclen += ClassicHfsEncodeExtents(record + reclen, updated);
-    if (bt_insert(&vol->ext, record, reclen) < 0) {
+    if (ClassicHfsInsertTreeRecord(&vol->ext, record, reclen) < 0) {
       ClassicHfsReleaseVolumeExtent(vol, &blocks);
       return -1;
     }

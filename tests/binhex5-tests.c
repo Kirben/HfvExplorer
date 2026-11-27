@@ -867,6 +867,11 @@ int main(int argc,char**argv){
   tree->hdr.bthNNodes = nodes;
   tree->hdrnd = before;
   tree->flags = flags;
+  unsigned char truncatedKey[2] = {7, 0};
+  ClassicHfsTreeHeader emptyHeader = v->ext.hdr;
+  must(!emptyHeader.bthRoot && ClassicHfsInsertTreeRecord(&v->ext, truncatedKey, sizeof(truncatedKey)) < 0 &&
+       !memcmp(&emptyHeader, &v->ext.hdr, sizeof(emptyHeader)),
+       "truncated insertion leaves empty extents tree unallocated");
   unsigned char absent[40];
   ClassicHfsWriteCatalogKey(absent, HFS_CNID_ROOTDIR, "missing deletion target");
   ClassicHfsTreeHeader savedHeader = tree->hdr;

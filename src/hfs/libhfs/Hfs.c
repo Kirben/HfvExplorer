@@ -1600,7 +1600,7 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
     reclen += size;
   }
 
-  if (bt_insert(&vol->cat, record, reclen) < 0 ||
+  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0 ||
       v_adjvalence(vol, parid, 0, 1) < 0)
     return -1;
 
@@ -1853,7 +1853,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
     reclen += size;
   }
 
-  if (bt_insert(&vol->cat, record, reclen) < 0)
+  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0)
     return -1;
 
   /* update thread record */

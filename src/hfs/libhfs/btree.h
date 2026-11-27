@@ -23,7 +23,7 @@ int bt_putnode(node *);
 
 int ClassicHfsReserveTreeSpace(btree *, unsigned int);
 
-int bt_insert(btree *, unsigned char *, int);
+int ClassicHfsInsertTreeRecord(btree *, const unsigned char *, int);
 
 int ClassicHfsDeleteTreeKey(btree *, unsigned char *);
 

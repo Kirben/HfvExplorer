@@ -176,79 +176,63 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
     return result;
 }
 
-/*
- * NAME:	btree->insert()
- * DESCRIPTION:	insert a new node record into a tree
- */
-int bt_insert(btree *bt, unsigned char *record, int reclen)
+int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int length)
 {
-  node root;
-
-  if (bt->hdr.bthRoot == 0)
-    {
-      /* create root node */
-
-      n_init(&root, bt, ndLeafNode, 1);
-      if (n_new(&root) < 0 ||
-	  bt_putnode(&root) < 0)
-	return -1;
-
-      bt->hdr.bthDepth = 1;
-      bt->hdr.bthRoot  = root.nnum;
-      bt->hdr.bthFNode = root.nnum;
-      bt->hdr.bthLNode = root.nnum;
-
-      bt->flags |= HFS_UPDATE_BTHDR;
-    }
-  else
-    {
-      root.bt   = bt;
-      root.nnum = bt->hdr.bthRoot;
-
-      if (bt_getnode(&root) < 0)
-	return -1;
-    }
-
-  if (ClassicHfsInsertAlongPath(&root, bt->hdr.bthDepth, record, &reclen) < 0)
-    return -1;
-
-  if (reclen)
-    {
-      unsigned char oroot[HFS_MAXRECLEN];
-      int orootlen;
-
-      /* root node was split; create a new root */
-
-      if (n_index(&root, oroot, &orootlen) < 0)
+    unsigned char record[HFS_MAXRECLEN];
+    int catalog = tree == &tree->f.vol->cat;
+    if (!input || length <= 0 || (length & 1) || (size_t)length > sizeof(record) ||
+        !(catalog ? ClassicHfsCatalogPayload(input, length, NULL) : ClassicHfsValidExtentRecord(input, length))) {
+        ERROR(EIO, "invalid classic HFS record for insertion");
         return -1;
-
-      n_init(&root, bt, ndIndxNode, root.nd.ndNHeight + 1);
-      if (n_new(&root) < 0)
-	return -1;
-
-      ++bt->hdr.bthDepth;
-      bt->hdr.bthRoot = root.nnum;
-
-      bt->flags |= HFS_UPDATE_BTHDR;
-
-      /* insert index records for new root */
-
-      n_search(&root, oroot);
-      if (n_insertx(&root, oroot, orootlen) < 0)
-        return -1;
-
-      n_search(&root, record);
-      if (n_insertx(&root, record, reclen) < 0)
-        return -1;
-
-      if (bt_putnode(&root) < 0)
-	return -1;
     }
-
-  ++bt->hdr.bthNRecs;
-  bt->flags |= HFS_UPDATE_BTHDR;
-
-  return 0;
+    int state = ClassicHfsCheckSearchRoot(&tree->hdr);
+    if (state < 0 || tree->hdr.bthNRecs == UINT32_MAX) {
+        ERROR(EIO, "invalid classic HFS insertion root");
+        return -1;
+    }
+    node root;
+    if (!state) {
+        n_init(&root, tree, ndLeafNode, 1);
+        if (!ClassicHfsInsertNodeRecord(root.data, root.roff, &root.nd.ndNRecs, 0, input, length)) {
+            ERROR(EIO, "classic HFS record exceeds leaf capacity");
+            return -1;
+        }
+        if (n_new(&root) < 0 || bt_putnode(&root) < 0)
+            return -1;
+        tree->hdr.bthDepth = 1;
+        tree->hdr.bthRoot = tree->hdr.bthFNode = tree->hdr.bthLNode = root.nnum;
+    } else {
+        root.bt = tree;
+        root.nnum = tree->hdr.bthRoot;
+        memcpy(record, input, length);
+        if (bt_getnode(&root) < 0 ||
+            ClassicHfsInsertAlongPath(&root, tree->hdr.bthDepth, record, &length) < 0)
+            return -1;
+        if (length) {
+            unsigned char left[HFS_MAXRECLEN];
+            int leftLength;
+            if (n_index(&root, left, &leftLength) < 0)
+                return -1;
+            if (tree->hdr.bthDepth >= INT8_MAX || tree->compare(left, record) >= 0) {
+                ERROR(EIO, "invalid classic HFS root split");
+                return -1;
+            }
+            node parent;
+            n_init(&parent, tree, ndIndxNode, tree->hdr.bthDepth + 1);
+            if (!ClassicHfsInsertNodeRecord(parent.data, parent.roff, &parent.nd.ndNRecs, 0, left, leftLength) ||
+                !ClassicHfsInsertNodeRecord(parent.data, parent.roff, &parent.nd.ndNRecs, 1, record, length)) {
+                ERROR(EIO, "classic HFS root separators exceed node capacity");
+                return -1;
+            }
+            if (n_new(&parent) < 0 || bt_putnode(&parent) < 0)
+                return -1;
+            tree->hdr.bthRoot = parent.nnum;
+            ++tree->hdr.bthDepth;
+        }
+    }
+    ++tree->hdr.bthNRecs;
+    tree->flags |= HFS_UPDATE_BTHDR;
+    return 0;
 }
 
 // Read the path before changing the leaf. Keep each parent and its selected

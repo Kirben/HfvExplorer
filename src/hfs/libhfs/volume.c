@@ -356,7 +356,7 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
     reclen += size;
   }
 
-  if (bt_insert(&vol->cat, record, reclen) < 0)
+  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0)
     return -1;
 
   /* create thread record */
@@ -379,7 +379,7 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
     reclen += size;
   }
 
-  if (bt_insert(&vol->cat, record, reclen) < 0 ||
+  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0 ||
       v_adjvalence(vol, parid, 1, 1) < 0)
     return -1;
 
