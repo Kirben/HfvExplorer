@@ -124,6 +124,40 @@ static inline int ClassicHfsSearchNode(unsigned char *bytes, const uint16_t *off
     return exact;
 }
 
+enum { ClassicHfsInvalidSearch = -1, ClassicHfsMissingKey, ClassicHfsFoundKey, ClassicHfsVisitChild };
+
+// Decide one level of a root-to-leaf lookup on a decoded node. The caller
+// decrements the expected height for every child read, bounding the descent.
+static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNodeDescriptor *node,
+                                        const uint16_t *offsets, unsigned height, int catalog,
+                                        unsigned char *key, int (*compare)(unsigned char *, unsigned char *),
+                                        int *slot, uint32_t totalNodes, uint32_t *child)
+{
+    if (!height || (unsigned)node->ndNHeight != height ||
+        node->ndType != (height == 1 ? -1 : 0))
+        return ClassicHfsInvalidSearch;
+    for (unsigned i = 0; i < node->ndNRecs; ++i) {
+        unsigned char *record = bytes + offsets[i];
+        unsigned keyLength = record[0];
+        if (!keyLength)
+            continue;
+        unsigned padded = (keyLength + 2) & ~1u;
+        if (padded + (height > 1 ? 4u : 0u) > (unsigned)(offsets[i + 1] - offsets[i]))
+            return ClassicHfsInvalidSearch;
+        if (catalog ? (keyLength < 6 || keyLength > 37 || record[6] > keyLength - 6) : keyLength != 7)
+            return ClassicHfsInvalidSearch;
+    }
+    int exact = ClassicHfsSearchNode(bytes, offsets, node->ndNRecs, key, compare, slot);
+    if (height == 1 || *slot < 0)
+        return exact ? ClassicHfsFoundKey : ClassicHfsMissingKey;
+    unsigned char *record = bytes + offsets[*slot];
+    uint32_t next = ClassicHfsRead32(record + ((record[0] + 2) & ~1u));
+    if (!next || next >= totalNodes)
+        return ClassicHfsInvalidSearch;
+    *child = next;
+    return ClassicHfsVisitChild;
+}
+
 static inline int ClassicHfsDecodeNode(const unsigned char *bytes, ClassicHfsNodeDescriptor *node,
                                       uint16_t *offsets)
 {

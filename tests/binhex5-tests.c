@@ -213,6 +213,22 @@ int main(int argc,char**argv){
   }
  }
  {
+  unsigned char bytes[512] = {0}, key[8] = {7};
+  ClassicHfsNodeDescriptor node = {0};
+  uint16_t offsets[] = {14, 26};
+  uint32_t child = 0;
+  int slot;
+  node.ndNHeight = 2; node.ndNRecs = 1;
+  bytes[14] = 7; bytes[25] = 3;
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child)
+       == ClassicHfsVisitChild && child == 3, "follow validated index child");
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 1, 0, key, compare_test_keys, &slot, 4, &child)
+       == ClassicHfsInvalidSearch, "reject repeated height on cyclic descent");
+  offsets[1] = 24;
+  must(ClassicHfsLookupLevel(bytes, &node, offsets, 2, 0, key, compare_test_keys, &slot, 4, &child)
+       == ClassicHfsInvalidSearch, "reject truncated child pointer");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

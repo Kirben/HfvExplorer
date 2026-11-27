@@ -45,7 +45,7 @@ int bt_getnode(node *np)
       return -1;
     }
 
-  if (bt->map && ! ClassicHfsBitIsSet(bt->map, np->nnum))
+  if (bt->map && (np->nnum / 8 >= bt->mapsz || !ClassicHfsBitIsSet(bt->map, np->nnum)))
     {
       ERROR(EIO, "read unallocated b*-tree node");
       return -1;
@@ -630,38 +630,25 @@ int bt_search(btree *bt, unsigned char *key, node *np)
       return 0;
     }
 
-  while (1)
-    {
-      int found;
-      unsigned char *rec;
-
-      if (bt_getnode(np) < 0)
-	return -1;
-
-      found = n_search(np, key);
-
-      switch ((unsigned char) np->nd.ndType)
-	{
-	case ndIndxNode:
-	  if (np->rnum < 0)
-	    {
-	      ERROR(ENOENT, 0);
-	      return 0;
-	    }
-
-	  rec = HFS_NODEREC(*np, np->rnum);
-	  np->nnum = ClassicHfsRead32(HFS_RECDATA(rec));
-	  break;
-
-	case ndLeafNode:
-	  if (! found)
-	    ERROR(ENOENT, 0);
-
-	  return found;
-
-	default:
-	  ERROR(EIO, "unexpected b*-tree node");
-	  return -1;
-	}
+  unsigned height = bt->hdr.bthDepth;
+  for (;;) {
+    uint32_t child;
+    if (bt_getnode(np) < 0)
+      return -1;
+    int result = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
+                                       bt == &bt->f.vol->cat, key, bt->compare,
+                                       &np->rnum, bt->hdr.bthNNodes, &child);
+    if (result == ClassicHfsInvalidSearch) {
+      ERROR(EIO, "invalid classic HFS B-tree search path");
+      return -1;
     }
+    if (result == ClassicHfsMissingKey) {
+      ERROR(ENOENT, 0);
+      return 0;
+    }
+    if (result == ClassicHfsFoundKey)
+      return 1;
+    np->nnum = child;
+    --height;
+  }
 }
