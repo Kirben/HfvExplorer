@@ -23,7 +23,7 @@ static inline int ClassicHfsLoadVolumeBitmap(hfsvol *volume)
         return -1;
     }
     for (int i = 0; i < sectors; ++i) {
-        if (b_readlb(volume, volume->mdb.drVBMSt + i, bitmap + i) < 0) {
+        if (ClassicHfsReadSector(volume, volume->mdb.drVBMSt + i, bitmap + i) < 0) {
             free(bitmap);
             return -1;
         }
@@ -42,7 +42,7 @@ static inline int ClassicHfsFlushVolumeBitmap(hfsvol *volume)
         return -1;
     }
     for (int i = 0; i < sectors; ++i) {
-        if (b_writelb(volume, volume->mdb.drVBMSt + i, volume->vbm + i) < 0)
+        if (ClassicHfsWriteSector(volume, volume->mdb.drVBMSt + i, volume->vbm + i) < 0)
             return -1;
     }
     volume->flags &= ~HFS_UPDATE_VBM;

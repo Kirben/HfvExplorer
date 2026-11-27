@@ -681,7 +681,7 @@ int hfs_format(char *path, int pnum, char *vname)
       unsigned long low, high, mid;
       block b;
 
-      for (low = 0, high = 2879; b_readlb(&vol, high, &b) >= 0; ) {
+      for (low = 0, high = 2879; ClassicHfsReadSector(&vol, high, &b) >= 0; ) {
         low = high;
         if (high == 0xffffffffUL) { close(vol.fd); ERROR(EFBIG, "image exceeds classic HFS sector range"); return -1; }
         high = high > 0xffffffffUL / 2 ? 0xffffffffUL : high * 2;
@@ -691,7 +691,7 @@ int hfs_format(char *path, int pnum, char *vname)
 	{
 	  mid = low + (high - low) / 2;
 
-	  if (b_readlb(&vol, mid, &b) < 0)
+	  if (ClassicHfsReadSector(&vol, mid, &b) < 0)
 	    high = mid;
 	  else
 	    low = mid;
@@ -747,7 +747,7 @@ int hfs_format(char *path, int pnum, char *vname)
       /* write boot blocks */
 
       memset(&b, 0, sizeof(b));
-      if (b_writelb(&vol, 0, &b) < 0 || b_writelb(&vol, 1, &b) < 0)
+      if (ClassicHfsWriteSector(&vol, 0, &b) < 0 || ClassicHfsWriteSector(&vol, 1, &b) < 0)
 	result = -1;
     }
 

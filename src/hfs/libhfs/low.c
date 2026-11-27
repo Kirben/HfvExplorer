@@ -76,7 +76,7 @@ int l_readblock0(hfsvol *vol)
   unsigned char *ptr = b;
   Block0 rec;
 
-  if (b_readlb(vol, 0, &b) < 0)
+  if (ClassicHfsReadSector(vol, 0, &b) < 0)
     return -1;
 
   rec.sbSig = ClassicHfsTake16(&ptr);
@@ -140,7 +140,7 @@ int l_readpm(hfsvol *vol)
 
   while (1)
     {
-      if (b_readlb(vol, bnum, &b) < 0)
+      if (ClassicHfsReadSector(vol, bnum, &b) < 0)
 	return -1;
 
       ptr = b;
@@ -220,7 +220,7 @@ int l_readmdb(hfsvol *vol)
 {
   block b;
   MDB *mdb = &vol->mdb;
-  if (b_readlb(vol, 2, &b) < 0)
+  if (ClassicHfsReadSector(vol, 2, &b) < 0)
     return -1;
 
   ClassicHfsDecodeMasterDirectory(b, mdb);
@@ -255,12 +255,12 @@ int l_writemdb(hfsvol *vol)
 
   ClassicHfsEncodeMasterDirectory(b, mdb);
 
-  if (b_writelb(vol, 2, &b) < 0)
+  if (ClassicHfsWriteSector(vol, 2, &b) < 0)
     return -1;
 
   if (vol->flags & HFS_UPDATE_ALTMDB)
     {
-      if (b_writelb(vol, vol->vlen - 2, &b) < 0)
+      if (ClassicHfsWriteSector(vol, vol->vlen - 2, &b) < 0)
 	return -1;
     }
 

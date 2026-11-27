@@ -399,51 +399,49 @@ int b_finish(hfsvol *vol)
   return result;
 }
 
-/*
- * NAME:	block->readlb()
- * DESCRIPTION:	read a logical block from a volume (or from the cache)
- */
-int b_readlb(hfsvol *vol, unsigned long bnum, block *bp)
+static int transfer_logical_sector(hfsvol *volume, unsigned long sector, block *bytes, int writing)
 {
-  int found;
-  bucket *b;
-  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Reopen/repair HFS after rollback failure");return -1;}
+    hfv_offset_t offset;
+    bucket *entry;
+    int found;
 
-  if (vol->cache == 0)
-    return getblock(vol, bnum, bp);
+    if (volume->flags & HFS_WRITE_FAILED) {
+        ERROR(EIO, "Reopen/repair HFS after rollback failure");
+        return -1;
+    }
+    if (writing && (volume->flags & HFS_READONLY)) {
+        ERROR(EROFS, "classic HFS volume is read-only");
+        return -1;
+    }
+    if (!ClassicHfsSectorOffset(volume->vstart, volume->vlen, sector, writing, &offset)) {
+        ERROR(EIO, "logical sector outside classic HFS volume");
+        return -1;
+    }
+    if (!volume->cache)
+        return writing ? putblock(volume, sector, bytes) : getblock(volume, sector, bytes);
 
-  found = ClassicHfsFindCacheEntry(vol->cache, bnum, &b, store_cached_sector, vol);
-  if (found < 0)
-    return -1;
-
-  if (! found &&
-      getbucket(vol, b) < 0)
-    return -1;
-
-  memcpy(bp, b->data, HFS_BLOCKSZ);
-
-  return 0;
+    found = ClassicHfsFindCacheEntry(volume->cache, sector, &entry, store_cached_sector, volume);
+    if (found < 0)
+        return -1;
+    if (writing) {
+        memcpy(entry->data, bytes, HFS_BLOCKSZ);
+        entry->flags |= HFS_BLOCK_INUSE | HFS_BLOCK_DIRTY;
+    } else {
+        if (!found && getbucket(volume, entry) < 0)
+            return -1;
+        memcpy(bytes, entry->data, HFS_BLOCKSZ);
+    }
+    return 0;
 }
 
-/*
- * NAME:	block->writelb()
- * DESCRIPTION:	write a logical block to a volume (or to the cache)
- */
-int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
+int ClassicHfsReadSector(hfsvol *volume, unsigned long sector, block *bytes)
 {
-  bucket *b;
-  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
+    return transfer_logical_sector(volume, sector, bytes, 0);
+}
 
-  if (vol->cache == 0)
-    return putblock(vol, bnum, bp);
-
-  if (ClassicHfsFindCacheEntry(vol->cache, bnum, &b, store_cached_sector, vol) < 0)
-    return -1;
-
-  memcpy(b->data, bp, HFS_BLOCKSZ);
-  b->flags |= HFS_BLOCK_INUSE | HFS_BLOCK_DIRTY;
-
-  return 0;
+int ClassicHfsWriteSector(hfsvol *volume, unsigned long sector, block *bytes)
+{
+    return transfer_logical_sector(volume, sector, bytes, 1);
 }
 
 int ClassicHfsTransferAllocationSector(hfsvol *volume, unsigned number, unsigned index,
@@ -464,8 +462,8 @@ int ClassicHfsTransferAllocationSector(hfsvol *volume, unsigned number, unsigned
         return -1;
     }
     if (!writing)
-        return b_readlb(volume, sector, bytes);
-    if (b_writelb(volume, sector, bytes) < 0)
+        return ClassicHfsReadSector(volume, sector, bytes);
+    if (ClassicHfsWriteSector(volume, sector, bytes) < 0)
         return -1;
     volume->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
     volume->mdb.drLsMod = ClassicHfsFromUnixSeconds(time(0));

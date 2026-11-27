@@ -171,6 +171,15 @@ int main(int argc,char**argv){
         hfsvol volume = {0};
         block sector = {0}, bitmap = {0x80};
         volume.lpa = 1; volume.vlen = 8;
+        {
+            bcache before;
+            must(b_init(&volume) == 0, "initialize logical sector cache");
+            memcpy(&before, volume.cache, sizeof(before));
+            must(ClassicHfsWriteSector(&volume, 8, &sector) < 0 && errno == EIO &&
+                 ClassicHfsReadSector(&volume, 8, &sector) < 0 && errno == EIO &&
+                 !memcmp(&before, volume.cache, sizeof(before)), "reject outside sector before cache lookup");
+            must(b_finish(&volume) == 0, "rejected sector leaves nothing to flush");
+        }
         volume.mdb.drAlBlSt = 4; volume.mdb.drNmAlBlks = 1;
         volume.mdb.drAtrb = HFS_ATRB_UMOUNTED;
         must(ClassicHfsTransferAllocationSector(&volume, 0, 0, &sector, 1) < 0 && errno == EIO &&

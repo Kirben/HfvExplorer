@@ -21,8 +21,8 @@ int b_init(hfsvol *);
 int b_flush(hfsvol *);
 int b_finish(hfsvol *);
 
-int b_readlb(hfsvol *, unsigned long, block *);
-int b_writelb(hfsvol *, unsigned long, block *);
+int ClassicHfsReadSector(hfsvol *, unsigned long, block *);
+int ClassicHfsWriteSector(hfsvol *, unsigned long, block *);
 
 int ClassicHfsTransferAllocationSector(hfsvol *, unsigned, unsigned, block *, int writing);
 
