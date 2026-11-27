@@ -103,62 +103,77 @@ int ClassicHfsReserveTreeSpace(btree *tree, unsigned records)
     return 0;
 }
 
-/*
- * NAME:	btree->insertx()
- * DESCRIPTION:	recursively locate a node and insert a record
- */
-static int bt_insertx(node *np, unsigned height, unsigned char *record, int *reclen)
+// Keep the root in the caller's storage for subsequent root split or collapse.
+static int ClassicHfsReadMutationPath(node *root, unsigned depth, unsigned char *key,
+                                      ClassicHfsSearchPurpose purpose, node **children)
 {
-  node child;
-  unsigned char *rec;
-
-  uint32_t next;
-  int route = ClassicHfsLookupLevel(np->data, &np->nd, np->roff, height,
-                                    np->bt == &np->bt->f.vol->cat, record, np->bt->compare,
-                                    &np->rnum, np->bt->hdr.bthNNodes, &next, ClassicHfsInsert);
-  if (route == ClassicHfsInvalidSearch) {
-    ERROR(EIO, "invalid classic HFS B-tree mutation path");
+    *children = NULL;
+    if (!depth || depth > INT8_MAX) {
+        ERROR(EIO, "invalid classic HFS mutation depth");
+        return -1;
+    }
+    if (depth > 1) {
+        *children = (node *)calloc(depth - 1, sizeof(node));
+        if (!*children) {
+            ERROR(ENOMEM, "cannot allocate classic HFS mutation path");
+            return -1;
+        }
+    }
+    node *current = root;
+    btree *tree = root->bt;
+    for (unsigned level = 0; level < depth; ++level) {
+        uint32_t child;
+        int route = ClassicHfsLookupLevel(current->data, &current->nd, current->roff, depth - level,
+                                          tree == &tree->f.vol->cat, key, tree->compare, &current->rnum,
+                                          tree->hdr.bthNNodes, &child, purpose);
+        if (level + 1 == depth) {
+            if (route == (purpose == ClassicHfsInsert ? ClassicHfsMissingKey : ClassicHfsFoundKey))
+                return 0;
+            if (route == ClassicHfsFoundKey) {
+                ERROR(EIO, "classic HFS record already exists");
+                break;
+            }
+        }
+        if (route != ClassicHfsVisitChild || level + 1 == depth) {
+            ERROR(EIO, "invalid classic HFS mutation path or missing key");
+            break;
+        }
+        current = &(*children)[level];
+        current->bt = tree;
+        current->nnum = child;
+        if (bt_getnode(current) < 0)
+            break;
+    }
+    free(*children);
+    *children = NULL;
     return -1;
-  }
-  if (route == ClassicHfsFoundKey)
-    {
-      ERROR(EIO, "b*-tree record already exists");
-      return -1;
+}
+
+static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *record, int *length)
+{
+    node *children;
+    if (ClassicHfsReadMutationPath(root, depth, record, ClassicHfsInsert, &children) < 0)
+        return -1;
+    unsigned level = depth - 1;
+    node *current = level ? &children[level - 1] : root;
+    int result = n_insert(current, record, length);
+    while (level && result == 0) {
+        --level;
+        node *parent = level ? &children[level - 1] : root;
+        if (parent->rnum < 0) {
+            result = n_index(current, HFS_NODEREC(*parent, 0), NULL);
+            if (result < 0)
+                break;
+            parent->rnum = 0;
+            if (!*length)
+                result = bt_putnode(parent);
+        }
+        if (*length)
+            result = n_insert(parent, record, length);
+        current = parent;
     }
-
-  switch ((unsigned char) np->nd.ndType)
-    {
-    case ndIndxNode:
-      if (np->rnum < 0)
-	rec = HFS_NODEREC(*np, 0);
-      else
-	rec = HFS_NODEREC(*np, np->rnum);
-
-      child.bt   = np->bt;
-      child.nnum = next;
-
-      if (bt_getnode(&child) < 0 ||
-	  bt_insertx(&child, height - 1, record, reclen) < 0)
-	return -1;
-
-      if (np->rnum < 0)
-	{
-	  if (n_index(&child, rec, 0) < 0)
-	    return -1;
-	  np->rnum = 0; /* the split separator follows the updated first child */
-	  if (*reclen == 0)
-	    return bt_putnode(np);
-	}
-
-      return *reclen ? n_insert(np, record, reclen) : 0;
-
-    case ndLeafNode:
-      return n_insert(np, record, reclen);
-
-    default:
-      ERROR(EIO, "unexpected b*-tree node");
-      return -1;
-    }
+    free(children);
+    return result;
 }
 
 /*
@@ -194,7 +209,7 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
 	return -1;
     }
 
-  if (bt_insertx(&root, bt->hdr.bthDepth, record, &reclen) < 0)
+  if (ClassicHfsInsertAlongPath(&root, bt->hdr.bthDepth, record, &reclen) < 0)
     return -1;
 
   if (reclen)
@@ -240,36 +255,11 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
 // slot until the child's separator has been updated or removed.
 static int ClassicHfsDeleteAlongPath(node *root, unsigned depth, unsigned char *key)
 {
-    if (!depth || depth > INT8_MAX) {
-        ERROR(EIO, "invalid classic HFS deletion depth");
+    node *children;
+    if (ClassicHfsReadMutationPath(root, depth, key, ClassicHfsDelete, &children) < 0)
         return -1;
-    }
-    node *children = depth > 1 ? (node *)calloc(depth - 1, sizeof(node)) : NULL;
-    if (depth > 1 && !children) {
-        ERROR(ENOMEM, "cannot allocate classic HFS deletion path");
-        return -1;
-    }
-    btree *tree = root->bt;
-    node *current = root;
+    node *current = depth > 1 ? &children[depth - 2] : root;
     int result = -1;
-    for (unsigned level = 0; level < depth; ++level) {
-        uint32_t child;
-        int route = ClassicHfsLookupLevel(current->data, &current->nd, current->roff, depth - level,
-                                          tree == &tree->f.vol->cat, key, tree->compare, &current->rnum,
-                                          tree->hdr.bthNNodes, &child, ClassicHfsDelete);
-        if (route == ClassicHfsFoundKey)
-            break;
-        if (route != ClassicHfsVisitChild || level + 1 >= depth) {
-            ERROR(EIO, "invalid classic HFS deletion path or missing key");
-            goto done;
-        }
-        current = &children[level];
-        current->bt = tree;
-        current->nnum = child;
-        if (bt_getnode(current) < 0)
-            goto done;
-    }
-
     unsigned char rootSeparator[HFS_MAXRECLEN];
     int removeRecord = 1;
     for (unsigned height = 1; height <= depth; ++height) {
