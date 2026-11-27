@@ -359,7 +359,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
             vol->flags |= HFS_READONLY;
 	  /* volume was not cleanly unmounted; scavenge free-space */
 
-	  if (v_scavenge(vol) < 0)
+	  if (ClassicHfsRecoverAllocationBitmap(vol) < 0)
 	    {
 	      close(vol->fd);
 	      v_destruct(vol);

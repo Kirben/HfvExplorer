@@ -14,7 +14,8 @@
     <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_READONLY_CD;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
     <Link><SubSystem>Console</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
-<ItemGroup><ClCompile Include="..\src\hfs\ClassicHfsTransaction.c" />
+<ItemGroup><ClCompile Include="..\src\hfs\ClassicHfsAllocationRecovery.c" />
+<ClCompile Include="..\src\hfs\ClassicHfsTransaction.c" />
     <ClCompile Include="..\src\hfs\ClassicHfsVolumeIO.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTreeMutation.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTime.c" />

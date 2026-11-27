@@ -61,23 +61,23 @@ void verify(hfsvol* volume) {
 }
 void checkRecovery(const CString& path, const std::vector<BYTE>& seed, FILE* report) {
  ExtDataRec extents={{0,1},{126,2},{0,0}};
- require(v_recovery_extents_valid(&extents,128),"recovery rejected an extent ending at the bitmap boundary");
+ require(ClassicHfsRecoveryExtentsValid(&extents,128),"recovery rejected an extent ending at the bitmap boundary");
  extents[1].xdrNumABlks=3;
- require(!v_recovery_extents_valid(&extents,128),"recovery accepted an extent crossing the bitmap boundary");
+ require(!ClassicHfsRecoveryExtentsValid(&extents,128),"recovery accepted an extent crossing the bitmap boundary");
  extents[1].xdrStABN=128;extents[1].xdrNumABlks=1;
- require(!v_recovery_extents_valid(&extents,128),"recovery accepted an extent starting beyond the bitmap");
+ require(!ClassicHfsRecoveryExtentsValid(&extents,128),"recovery accepted an extent starting beyond the bitmap");
  extents[1].xdrNumABlks=0;
- require(v_recovery_extents_valid(&extents,128),"recovery rejected an unused extent descriptor");
+ require(ClassicHfsRecoveryExtentsValid(&extents,128),"recovery rejected an unused extent descriptor");
 
  node first{},second{};
  first.nnum=1;first.nd.ndType=static_cast<SignedByte>(ndLeafNode);first.nd.ndNHeight=1;
  second=first;second.nnum=2;second.nd.ndBLink=first.nnum;
- require(v_recovery_leaf_valid(&first,0)&&v_recovery_leaf_valid(&second,first.nnum),
+ require(ClassicHfsRecoveryLeafValid(&first,0)&&ClassicHfsRecoveryLeafValid(&second,first.nnum),
          "recovery rejected a valid sequence of leaf predecessors");
- require(!v_recovery_leaf_valid(&first,first.nnum)&&!v_recovery_leaf_valid(&first,second.nnum)&&
-         !v_recovery_leaf_valid(&second,second.nnum),"recovery accepted a repeated leaf");
+ require(!ClassicHfsRecoveryLeafValid(&first,first.nnum)&&!ClassicHfsRecoveryLeafValid(&first,second.nnum)&&
+         !ClassicHfsRecoveryLeafValid(&second,second.nnum),"recovery accepted a repeated leaf");
  second.nd.ndType=ndIndxNode;
- require(!v_recovery_leaf_valid(&second,first.nnum),"recovery accepted an index node as a leaf");
+ require(!ClassicHfsRecoveryLeafValid(&second,first.nnum),"recovery accepted an index node as a leaf");
 
  // Mark a disposable fragmented image dirty, then reopen a copy of that state.
  save(path,seed);

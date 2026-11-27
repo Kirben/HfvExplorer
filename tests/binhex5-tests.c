@@ -200,6 +200,20 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 int main(int argc,char**argv){
     {
         hfsvol volume = {0};
+        block bitmap = {0x01}, original;
+        memcpy(original, bitmap, sizeof(bitmap));
+        volume.vbm = &bitmap;
+        volume.mdb.drNmAlBlks = 8;
+        volume.mdb.drFreeBks = 7;
+        volume.mdb.drXTExtRec[0].xdrNumABlks = 1;
+        volume.mdb.drCTExtRec[0].xdrStABN = 8;
+        volume.mdb.drCTExtRec[0].xdrNumABlks = 1;
+        must(ClassicHfsRecoverAllocationBitmap(&volume) < 0 && volume.vbm == &bitmap &&
+             !memcmp(bitmap, original, sizeof(bitmap)) && !volume.flags && volume.mdb.drFreeBks == 7,
+             "failed catalog extent check discards earlier overflow extent bitmap repairs");
+    }
+    {
+        hfsvol volume = {0};
         volume.mdb.drNxtCNID = 15;
         must(ClassicHfsCreateDirectoryRecords(&volume, HFS_CNID_ROOTDIR, "Rejected") < 0 &&
              errno == EIO && !volume.flags, "reserved folder ID rejected before tree reservation");

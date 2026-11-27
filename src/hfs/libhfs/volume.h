@@ -38,6 +38,6 @@ int ClassicHfsAdjustEntryCount(hfsvol *, long, int, int);
 int ClassicHfsCheckNewCatalogId(hfsvol *, int);
 int ClassicHfsCreateDirectoryRecords(hfsvol *, long, char *);
 
-int v_recovery_extents_valid(const ExtDataRec *, unsigned int blocks);
-int v_recovery_leaf_valid(const node *, unsigned long previous);
-int v_scavenge(hfsvol *);
+int ClassicHfsRecoveryExtentsValid(const ExtDataRec *, unsigned int blocks);
+int ClassicHfsRecoveryLeafValid(const node *, unsigned long previous);
+int ClassicHfsRecoverAllocationBitmap(hfsvol *);
