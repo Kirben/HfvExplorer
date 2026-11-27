@@ -3933,12 +3933,12 @@ void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
                 inputs.push_back(std::move(item));
             };
             if(recursive)select(u"Tree");else{select(lower);select(upper);}
-            if(kind<2&&!cut){
+            if(kind<2){
                 auto copy=Submit(OrdinaryCopy{inputs,Native(target)});
                 Conflict(copy);
                 const auto preview=copy.Job()->conflictState();
-                Check(preview.kind==Storage::CopyPrompt::ClassicArchiveNames,
-                      "Classic name collision reached overwrite handling");
+                const auto expected=cut?Storage::CopyPrompt::ClassicArchiveMoveNames:Storage::CopyPrompt::ClassicArchiveNames;
+                Check(preview.kind==expected,"Classic name collision reached overwrite handling");
                 copy.Job()->resolve(preview.id,Storage::ConflictChoice::Cancel);
                 Wait(copy);
                 Check(copy.Job()->result().outcome==Storage::Outcome::Cancelled&&!copy.Snapshot().complete,
@@ -3958,7 +3958,7 @@ void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
             Completion completion;
             {
                 auto result=ExecuteInWorker(OrdinaryCopy{inputs,Native(target)},job,completion);
-                const std::string expected=kind<2?"collide on the classic HFS destination":"collide on the MFS destination";
+                const std::string expected="collide on the MFS destination";
                 Check(result.outcome==Storage::Outcome::Failed&&!result.partial&&!result.moved&&
                       !completion.complete&&!prompts&&!copying&&result.message.find(expected)!=std::string::npos,
                       result.message.empty()?"Collision reached overwrite or move handling":result.message.c_str());
@@ -3979,7 +3979,7 @@ void TestClassicAndMfsCopyNameCollisions(const std::string& root,FILE* report)
     second.name=upper;
     second.version=1;
     ValidateMfsCopyNames({first,second});
-    fprintf(report,"PASS: classic HFS previews colliding copy names and refuses colliding Cut/Paste before writes; raw/DC42 MFS reject collisions within each version.\n");
+    fprintf(report,"PASS: classic HFS previews colliding Copy and Cut names and preserves both images on cancellation; raw/DC42 MFS reject collisions within each version.\n");
 }
 
 void TestHfsxToApfsNameCollisions(const std::string& root,FILE* report)
