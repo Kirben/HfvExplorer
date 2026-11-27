@@ -684,205 +684,6 @@ int hfs_fsetattr(hfsfile *file, hfsdirent *ent)
  * NAME:	hfs->rename()
  * DESCRIPTION:	change the name of and/or move a file or directory
  */
-static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
-{
-  CatDataRec src, dst;
-  long srcid, dstid;
-  char srcname[HFS_MAX_FLEN + 1], dstname[HFS_MAX_FLEN + 1];
-  unsigned char record[HFS_CATRECMAXLEN];
-  int found, isdir, moving, reclen;
-  node n;
-
-  if (ClassicHfsCurrentVolume(&vol) < 0 ||
-      ClassicHfsResolvePath(vol, srcpath, &src, &srcid, srcname, 0) <= 0)
-    return -1;
-
-  isdir  = (src.cdrType == cdrDirRec);
-
-  found = ClassicHfsResolvePath(vol, dstpath, &dst, &dstid, dstname, 0);
-  if (found < 0)
-    return -1;
-
-  if (dstid == 0)
-    {
-      ERROR(ENOENT, "bad destination path");
-      return -1;
-    }
-
-  if (found &&
-      dst.cdrType == cdrDirRec &&
-      dst.u.dir.dirDirID != src.u.dir.dirDirID)
-    {
-      dstid = dst.u.dir.dirDirID;
-      strcpy(dstname, srcname);
-
-      found = ClassicHfsFindCatalogEntry(vol, dstid, dstname, 0, 0, 0);
-      if (found < 0)
-	return -1;
-    }
-
-  moving = (srcid != dstid);
-
-  if (found)
-    {
-      char *ptr;
-
-      ptr = strrchr(dstpath, ':');
-      if (ptr == 0)
-	ptr = dstpath;
-      else
-	++ptr;
-
-      if (*ptr)
-	strcpy(dstname, ptr);
-
-      if (! moving && strcmp(srcname, dstname) == 0)
-	return 0;  /* source and destination are the same */
-
-      if (moving || ClassicHfsCompareNames(srcname, dstname))
-	{
-	  ERROR(EEXIST, "can't use destination name");
-	  return -1;
-	}
-    }
-
-  /* can't move anything into the root directory's parent */
-
-  if (moving && dstid == HFS_CNID_ROOTPAR)
-    {
-      ERROR(EINVAL, "can't move above root directory");
-      return -1;
-    }
-
-  if (moving && isdir)
-    {
-      long id;
-
-      /* can't move root directory anywhere */
-
-      if (src.u.dir.dirDirID == HFS_CNID_ROOTDIR)
-	{
-	  ERROR(EINVAL, "can't move root directory");
-	  return -1;
-	}
-
-      /* make sure we aren't trying to move a directory inside itself */
-
-      for (id = dstid; id != HFS_CNID_ROOTDIR; id = dst.u.dthd.thdParID)
-	{
-	  if (id == src.u.dir.dirDirID)
-	    {
-	      ERROR(EINVAL, "can't move directory inside itself");
-	      return -1;
-	    }
-
-	  if (v_getdthread(vol, id, &dst, 0) <= 0)
-	    return -1;
-	}
-    }
-
-  if (vol->flags & HFS_READONLY)
-    {
-      ERROR(EROFS, 0);
-      return -1;
-    }
-
-  /* Open handles retain their catalog key. Do not orphan pending updates
-     by changing that key underneath an active file. */
-  if (!isdir) {
-    hfsfile *opened;
-    for (opened = vol->files; opened; opened = opened->next)
-      if (opened->cat.u.fil.filFlNum == src.u.fil.filFlNum) {
-        ERROR(EBUSY, "file is open; close it before renaming");
-        return -1;
-      }
-  }
-
-  /* A longer key can split the destination leaf (and its ancestors).
-     Reserve those nodes before removing the only catalog link to the forks. */
-  if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
-    return -1;
-
-  /* change volume name */
-
-  if (dstid == HFS_CNID_ROOTPAR)
-    {
-      if (strlen(dstname) > HFS_MAX_VLEN)
-	{
-	  ERROR(ENAMETOOLONG, 0);
-	  return -1;
-	}
-
-      strcpy(vol->mdb.drVN, dstname);
-      vol->flags |= HFS_UPDATE_MDB;
-    }
-
-  /* remove source record */
-
-  if (ClassicHfsWriteCatalogKey(record, srcid, srcname) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-
-  if (ClassicHfsDeleteTreeKey(&vol->cat, record) < 0)
-    return -1;
-
-  /* insert destination record */
-
-  if ((reclen = ClassicHfsWriteCatalogKey(record, dstid, dstname)) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-  {
-    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &src);
-    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
-    reclen += size;
-  }
-
-  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0)
-    return -1;
-
-  /* update thread record */
-
-  if (isdir)
-    {
-      if (v_getdthread(vol, src.u.dir.dirDirID, &dst, &n) <= 0)
-	return -1;
-
-      dst.u.dthd.thdParID = dstid;
-      strcpy(dst.u.dthd.thdCName, dstname);
-
-      if (ClassicHfsStoreCatalogEntry(&dst, &n) < 0)
-	return -1;
-    }
-  else
-    {
-      found = v_getfthread(vol, src.u.fil.filFlNum, &dst, &n);
-      if (found < 0)
-	return -1;
-
-      if (found)
-	{
-	  dst.u.dthd.thdParID = dstid;
-	  strcpy(dst.u.dthd.thdCName, dstname);
-
-	  if (ClassicHfsStoreCatalogEntry(&dst, &n) < 0)
-	    return -1;
-	}
-    }
-
-  /* update directory valences */
-
-  if (moving)
-    {
-      if (ClassicHfsAdjustEntryCount(vol, srcid, isdir, -1) < 0 ||
-	  ClassicHfsAdjustEntryCount(vol, dstid, isdir,  1) < 0)
-	return -1;
-    }
-
-  return 0;
-}
-
 /* Resolve the default mount, then validate the path before starting undo. */
 static int mutation_source(hfsvol **vol,char *path) {
  CatDataRec data;int found;
@@ -894,7 +695,7 @@ static int mutation_source(hfsvol **vol,char *path) {
 int hfs_rename(hfsvol *vol,char *source,char *destination) {
  int result;
  if(mutation_source(&vol,source)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
- result=hfs_rename_impl(vol,source,destination);return ClassicHfsEndTransaction(vol,result);
+ result=ClassicHfsRenameCatalogPath(vol,source,destination);return ClassicHfsEndTransaction(vol,result);
 }
 
 int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
@@ -904,7 +705,7 @@ int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
  /* This is a leaf rename, never an implicit move into an existing folder. */
  if(strcmp(path,destination)&&hfs_stat(vol,destination,&target)==0&&target.cnid!=source.cnid){ERROR(EEXIST,"Properties rename destination already exists");return -1;}
  if(ClassicHfsBeginTransaction(vol)<0)return -1;
- result=strcmp(path,destination)?hfs_rename_impl(vol,path,destination):0;
+ result=strcmp(path,destination)?ClassicHfsRenameCatalogPath(vol,path,destination):0;
  if(result==0)result=hfs_setattr_impl(vol,destination,entry);
  return ClassicHfsEndTransaction(vol,result);
 }

@@ -35,6 +35,7 @@ int ClassicHfsCurrentVolume(hfsvol **);
 void ClassicHfsReleaseVolume(hfsvol *);
 int ClassicHfsFlushVolumeMetadata(hfsvol *, int);
 
+int ClassicHfsRenameCatalogPath(hfsvol *, char *, char *);
 int ClassicHfsAdjustEntryCount(hfsvol *, long, int, int);
 int ClassicHfsCheckNewCatalogId(hfsvol *, int);
 int ClassicHfsCreateDirectoryRecords(hfsvol *, long, char *);

@@ -714,3 +714,196 @@ int hfs_rmdir(hfsvol *volume, char *path)
 {
     return remove_catalog_path(volume, path, 1);
 }
+
+int ClassicHfsRenameCatalogPath(hfsvol *vol, char *srcpath, char *dstpath)
+{
+  CatDataRec src, dst;
+  long srcid, dstid;
+  char srcname[HFS_MAX_FLEN + 1], dstname[HFS_MAX_FLEN + 1];
+  unsigned char record[HFS_CATRECMAXLEN];
+  int found, isdir, moving, reclen;
+  node n;
+
+  if (ClassicHfsCurrentVolume(&vol) < 0 ||
+      ClassicHfsResolvePath(vol, srcpath, &src, &srcid, srcname, 0) <= 0)
+    return -1;
+
+  isdir  = (src.cdrType == cdrDirRec);
+
+  found = ClassicHfsResolvePath(vol, dstpath, &dst, &dstid, dstname, 0);
+  if (found < 0)
+    return -1;
+
+  if (dstid == 0)
+    {
+      ERROR(ENOENT, "bad destination path");
+      return -1;
+    }
+
+  if (found &&
+      dst.cdrType == cdrDirRec &&
+      (!isdir || dst.u.dir.dirDirID != src.u.dir.dirDirID))
+    {
+      dstid = dst.u.dir.dirDirID;
+      strcpy(dstname, srcname);
+
+      found = ClassicHfsFindCatalogEntry(vol, dstid, dstname, 0, 0, 0);
+      if (found < 0)
+	return -1;
+    }
+
+  moving = (srcid != dstid);
+
+  if (found)
+    {
+      char *ptr;
+
+      ptr = strrchr(dstpath, ':');
+      if (ptr == 0)
+	ptr = dstpath;
+      else
+	++ptr;
+
+      if (*ptr)
+	strcpy(dstname, ptr);
+
+      if (! moving && strcmp(srcname, dstname) == 0)
+	return 0;  /* source and destination are the same */
+
+      if (moving || ClassicHfsCompareNames(srcname, dstname))
+	{
+	  ERROR(EEXIST, "can't use destination name");
+	  return -1;
+	}
+    }
+
+  /* can't move anything into the root directory's parent */
+
+  if (moving && dstid == HFS_CNID_ROOTPAR)
+    {
+      ERROR(EINVAL, "can't move above root directory");
+      return -1;
+    }
+
+  if (moving && isdir)
+    {
+      /* can't move root directory anywhere */
+
+      if (src.u.dir.dirDirID == HFS_CNID_ROOTDIR)
+	{
+	  ERROR(EINVAL, "can't move root directory");
+	  return -1;
+	}
+
+      /* make sure we aren't trying to move a directory inside itself */
+
+      long id = dstid;
+      unsigned long remaining = vol->cat.hdr.bthNRecs;
+      while (id != HFS_CNID_ROOTDIR) {
+        if (id == src.u.dir.dirDirID) {
+          ERROR(EINVAL, "cannot move a directory inside itself");
+          return -1;
+        }
+        if (!remaining--) {
+          ERROR(EIO, "cycle in classic HFS destination ancestry");
+          return -1;
+        }
+        CatDataRec parentEntry;
+        if (ClassicHfsFindCatalogThread(vol, id, &dst, NULL, cdrThdRec) != 1 ||
+            ClassicHfsFindCatalogEntry(vol, dst.u.dthd.thdParID, dst.u.dthd.thdCName,
+                                       &parentEntry, NULL, NULL) != 1 ||
+            parentEntry.cdrType != cdrDirRec || parentEntry.u.dir.dirDirID != id) {
+          ERROR(EIO, "invalid classic HFS destination ancestry");
+          return -1;
+        }
+        id = dst.u.dthd.thdParID;
+      }
+    }
+
+  if (vol->flags & HFS_READONLY)
+    {
+      ERROR(EROFS, 0);
+      return -1;
+    }
+
+  /* Open handles retain their catalog key. Do not orphan pending updates
+     by changing that key underneath an active file. */
+  if (!isdir) {
+    hfsfile *opened;
+    for (opened = vol->files; opened; opened = opened->next)
+      if (opened->cat.u.fil.filFlNum == src.u.fil.filFlNum) {
+        ERROR(EBUSY, "file is open; close it before renaming");
+        return -1;
+      }
+  }
+
+  /* A longer key can split the destination leaf (and its ancestors).
+     Reserve those nodes before removing the only catalog link to the forks. */
+  if (ClassicHfsReserveTreeSpace(&vol->cat, 1) < 0)
+    return -1;
+
+  /* change volume name */
+
+  if (dstid == HFS_CNID_ROOTPAR)
+    {
+      if (strlen(dstname) > HFS_MAX_VLEN)
+	{
+	  ERROR(ENAMETOOLONG, 0);
+	  return -1;
+	}
+
+      strcpy(vol->mdb.drVN, dstname);
+      vol->flags |= HFS_UPDATE_MDB;
+    }
+
+  /* remove source record */
+
+  if (ClassicHfsWriteCatalogKey(record, srcid, srcname) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
+
+  if (ClassicHfsDeleteTreeKey(&vol->cat, record) < 0)
+    return -1;
+
+  /* insert destination record */
+
+  if ((reclen = ClassicHfsWriteCatalogKey(record, dstid, dstname)) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
+  {
+    unsigned size = ClassicHfsEncodeCatalogRecord(record + reclen, sizeof(record) - reclen, &src);
+    if (!size) { ERROR(EIO, "invalid classic HFS catalog record size"); return -1; }
+    reclen += size;
+  }
+
+  if (ClassicHfsInsertTreeRecord(&vol->cat, record, reclen) < 0)
+    return -1;
+
+  long entryId = isdir ? src.u.dir.dirDirID : src.u.fil.filFlNum;
+  found = ClassicHfsFindCatalogThread(vol, entryId, &dst, &n, isdir ? cdrThdRec : cdrFThdRec);
+  if (found < 0 || (!found && isdir))
+    return -1;
+  if (found) {
+    if (dst.u.dthd.thdParID != srcid || ClassicHfsCompareNames(dst.u.dthd.thdCName, srcname)) {
+      ERROR(EIO, "classic HFS thread does not identify the renamed entry");
+      return -1;
+    }
+    dst.u.dthd.thdParID = dstid;
+    strcpy(dst.u.dthd.thdCName, dstname);
+    if (ClassicHfsStoreCatalogEntry(&dst, &n) < 0)
+      return -1;
+  }
+
+  /* update directory valences */
+
+  if (moving)
+    {
+      if (ClassicHfsAdjustEntryCount(vol, srcid, isdir, -1) < 0 ||
+	  ClassicHfsAdjustEntryCount(vol, dstid, isdir,  1) < 0)
+	return -1;
+    }
+
+  return 0;
+}

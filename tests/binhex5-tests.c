@@ -1154,6 +1154,21 @@ int main(int argc,char**argv){
   node slot;
   must(hfs_mkdir(v, ":CountTest") == 0 && hfs_create(v, ":CountTest:Child", "TEXT", "TEST") == 0 &&
        ClassicHfsResolvePath(v, ":CountTest", &folder, NULL, NULL, &slot) == 1, "create nonempty directory fixture");
+  CatDataRec thread, saved;
+  node threadSlot;
+  must(hfs_mkdir(v, ":MoveSource") == 0 &&
+       ClassicHfsFindCatalogThread(v, folder.u.dir.dirDirID, &thread, &threadSlot, cdrThdRec) == 1,
+       "prepare directory move ancestry");
+  saved = thread;
+  thread.u.dthd.thdParID = folder.u.dir.dirDirID;
+  must(ClassicHfsStoreCatalogEntry(&thread, &threadSlot) == 0 &&
+       hfs_rename(v, ":MoveSource", ":CountTest") < 0 && errno == EIO &&
+       ClassicHfsResolvePath(v, ":MoveSource", &thread, NULL, NULL, NULL) == 1,
+       "invalid destination thread rejects move and retains source");
+  must(ClassicHfsFindCatalogThread(v, folder.u.dir.dirDirID, &thread, &threadSlot, cdrThdRec) == 1 &&
+       ClassicHfsStoreCatalogEntry(&saved, &threadSlot) == 0 && hfs_rmdir(v, ":MoveSource") == 0 &&
+       ClassicHfsResolvePath(v, ":CountTest", &folder, NULL, NULL, &slot) == 1,
+       "restore directory move fixture");
   folder.u.dir.dirVal = 0;
   must(ClassicHfsStoreCatalogEntry(&folder, &slot) == 0 && hfs_rmdir(v, ":CountTest") < 0 &&
        errno == ENOTEMPTY, "zero valence cannot orphan a live catalog child");
