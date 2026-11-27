@@ -961,9 +961,10 @@ int RunWindowsPathCoordinationTest(const char* directory){
   fprintf(report,"PASS: mounted-image internal writes conflict with raw access/deletion of their image file or parent directory, while unrelated Windows folders remain available.\n");
   struct GatedWindows:MacBrowser::Volume {
    std::shared_ptr<MacBrowser::Volume> base;Gate& gate;std::atomic<bool> fail{false};
+   bool pauseOnRead=true;
    GatedWindows(std::shared_ptr<MacBrowser::Volume> value,Gate& g):base(value),gate(g){}
    std::wstring HostPath(uint32_t id)const override{return base->HostPath(id);}std::string ResourceKey()const override{return base->ResourceKey();}std::u16string Name()const override{return base->Name();}const char* Kind()const override{return base->Kind();}bool Writable()const override{return base->Writable();}bool CaseSensitive()const override{return false;}uint64_t FreeBytes()const override{return base->FreeBytes();}void Close()override{base->Close();}
-   MacBrowser::Entry Stat(uint32_t id)override{return base->Stat(id);}std::vector<MacBrowser::Entry> List(uint32_t id)override{return base->List(id);}void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override{if(n){SetEvent(gate.entered);Check(WaitForSingleObject(gate.release,15000)==WAIT_OBJECT_0,"Windows read gate not released");if(fail)throw HfsPlus::Error("Injected Windows source read failure");}base->Read(id,fork,at,p,n);base->Close();}
+   MacBrowser::Entry Stat(uint32_t id)override{return base->Stat(id);}std::vector<MacBrowser::Entry> List(uint32_t id)override{return base->List(id);}void Read(uint32_t id,unsigned fork,uint64_t at,void* p,size_t n)override{if(n && pauseOnRead){SetEvent(gate.entered);Check(WaitForSingleObject(gate.release,15000)==WAIT_OBJECT_0,"Windows read gate not released");if(fail)throw HfsPlus::Error("Injected Windows source read failure");}base->Read(id,fork,at,p,n);base->Close();}
    uint32_t MakeDirectory(uint32_t parent,const std::u16string& name)override{return base->MakeDirectory(parent,name);}uint32_t Put(uint32_t parent,const MacBrowser::Entry& e,MacBrowser::Reader r,bool replace)override{return base->Put(parent,e,r,replace);}void Rename(uint32_t id,uint32_t parent,const std::u16string& name)override{base->Rename(id,parent,name);}void Remove(uint32_t id)override{base->Remove(id);}
   };
   const auto companionName=L"Read Me \u65e5";
@@ -1011,6 +1012,15 @@ int RunWindowsPathCoordinationTest(const char* directory){
         legacy->second.entry.forks[1].size==0&&idle.count(u"%Legacy")==0,
         "legacy Finder-only companion was not merged with its data file");
   auto resolved=MacBrowser::ResolveWindowsFile(wide(input+"\\Held"));auto slow=std::make_shared<GatedWindows>(resolved.first,gate);FileOperations::Request request;FileOperations::Location source,target;source.SetMounted(slow,resolved.second);source.expectedName=u"Held";target.SetWindows(wide(a));target.expectedIdentity=MacBrowser::DescribeWindowsFile(wide(a)).identity;request.Copy().sources={source};request.Copy().destination=target;
+  // Preflight can read the source before a staging file exists.
+  // Stop at publication's reservation boundary so the lease is observable.
+  slow->pauseOnRead=false;
+  MacBrowser::windowsPublicationFault=[&gate](const char* phase){
+   if(strcmp(phase,"export-files-reserved"))return;
+   if(WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0)return;
+   SetEvent(gate.entered);
+   Check(WaitForSingleObject(gate.release,30000)==WAIT_OBJECT_0,"Windows staging gate not released");
+  };
   auto slowPath=wide(input+"\\Held");DWORD uiThread=GetCurrentThreadId();std::atomic<unsigned> plans{0};VolumeCoord::SetPathLookupObserver([&](const std::wstring& path){if(path.size()>=slowPath.size()&&!_wcsicmp(path.c_str()+path.size()-slowPath.size(),slowPath.c_str())){Check(GetCurrentThreadId()!=uiThread,"Windows path planning ran on the UI thread");if(++plans==1){SetEvent(planningGate.entered);Check(WaitForSingleObject(planningGate.release,15000)==WAIT_OBJECT_0,"Windows planner not released");}}});
   Check(BackgroundCopies::Start({request},first,true),"start Windows copy");Until([&]{return WaitForSingleObject(planningGate.entered,0)==WAIT_OBJECT_0;});Check(first->IsWindowEnabled()&&second->IsWindowEnabled()&&right.List()->StorageSelectionAvailable(),"slow path planning blocked UI");Host(right,b);SetEvent(planningGate.release);Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});Check(first->IsWindowEnabled()&&second->IsWindowEnabled(),"Windows copy disabled browsers");
   Host(right,b);
@@ -1028,7 +1038,24 @@ int RunWindowsPathCoordinationTest(const char* directory){
   }
   fprintf(report,"PASS: Windows names, typed Unicode paths, Finder codes, and fork sizes agree before and during a paused copy.\n");
   // Actual staging entries are protected until publication/rollback finishes.
-  WIN32_FIND_DATAA temporary{};HANDLE find=FindFirstFileA(a+"\\HFV*.tmp",&temporary);Check(find!=INVALID_HANDLE_VALUE,"copy did not stage output");CString staged=a+"\\"+temporary.cFileName;FindClose(find);Check(!VolumeCoord::Readable(VolumeCoord::PathKey(wide(staged))),"copy staging file was not reserved");
+  WIN32_FIND_DATAA entry{};
+  HANDLE search=FindFirstFileA(a+"\\.hfv-export-*",&entry);
+  Check(search!=INVALID_HANDLE_VALUE,"copy did not create an export recovery folder");
+  CString recoveryFolder=a+"\\"+entry.cFileName;
+  FindClose(search);
+  search=FindFirstFileA(recoveryFolder+"\\*",&entry);
+  Check(search!=INVALID_HANDLE_VALUE,"cannot enumerate export recovery folder");
+  CString staged;
+  do{
+   if(!(entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)&&
+      strspn(entry.cFileName,"0123456789")==strlen(entry.cFileName)){
+    staged=recoveryFolder+"\\"+entry.cFileName;
+    break;
+   }
+  }while(FindNextFileA(search,&entry));
+  FindClose(search);
+  Check(!staged.IsEmpty(),"copy did not stage output in its recovery folder");
+  Check(!VolumeCoord::Readable(VolumeCoord::PathKey(wide(staged))),"copy staging file was not reserved");
   // An independent copy may share the read-only source, and its target is on the same drive.
   FileOperations::Request independent;FileOperations::Location ordinary;ordinary.SetWindows(wide(input+"\\Held"));independent.Copy().sources={ordinary};independent.Copy().destination.SetWindows(wide(b));independent.background=true;auto parallel=FileOperations::Submit(independent);Until([&]{return parallel.Job()->done();});Check(!parallel.Job()->result().code&&BackgroundCopies::Active()&&exists(b+"\\Held"),"same-drive independent Windows copy serialized");Until([&]{return Row(right,L"Held")>=0;});
   auto heldProgress=BackgroundCopies::DialogWindow();unsigned before=right.notificationRefreshes;Select(left,L"Two");int row=Row(left,L"Two");Check(left.List()->StorageSelectionAvailable()&&left.List()->TestCommitLabel(row,"RenamedTwo")==0,"sibling rename could not submit");Until([&]{return exists(a+"\\RenamedTwo")&&Row(left,L"RenamedTwo")>=0;});Check(BackgroundCopies::Active()&&right.notificationRefreshes==before,"sibling rename waited for copy or refreshed unrelated browser");
@@ -1088,11 +1115,13 @@ int RunWindowsPathCoordinationTest(const char* directory){
    fprintf(report,"PASS: the same queued job can cancel before execution; a replaced Windows selection fails after rebinding and releases its leases.\n");
   }
   fprintf(report,"PASS: real same-drive background copies share a reader and finish independently; sibling rename/delete/new-folder jobs finish and refresh during a stalled copy; unrelated browser refresh stays unchanged; source/destination/resource-companion/staging/parent conflicts queue and cancel without starving unrelated work.\n");
+  MacBrowser::windowsPublicationFault={};
   for(bool failure:{true,false}){gate.Reset();auto failSource=MacBrowser::ResolveWindowsFile(wide(input+"\\Fail"));auto stalled=std::make_shared<GatedWindows>(failSource.first,gate);stalled->fail=failure;request.Copy().sources.front().SetMounted(stalled,failSource.second);request.Copy().sources.front().expectedName=u"Fail";request.Copy().destination.expectedIdentity=MacBrowser::DescribeWindowsFile(wide(a)).identity;Check(BackgroundCopies::Start({request},first,true),"start failed/canceled Windows copy");Until([&]{return WaitForSingleObject(gate.entered,0)==WAIT_OBJECT_0;});auto progress=BackgroundCopies::DialogWindow();if(!failure)SendMessage(progress,WM_COMMAND,IDCANCEL,0);Host(left,b);SetEvent(gate.release);Until([]{return !BackgroundCopies::Active();});Check(BackgroundCopies::LastResult().code&&(!failure?BackgroundCopies::LastResult().error==ERROR_CANCELLED:true)&&!exists(a+"\\Fail")&&!exists(a+"\\%Fail")&&exists(input+"\\Fail")&&first->IsWindowEnabled(),"failed/canceled Windows copy published output or lost source");if(IsWindow(progress))SendMessage(progress,WM_COMMAND,IDCANCEL,0);Check(VolumeCoord::Available({{VolumeCoord::PathKey(wide(a)),VolumeCoord::Mode::Write},{VolumeCoord::PathKey(wide(input)),VolumeCoord::Mode::Write}}),"failed Windows copy retained reservations");}
-  find=FindFirstFileA(a+"\\HFV*.tmp",&temporary);Check(find==INVALID_HANDLE_VALUE,"Windows rollback left staging files");if(find!=INVALID_HANDLE_VALUE)FindClose(find);
+  search=FindFirstFileA(a+"\\HFV*.tmp",&entry);Check(search==INVALID_HANDLE_VALUE,"Windows rollback left staging files");if(search!=INVALID_HANDLE_VALUE)FindClose(search);
+  Check(!exists(recoveryFolder),"successful copy retained its recovery folder");
   fprintf(report,"PASS: source-read failure and cancellation after a blocked final chunk remove partial Windows output/companions/staging, retain sources and release every reservation without blocking browsing. Images/fixtures only; no hardware or computer control.\n");
  }catch(const std::exception& error){fprintf(report,"FAIL: %s; last copy: %s\n",error.what(),BackgroundCopies::LastResult().message.c_str());result=1;}
- SetEvent(planningGate.release);SetEvent(gate.release);for(auto& op:queued)op.Job()->cancel();BackgroundCopies::CancelAll();FileOperations::CancelPending();Until([]{return !BackgroundCopies::Active();});for(auto& op:queued)op.Job()->wait();VolumeCoord::SetPathLookupObserver({});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
+ SetEvent(planningGate.release);SetEvent(gate.release);for(auto& op:queued)op.Job()->cancel();BackgroundCopies::CancelAll();FileOperations::CancelPending();Until([]{return !BackgroundCopies::Active();});for(auto& op:queued)op.Job()->wait();MacBrowser::windowsPublicationFault={};VolumeCoord::SetPathLookupObserver({});ShutdownStorageUi();BackgroundCopies::enabled=false;while(!app.m_browsers.empty())app.m_browsers.back()->SendMessage(WM_CLOSE);fclose(report);return result;
 }
 
 static void DeclineArchiveMove(const std::shared_ptr<MacBrowser::Volume>& source,uint32_t file,
