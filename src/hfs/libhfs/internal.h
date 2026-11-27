@@ -42,17 +42,7 @@ typedef ClassicHfsCacheEntry bucket;
 # define HFS_BLOCK_INUSE ClassicHfsCacheValid
 # define HFS_BLOCK_DIRTY ClassicHfsCacheDirty
 # define HFS_CACHESZ ClassicHfsCacheSlots
-# define HFS_HASHSZ	32
-
-typedef struct {
-  struct _hfsvol_ *vol;		/* volume to which cache belongs */
-  bucket *tail;			/* end of bucket chain */
-
-  bucket chain[HFS_CACHESZ];	/* cache bucket chain */
-  bucket hash[HFS_HASHSZ];	/* hash table for bucket chain */
-
-  block pool[HFS_CACHESZ];	/* physical blocks in cache */
-} bcache;
+typedef ClassicHfsCache bcache;
 
 typedef signed char	Char;
 typedef unsigned char	UChar;

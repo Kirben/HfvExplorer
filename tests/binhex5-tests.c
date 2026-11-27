@@ -365,6 +365,29 @@ int main(int argc,char**argv){
        "ordered flush preserves slots and retains failed sector for retry");
  }
  {
+  ClassicHfsCache cache;
+  ClassicHfsCacheEntry *entry;
+  CacheWriteLog log = {0};
+  ClassicHfsInitCache(&cache);
+  for (unsigned i = 0; i < ClassicHfsCacheSlots; ++i) {
+   must(ClassicHfsFindCacheEntry(&cache, i, &entry, record_cache_write, &log) == 0,
+        "fill each cache slot once");
+   entry->flags = ClassicHfsCacheValid | (i == 3 ? ClassicHfsCacheDirty : 0);
+   (*entry->data)[0] = (unsigned char)i;
+  }
+  for (unsigned i = 0; i < 3; ++i)
+   must(ClassicHfsFindCacheEntry(&cache, i, &entry, record_cache_write, &log) == 1,
+        "promote cached sectors");
+  must(ClassicHfsFindCacheEntry(&cache, 131, &entry, record_cache_write, &log) < 0 &&
+       log.count == 1 && log.seen[0] == 3 && cache.tail->bnum == 3,
+       "failed eviction keeps original hash and replacement order");
+  must(ClassicHfsFindCacheEntry(&cache, 3, &entry, record_cache_write, &log) == 1 &&
+       (*entry->data)[0] == 3 && (entry->flags & ClassicHfsCacheDirty),
+       "dirty bytes remain readable after eviction failure");
+  must(ClassicHfsFindCacheEntry(&cache, 131, &entry, record_cache_write, &log) == 0 &&
+       entry->bnum == 131 && !entry->flags, "reserve clean victim for retry");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

@@ -65,7 +65,6 @@ int hfs_take_rollback(void) {
 int b_init(hfsvol *vol)
 {
   bcache *cache;
-  int i;
 
 # ifdef DEBUG
   if (vol->cache)
@@ -80,47 +79,7 @@ int b_init(hfsvol *vol)
     }
 
   vol->cache = cache;
-  cache->vol = vol;
-
-  for (i = 0; i < HFS_CACHESZ; ++i)
-    {
-      bucket *b = &cache->chain[i];
-
-      b->flags = 0;
-      b->count = 0;
-
-      b->bnum  = 0;
-      b->data  = &cache->pool[i];
-
-      b->cnext = b + 1;
-      b->cprev = b - 1;
-
-      b->hnext = 0;
-      b->hprev = 0;
-    }
-
-  cache->tail = &cache->chain[HFS_CACHESZ - 1];
-
-  cache->chain[0].cprev = cache->tail;
-  cache->tail->cnext    = &cache->chain[0];
-
-  for (i = 0; i < HFS_HASHSZ; ++i)
-    {
-      bucket *b = &cache->hash[i];
-
-      b->flags = 0;
-      b->count = 0;
-
-      b->bnum  = 0;
-      b->data  = 0;
-
-      b->cnext = 0;
-      b->cprev = 0;
-
-      b->hnext = 0;
-      b->hprev = 0;
-    }
-
+  ClassicHfsInitCache(cache);
   return 0;
 }
 
@@ -145,7 +104,6 @@ void b_debugcache(hfsvol *vol)
 	  if (b->flags & HFS_BLOCK_DIRTY)
 	    printf("*");
 
-	  printf(":%u", b->count);
 	}
     }
 
@@ -153,7 +111,7 @@ void b_debugcache(hfsvol *vol)
 
   printf("HASH DUMP:\n");
 
-  for (i = 0; i < HFS_HASHSZ; ++i)
+  for (i = 0; i < ClassicHfsCacheHashSize; ++i)
     {
       int seen = 0;
 
@@ -170,7 +128,6 @@ void b_debugcache(hfsvol *vol)
 	      if (b->flags & HFS_BLOCK_DIRTY)
 		printf("*");
 
-	      printf(":%u", b->count);
 	    }
 
 	  seen = 1;
@@ -443,107 +400,6 @@ int b_finish(hfsvol *vol)
 }
 
 /*
- * NAME:	findbucket()
- * DESCRIPTION:	search for a cache bucket in the hash table
- */
-static
-int findbucket(bcache *cache, unsigned long bnum, bucket **ib)
-{
-  bucket *hb, *b, *p;
-  int result;
-
-  hb = &cache->hash[bnum & (HFS_HASHSZ - 1)];
-
-  for (b = hb->hnext; b; b = b->hnext)
-    {
-      if (b->flags & HFS_BLOCK_INUSE &&
-	  b->bnum == bnum)
-	break;
-    }
-
-  if (b)
-    {
-      result = 1;
-
-      /* cache hit; move towards head of cache chain */
-
-      if (++b->count > b->cprev->count &&
-	  b != cache->tail->cnext)
-	{
-	  p = b->cprev;
-
-	  p->cprev->cnext = b;
-	  b->cnext->cprev = p;
-
-	  p->cnext = b->cnext;
-	  b->cprev = p->cprev;
-
-	  p->cprev = b;
-	  b->cnext = p;
-
-	  if (cache->tail == b)
-	    cache->tail = p;
-	}
-    }
-  else
-    {
-      result = 0;
-
-      /* cache miss; reuse least-used cache bucket */
-
-      b = cache->tail;
-
-# ifdef DEBUG
-      if (b->flags & HFS_BLOCK_INUSE)
-	printf("CACHE: reusing bucket containing block %lu:%u\n",
-	       b->bnum, b->count);
-# endif
-
-      if (ClassicHfsWriteBackEntry(b, store_cached_sector, cache->vol) < 0)
-	return -1;
-
-      b->flags &= ~HFS_BLOCK_INUSE;
-      b->count  = 1;
-      b->bnum   = bnum;
-
-      b->cnext->cprev = b->cprev;
-      b->cprev->cnext = b->cnext;
-
-      cache->tail = b->cprev;
-
-      for (p = b->cnext; p->count > 1; p = p->cnext)
-	--p->count;
-
-      b->cprev = p->cprev;
-      b->cnext = p;
-
-      p->cprev->cnext = b;
-      p->cprev = b;
-    }
-
-  /* insert at front of hash chain */
-
-  if (hb->hnext != b)
-    {
-      if (b->hnext)
-	b->hnext->hprev = b->hprev;
-      if (b->hprev)
-	b->hprev->hnext = b->hnext;
-
-      b->hprev = hb;
-      b->hnext = hb->hnext;
-
-      hb->hnext = b;
-      if (b->hnext)
-	b->hnext->hprev = b;
-    }
-
-  *ib = b;
-
-  return result;
-}
-
-/*
  * NAME:	block->readlb()
  * DESCRIPTION:	read a logical block from a volume (or from the cache)
  */
@@ -556,7 +412,7 @@ int b_readlb(hfsvol *vol, unsigned long bnum, block *bp)
   if (vol->cache == 0)
     return getblock(vol, bnum, bp);
 
-  found = findbucket(vol->cache, bnum, &b);
+  found = ClassicHfsFindCacheEntry(vol->cache, bnum, &b, store_cached_sector, vol);
   if (found < 0)
     return -1;
 
@@ -581,7 +437,7 @@ int b_writelb(hfsvol *vol, unsigned long bnum, block *bp)
   if (vol->cache == 0)
     return putblock(vol, bnum, bp);
 
-  if (findbucket(vol->cache, bnum, &b) < 0)
+  if (ClassicHfsFindCacheEntry(vol->cache, bnum, &b, store_cached_sector, vol) < 0)
     return -1;
 
   memcpy(b->data, bp, HFS_BLOCKSZ);
