@@ -159,6 +159,16 @@ static void verify_repeated_tree_map(char *image)
 }
 
 int main(int argc,char**argv){
+    {
+        node cursor = {0};
+        unsigned char record[] = {1, 2};
+        int length = sizeof(record);
+        cursor.rnum = 1;
+        cursor.roff[0] = 14;
+        must(ClassicHfsInsertAtCursor(&cursor, record, &length) < 0 && !cursor.nd.ndNRecs &&
+             cursor.roff[0] == 14 && record[0] == 1 && length == 2,
+             "invalid insertion slot preserves caller node and incoming record");
+    }
     for (int slot = 0; slot < 3; ++slot) {
         unsigned char sector[512] = {0};
         uint16_t offsets[] = {14, 18, 22, 26}, count = 3;

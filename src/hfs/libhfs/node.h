@@ -22,12 +22,9 @@ void n_init(node *, btree *, int, int);
 int n_new(node *);
 #include "../ClassicHfsFreeTreeNode.h"
 
-int n_search(node *, unsigned char *);
 
 int n_index(node *, unsigned char *, int *);
-int n_split(node *, unsigned char *, int *);
 
-int n_insertx(node *, unsigned char *, int);
-int n_insert(node *, unsigned char *, int *);
+int ClassicHfsInsertAtCursor(node *, unsigned char *, int *);
 
 int ClassicHfsDeleteNodeRecord(node *, unsigned char *, int *);

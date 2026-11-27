@@ -156,7 +156,7 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
         return -1;
     unsigned level = depth - 1;
     node *current = level ? &children[level - 1] : root;
-    int result = n_insert(current, record, length);
+    int result = ClassicHfsInsertAtCursor(current, record, length);
     while (level && result == 0) {
         --level;
         node *parent = level ? &children[level - 1] : root;
@@ -169,7 +169,7 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
                 result = bt_putnode(parent);
         }
         if (*length)
-            result = n_insert(parent, record, length);
+            result = ClassicHfsInsertAtCursor(parent, record, length);
         current = parent;
     }
     free(children);

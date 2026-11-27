@@ -26,9 +26,6 @@
 # include "btree.h"
 # include "node.h"
 
-# define NODESPACE(n)  \
-  (HFS_BLOCKSZ - (n).roff[(n).nd.ndNRecs] - 2 * ((n).nd.ndNRecs + 1))
-
 /*
  * NAME:	node->init()
  * DESCRIPTION:	construct an empty node
@@ -73,29 +70,6 @@ int n_new(node *np)
 }
 
 /*
- * NAME:	node->compact()
- * DESCRIPTION:	clean up a node, removing deleted records
- */
-static int compact_node(node *np)
-{
-  if (!ClassicHfsCompactNode(np->data, np->roff, &np->nd.ndNRecs)) {
-    ERROR(EIO, "invalid classic HFS node offsets during compaction");
-    return -1;
-  }
-  return 0;
-}
-
-/*
- * NAME:	node->search()
- * DESCRIPTION:	locate a record in a node, or the record it should follow
- */
-int n_search(node *np, unsigned char *key)
-{
-  return ClassicHfsSearchNode(np->data, np->roff, np->nd.ndNRecs,
-                              key, np->bt->compare, &np->rnum);
-}
-
-/*
  * NAME:	node->index()
  * DESCRIPTION:	create an index record from a key and node pointer
  */
@@ -134,86 +108,46 @@ static int prepare_successor(node *next, node *previous, unsigned long replaceme
   return 0;
 }
 
-/*
- * NAME:	node->split()
- * DESCRIPTION:	divide a node into two and insert a record
- */
-int n_split(node *left, unsigned char *record, int *reclen)
+// The mutation descent already validated live keys and selected a predecessor.
+int ClassicHfsInsertAtCursor(node *cursor, unsigned char *record, int *length)
 {
-  node right, next;
-  right = *left;
-  if (!ClassicHfsSplitNodeRecords(left->data, left->roff, &left->nd.ndNRecs,
-                                  right.data, right.roff, &right.nd.ndNRecs,
-                                  left->rnum + 1, record, *reclen)) {
-    ERROR(EIO, "classic HFS records cannot fit in split nodes");
-    return -1;
-  }
-  right.nd.ndBLink = left->nnum;
-  if (n_new(&right) < 0)
-    return -1;
-  if (prepare_successor(&next, left, right.nnum) < 0)
-    return -1;
-  left->nd.ndFLink = right.nnum;
-
-  /* store the new/modified nodes */
-
-  if (bt_putnode(left) < 0 ||
-      bt_putnode(&right) < 0)
-    return -1;
-
-  /* create an index record for the new node in the parent */
-
-  if (n_index(&right, record, reclen) < 0)
-    return -1;
-
-  /* update link pointers */
-
-  if (left->bt->hdr.bthLNode == left->nnum)
-    {
-      left->bt->hdr.bthLNode = right.nnum;
-      left->bt->flags |= HFS_UPDATE_BTHDR;
+    node left = *cursor;
+    unsigned slot = (unsigned)(left.rnum + 1);
+    if (ClassicHfsInsertNodeRecord(left.data, left.roff, &left.nd.ndNRecs, slot, record, *length)) {
+        if (bt_putnode(&left) < 0)
+            return -1;
+        *cursor = left;
+        *length = 0;
+        return 0;
     }
-
-  if (next.nnum && bt_putnode(&next) < 0)
-    return -1;
-
-  return 0;
-}
-
-/*
- * NAME:	node->insertx()
- * DESCRIPTION:	insert a record into a node (which must already have room)
- */
-int n_insertx(node *np, unsigned char *record, int reclen)
-{
-  if (!ClassicHfsInsertNodeRecord(np->data, np->roff, &np->nd.ndNRecs,
-                                  np->rnum + 1, record, reclen)) {
-    ERROR(EIO, "record does not fit in classic HFS B-tree node");
-    return -1;
-  }
-  return 0;
-}
-
-/*
- * NAME:	node->insert()
- * DESCRIPTION:	insert a new record into a node; return a record for parent
- */
-int n_insert(node *np, unsigned char *record, int *reclen)
-{
-  if (compact_node(np) < 0)
-    return -1;
-
-  /* check for free space */
-
-  if (np->nd.ndNRecs >= HFS_MAXRECS ||
-      *reclen + 2 > NODESPACE(*np))
-    return n_split(np, record, reclen);
-
-  if (n_insertx(np, record, *reclen) < 0)
-    return -1;
-  *reclen = 0;
-
-  return bt_putnode(np);
+    node right = left;
+    if (!ClassicHfsSplitNodeRecords(left.data, left.roff, &left.nd.ndNRecs,
+                                    right.data, right.roff, &right.nd.ndNRecs, slot, record, *length)) {
+        ERROR(EIO, "invalid classic HFS insertion slot or split layout");
+        return -1;
+    }
+    if (n_new(&right) < 0)
+        return -1;
+    node next;
+    unsigned char separator[HFS_MAXRECLEN];
+    int separatorLength;
+    right.nd.ndBLink = left.nnum;
+    if (prepare_successor(&next, &left, right.nnum) < 0 ||
+        n_index(&right, separator, &separatorLength) < 0) {
+        ClassicHfsFreeTreeNode(&right);
+        return -1;
+    }
+    left.nd.ndFLink = right.nnum;
+    if (bt_putnode(&right) < 0 || bt_putnode(&left) < 0 || (next.nnum && bt_putnode(&next) < 0))
+        return -1;
+    if (left.bt->hdr.bthLNode == left.nnum) {
+        left.bt->hdr.bthLNode = right.nnum;
+        left.bt->flags |= HFS_UPDATE_BTHDR;
+    }
+    *cursor = left;
+    memcpy(record, separator, separatorLength);
+    *length = separatorLength;
+    return 0;
 }
 
 // Both adjacent records have been combined in the local left node. Check the
