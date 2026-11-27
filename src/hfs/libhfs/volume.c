@@ -40,77 +40,6 @@ void set_invalid_cd_hack( int onoff )
 }
 
 /*
- * NAME:	vol->catsearch()
- * DESCRIPTION:	search catalog tree
- */
-int v_catsearch(hfsvol *vol, long parid, char *name,
-		CatDataRec *data, char *cname, node *np)
-{
-  CatKeyRec key;
-  unsigned char pkey[HFS_CATKEYLEN];
-  node n;
-  int found;
-
-  if (np == 0)
-    np = &n;
-
-  if (ClassicHfsWriteCatalogKey(pkey, parid, name) < 0) {
-    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
-    return -1;
-  }
-
-  found = ClassicHfsFindTreeKey(&vol->cat, pkey, np);
-  if (found <= 0)
-    return found;
-
-  if (!ClassicHfsReadLeafEntry(np->data, np->roff, np->nd.ndNRecs, np->rnum, &key, data)) {
-    ERROR(EIO, "invalid classic HFS catalog record");
-    return -1;
-  }
-  if (cname)
-    strcpy(cname, key.ckrCName);
-  return 1;
-}
-
-/*
- * NAME:	vol->getthread()
- * DESCRIPTION:	retrieve catalog thread information for a file or directory
- */
-int v_getthread(hfsvol *vol, long id, CatDataRec *thread, node *np, int type)
-{
-  CatDataRec rec;
-  int found;
-
-  if (thread == 0)
-    thread = &rec;
-
-  found = v_catsearch(vol, id, "", thread, 0, np);
-  if (found <= 0)
-    return found;
-
-  if (thread->cdrType != type)
-    {
-      ERROR(EIO, "bad thread record");
-      return -1;
-    }
-
-  return 1;
-}
-
-/*
- * NAME:	vol->putcatrec()
- * DESCRIPTION:	store catalog information
- */
-int v_putcatrec(CatDataRec *data, node *np)
-{
-  if (!ClassicHfsUpdateLeafEntry(np->data, np->roff, np->nd.ndNRecs, np->rnum, data)) {
-    ERROR(EIO, "invalid classic HFS catalog update");
-    return -1;
-  }
-  return ClassicHfsWriteTreeNode(np);
-}
-
-/*
  * NAME:	vol->resolve()
  * DESCRIPTION:	translate a pathname; return catalog information
  */
@@ -155,14 +84,14 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
 	  if (parid)
 	    *parid = data->u.dthd.thdParID;
 
-	  return v_catsearch(vol, data->u.dthd.thdParID,
+	  return ClassicHfsFindCatalogEntry(vol, data->u.dthd.thdParID,
 			     data->u.dthd.thdCName, data, fname, np);
 	}
 
       if (parid)
 	*parid = dirid;
 
-      found = v_catsearch(vol, dirid, name, data, fname, np);
+      found = ClassicHfsFindCatalogEntry(vol, dirid, name, data, fname, np);
       if (found < 0)
 	return -1;
 
@@ -297,7 +226,7 @@ int v_adjvalence(hfsvol *vol, long parid, int isdir, int adj)
     return 0;
 
   if (v_getdthread(vol, parid, &data, 0) <= 0 ||
-      v_catsearch(vol, data.u.dthd.thdParID, data.u.dthd.thdCName,
+      ClassicHfsFindCatalogEntry(vol, data.u.dthd.thdParID, data.u.dthd.thdCName,
 		  &data, 0, &n) <= 0 ||
       data.cdrType != cdrDirRec)
     {
@@ -308,7 +237,7 @@ int v_adjvalence(hfsvol *vol, long parid, int isdir, int adj)
   data.u.dir.dirVal  += adj;
   data.u.dir.dirMdDat = ClassicHfsFromUnixSeconds(time(0));
 
-  return v_putcatrec(&data, &n);
+  return ClassicHfsStoreCatalogEntry(&data, &n);
 }
 
 /*

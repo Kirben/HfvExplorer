@@ -14,6 +14,7 @@
 #include "hfs/ClassicHfsVolumeAllocation.h"
 #include "hfs/libhfs/node.h"
 #include "hfs/libhfs/file.h"
+#include "hfs/libhfs/volume.h"
 #include "hfs/ClassicHfsGrowTreeMap.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
@@ -197,6 +198,24 @@ static int capture_test_read(void *context, unsigned long sector, unsigned char 
 }
 
 int main(int argc,char**argv){
+    {
+        hfsvol volume = {0};
+        node cursor = {0}, original;
+        CatDataRec record = {0};
+        cursor.bt = &volume.ext;
+        volume.ext.f.vol = &volume;
+        cursor.nd.ndType = -1;
+        cursor.nd.ndNHeight = 1;
+        original = cursor;
+        must(ClassicHfsStoreCatalogEntry(&record, &cursor) < 0 && errno == EIO &&
+             !memcmp(cursor.data, original.data, sizeof(cursor.data)),
+             "reject catalog update through an extents-tree cursor");
+        cursor.bt = &volume.cat;
+        volume.cat.f.vol = &volume;
+        cursor.nd.ndType = 0;
+        must(ClassicHfsStoreCatalogEntry(&record, &cursor) < 0 && errno == EIO,
+             "reject catalog update through an index cursor");
+    }
     {
         hfsvol volume = {0};
         hfsfile file = {0};

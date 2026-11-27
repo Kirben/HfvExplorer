@@ -17,16 +17,16 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-int v_catsearch(hfsvol *, long, char *, CatDataRec *, char *, node *);
+int ClassicHfsFindCatalogEntry(hfsvol *, long, char *, CatDataRec *, char *, node *);
 
-int v_getthread(hfsvol *, long, CatDataRec *, node *, int);
+int ClassicHfsFindCatalogThread(hfsvol *, long, CatDataRec *, node *, int);
 
 # define v_getdthread(vol, id, thread, np)  \
-    v_getthread(vol, id, thread, np, cdrThdRec)
+    ClassicHfsFindCatalogThread(vol, id, thread, np, cdrThdRec)
 # define v_getfthread(vol, id, thread, np)  \
-    v_getthread(vol, id, thread, np, cdrFThdRec)
+    ClassicHfsFindCatalogThread(vol, id, thread, np, cdrFThdRec)
 
-int v_putcatrec(CatDataRec *, node *);
+int ClassicHfsStoreCatalogEntry(CatDataRec *, node *);
 
 int v_resolve(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 

@@ -24,6 +24,8 @@
 # include "libhfs/internal.h"
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsNodeIO.h"
+#include "ClassicHfsCatalogLeaf.h"
+#include "libhfs/volume.h"
 # include "libhfs/block.h"
 # include "libhfs/file.h"
 # include "libhfs/btree.h"
@@ -299,5 +301,62 @@ int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
     }
     --tree->hdr.bthNRecs;
     tree->flags |= HFS_UPDATE_BTHDR;
+    return 0;
+}
+
+int ClassicHfsFindCatalogEntry(hfsvol *volume, long parent, char *name, CatDataRec *data,
+                              char *storedName, node *cursor)
+{
+    unsigned char search[HFS_CATKEYLEN];
+    if (ClassicHfsWriteCatalogKey(search, parent, name) < 0) {
+        ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+        return -1;
+    }
+    node local;
+    if (!cursor)
+        cursor = &local;
+    int found = ClassicHfsFindTreeKey(&volume->cat, search, cursor);
+    if (found <= 0)
+        return found;
+    CatKeyRec key;
+    if (!ClassicHfsReadLeafEntry(cursor->data, cursor->roff, cursor->nd.ndNRecs, cursor->rnum, &key, data)) {
+        ERROR(EIO, "invalid classic HFS catalog record");
+        return -1;
+    }
+    if (storedName)
+        strcpy(storedName, key.ckrCName);
+    return 1;
+}
+
+int ClassicHfsFindCatalogThread(hfsvol *volume, long id, CatDataRec *thread, node *cursor, int type)
+{
+    CatDataRec record;
+    int found = ClassicHfsFindCatalogEntry(volume, id, "", &record, NULL, cursor);
+    if (found <= 0)
+        return found;
+    if (record.cdrType != type) {
+        ERROR(EIO, "bad classic HFS thread record");
+        return -1;
+    }
+    if (thread)
+        *thread = record;
+    return 1;
+}
+
+int ClassicHfsStoreCatalogEntry(CatDataRec *record, node *cursor)
+{
+    if (!cursor->bt || !cursor->bt->f.vol || cursor->bt != &cursor->bt->f.vol->cat ||
+        (unsigned char)cursor->nd.ndType != ndLeafNode || cursor->nd.ndNHeight != 1) {
+        ERROR(EIO, "catalog update requires a classic HFS catalog leaf");
+        return -1;
+    }
+    node updated = *cursor;
+    if (!ClassicHfsUpdateLeafEntry(updated.data, updated.roff, updated.nd.ndNRecs, updated.rnum, record)) {
+        ERROR(EIO, "invalid classic HFS catalog update");
+        return -1;
+    }
+    if (ClassicHfsWriteTreeNode(&updated) < 0)
+        return -1;
+    *cursor = updated;
     return 0;
 }

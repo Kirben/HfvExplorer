@@ -78,13 +78,13 @@ static int ClassicHfsFlushOpenFile(hfsfile *file)
         return 0;
     node leaf;
     CatDataRec disk, update;
-    if (v_catsearch(file->vol, file->parid, file->name, &disk, NULL, &leaf) <= 0)
+    if (ClassicHfsFindCatalogEntry(file->vol, file->parid, file->name, &disk, NULL, &leaf) <= 0)
         return -1;
     if (!ClassicHfsPrepareFileUpdate(&disk, &file->cat, file->clump, &update)) {
         ERROR(EIO, "classic HFS open file no longer matches its catalog entry");
         return -1;
     }
-    if (v_putcatrec(&update, &leaf) < 0)
+    if (ClassicHfsStoreCatalogEntry(&update, &leaf) < 0)
         return -1;
     file->cat = update;
     file->flags &= ~HFS_UPDATE_CATREC;
@@ -942,7 +942,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	}
 
       if (v_getdthread(vol, HFS_CNID_ROOTDIR, &data, 0) <= 0 ||
-	  v_catsearch(vol, HFS_CNID_ROOTPAR, data.u.dthd.thdCName,
+	  ClassicHfsFindCatalogEntry(vol, HFS_CNID_ROOTPAR, data.u.dthd.thdCName,
 		      &data, cname, 0) < 0)
 	return -1;
 
@@ -1036,7 +1036,7 @@ int hfs_readdir2(
 		}
 
     if (v_getdthread(vol, HFS_CNID_ROOTDIR, pdata, 0) <= 0 ||
-				v_catsearch(vol, HFS_CNID_ROOTPAR, pdata->u.dthd.thdCName,
+				ClassicHfsFindCatalogEntry(vol, HFS_CNID_ROOTPAR, pdata->u.dthd.thdCName,
 					  pdata, cname, 0) < 0)
 				return -1;
 
@@ -1367,7 +1367,7 @@ static int hfs_setattr_impl(hfsvol *vol, char *path, hfsdirent *ent)
 
   ClassicHfsApplyEntry(&data, ent);
 
-  if (v_putcatrec(&data, &n) < 0)
+  if (ClassicHfsStoreCatalogEntry(&data, &n) < 0)
     return -1;
 
   return 0;
@@ -1716,7 +1716,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
       dstid = dst.u.dir.dirDirID;
       strcpy(dstname, srcname);
 
-      found = v_catsearch(vol, dstid, dstname, 0, 0, 0);
+      found = ClassicHfsFindCatalogEntry(vol, dstid, dstname, 0, 0, 0);
       if (found < 0)
 	return -1;
     }
@@ -1852,7 +1852,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
       dst.u.dthd.thdParID = dstid;
       strcpy(dst.u.dthd.thdCName, dstname);
 
-      if (v_putcatrec(&dst, &n) < 0)
+      if (ClassicHfsStoreCatalogEntry(&dst, &n) < 0)
 	return -1;
     }
   else
@@ -1866,7 +1866,7 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 	  dst.u.dthd.thdParID = dstid;
 	  strcpy(dst.u.dthd.thdCName, dstname);
 
-	  if (v_putcatrec(&dst, &n) < 0)
+	  if (ClassicHfsStoreCatalogEntry(&dst, &n) < 0)
 	    return -1;
 	}
     }
@@ -1965,7 +1965,7 @@ int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char 
  if(finder){ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);memcpy(raw+22,finder,32);ClassicHfsDecodeCatalogRecord(raw,sizeof(raw),&data);}
  if(dates){data.u.dir.dirCrDat=ClassicHfsFromUnixSeconds(dates[0]);data.u.dir.dirMdDat=ClassicHfsFromUnixSeconds(dates[1]);}
  if(backup)data.u.dir.dirBkDat=*backup;
- result=v_putcatrec(&data,&n);
+ result=ClassicHfsStoreCatalogEntry(&data,&n);
  done:return ClassicHfsEndTransaction(vol,result);
 }
 
