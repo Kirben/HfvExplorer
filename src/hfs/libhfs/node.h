@@ -20,7 +20,7 @@
 void n_init(node *, btree *, int, int);
 
 int n_new(node *);
-void n_free(node *);
+int n_free(node *);
 
 int n_search(node *, unsigned char *);
 

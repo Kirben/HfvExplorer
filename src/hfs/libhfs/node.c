@@ -58,27 +58,13 @@ void n_init(node *np, btree *bt, int type, int height)
 int n_new(node *np)
 {
   btree *bt = np->bt;
-  unsigned long num;
-
-  if (bt->hdr.bthFree == 0)
-    {
-      ERROR(EIO, "b*-tree full");
-      return -1;
-    }
-
-  num = 0;
-  while (num < bt->hdr.bthNNodes && ClassicHfsBitIsSet(bt->map, num))
-    ++num;
-
-  if (num == bt->hdr.bthNNodes)
-    {
-      ERROR(EIO, "free b*-tree node not found");
-      return -1;
-    }
-
+  uint32_t num = ClassicHfsClaimTreeNode(bt->map, bt->mapsz, bt->hdr.bthNNodes,
+                                         bt->hdr.bthFree);
+  if (!num) {
+    ERROR(EIO, "no usable free node in classic HFS B-tree bitmap");
+    return -1;
+  }
   np->nnum = num;
-
-  ClassicHfsSetBit(bt->map, num);
   --bt->hdr.bthFree;
 
   bt->flags |= HFS_UPDATE_BTHDR;
@@ -90,14 +76,17 @@ int n_new(node *np)
  * NAME:	node->free()
  * DESCRIPTION:	deallocate a b*-tree node
  */
-void n_free(node *np)
+int n_free(node *np)
 {
   btree *bt = np->bt;
-
-  ClassicHfsClearBit(bt->map, np->nnum);
+  if (!ClassicHfsReleaseTreeNode(bt->map, bt->mapsz, bt->hdr.bthNNodes,
+                                 bt->hdr.bthFree, np->nnum)) {
+    ERROR(EIO, "invalid classic HFS B-tree node release");
+    return -1;
+  }
   ++bt->hdr.bthFree;
-
   bt->flags |= HFS_UPDATE_BTHDR;
+  return 0;
 }
 
 /*
@@ -318,7 +307,8 @@ static int finish_merge(node *right, node *left, unsigned char *record, int *fla
 	return -1;
     }
 
-  n_free(right);
+  if (n_free(right) < 0)
+    return -1;
 
   HFS_RECKEYLEN(record) = 0;
   *flag = 1;

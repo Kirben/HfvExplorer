@@ -176,6 +176,20 @@ int main(int argc,char**argv){
        "exact capacity merge rebases sibling offsets and retains record order");
  }
  {
+  unsigned char map[] = {0xff, 0x40};
+  must(!ClassicHfsClaimTreeNode(map, 1, 10, 1) && map[1] == 0x40,
+       "tree allocation stays within installed map");
+  must(ClassicHfsClaimTreeNode(map, 2, 10, 1) == 8 && map[1] == 0xc0,
+       "tree allocation reaches next map byte");
+  must(!ClassicHfsReleaseTreeNode(map, 2, 10, 0, 0) &&
+       ClassicHfsReleaseTreeNode(map, 2, 10, 0, 8) &&
+       !ClassicHfsReleaseTreeNode(map, 2, 10, 1, 8) && map[1] == 0x40,
+       "protect tree header and reject double release");
+  map[0] = 0;
+  must(!ClassicHfsClaimTreeNode(map, 2, 10, 2) && map[0] == 0,
+       "reject missing tree header bit");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

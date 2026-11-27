@@ -20,6 +20,32 @@ static inline void ClassicHfsClearBit(void *bitmap, uint32_t index)
     bytes[index / 8] &= (unsigned char)~(0x80u >> (index % 8));
 }
 
+// Node zero holds the B-tree header. During tree growth the bitmap can
+// temporarily describe only a prefix while additional map nodes are allocated.
+static inline uint32_t ClassicHfsClaimTreeNode(void *map, uint32_t mapBytes,
+                                               uint32_t nodes, uint32_t freeNodes)
+{
+    if (!map || !mapBytes || !freeNodes || freeNodes >= nodes || !ClassicHfsBitIsSet(map, 0))
+        return 0;
+    for (uint32_t i = 1; i < nodes && i / 8 < mapBytes; ++i) {
+        if (!ClassicHfsBitIsSet(map, i)) {
+            ClassicHfsSetBit(map, i);
+            return i;
+        }
+    }
+    return 0;
+}
+
+static inline int ClassicHfsReleaseTreeNode(void *map, uint32_t mapBytes, uint32_t nodes,
+                                            uint32_t freeNodes, uint32_t index)
+{
+    if (!map || !index || index >= nodes || index / 8 >= mapBytes || freeNodes >= nodes - 1 ||
+        !ClassicHfsBitIsSet(map, 0) || !ClassicHfsBitIsSet(map, index))
+        return 0;
+    ClassicHfsClearBit(map, index);
+    return 1;
+}
+
 // Validate the complete range before freeing any of it. Keep the arithmetic
 // wide enough to reject extents whose end exceeds the 16-bit volume limit.
 static inline int ClassicHfsReleaseBlocks(void *bitmap, unsigned count, unsigned first,
