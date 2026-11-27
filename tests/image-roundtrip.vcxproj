@@ -14,7 +14,8 @@
     <ResourceCompile><PreprocessorDefinitions>NDEBUG;HFV_IMAGE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
     <Link><SubSystem>Console</SubSystem><AdditionalDependencies>winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
-<ItemGroup><ClCompile Include="..\src\hfs\libhfs\block.c" />
+<ItemGroup><ClCompile Include="..\src\hfs\ClassicHfsTransaction.c" />
+    <ClCompile Include="..\src\hfs\libhfs\block.c" />
 <ClCompile Include="..\src\hfs\libhfs\btree.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTime.c" />
 <ClCompile Include="..\src\hfs\libhfs\file.c" />

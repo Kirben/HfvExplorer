@@ -421,16 +421,16 @@ hfsvol *hfs_remount_for_recovery(int fd, int pnum, int session) {
 
 /* Publish and flush the dirty flag before any non-journaled session write. */
 int hfs_mark_session_dirty(hfsvol *vol) {
-  if (b_begin_mutation(vol)<0) return -1;
+  if (ClassicHfsBeginTransaction(vol)<0) return -1;
   vol->mdb.drAtrb &= ~HFS_ATRB_UMOUNTED;
   vol->flags |= HFS_UPDATE_MDB;
-  return b_end_mutation(vol,0);
+  return ClassicHfsEndTransaction(vol,0);
 }
 
 /* Publish a clean marker while the caller still owns the durable undo log. */
 int hfs_mark_session_clean(hfsvol *vol) {
-  if (hfs_flush(vol)<0 || b_begin_mutation(vol)<0) return -1;
-  return b_end_mutation(vol,v_flush(vol,1));
+  if (hfs_flush(vol)<0 || ClassicHfsBeginTransaction(vol)<0) return -1;
+  return ClassicHfsEndTransaction(vol,v_flush(vol,1));
 }
 
 /*
@@ -505,11 +505,11 @@ int hfs_umount(hfsvol *vol)
   if(result==0 && !(vol->flags&HFS_READONLY)) {
     if(hfs_flush(vol)<0) {
       result=-1;saved_errno=errno;saved_error=hfs_error;
-    } else if(b_begin_mutation(vol)<0) {
+    } else if(ClassicHfsBeginTransaction(vol)<0) {
       result=-1;saved_errno=errno;saved_error=hfs_error;
     } else {
       int marked=v_flush(vol,1);
-      if(b_end_mutation(vol,marked)<0) {
+      if(ClassicHfsEndTransaction(vol,marked)<0) {
         result=-1;saved_errno=errno;saved_error=hfs_error;
       }
     }
@@ -1302,12 +1302,12 @@ int hfs_close(hfsfile *file)
     physical = forkFields.physical;
     rounded=((hfv_size_t)*logical+vol->mdb.drAlBlkSiz-1)/vol->mdb.drAlBlkSiz*vol->mdb.drAlBlkSiz;
     if((file->flags&HFS_UPDATE_CATREC)||*physical!=rounded) {
-      if(b_begin_mutation(vol)<0) {
+      if(ClassicHfsBeginTransaction(vol)<0) {
         if(!(vol->flags&HFS_WRITE_FAILED))return -1; // Keep the view for retry.
         result=-1;
       } else {
         if(f_trunc(file)<0||ClassicHfsFlushOpenFile(file)<0)result=-1;
-        result=b_end_mutation(vol,result);
+        result=ClassicHfsEndTransaction(vol,result);
         if(result<0&&!(vol->flags&HFS_WRITE_FAILED))return -1;
       }
     }
@@ -1897,13 +1897,13 @@ static int mutation_source(hfsvol **vol,char *path) {
 }
 int hfs_delete(hfsvol *vol,char *path) {
  int result;
- if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_delete_impl(vol,path);return b_end_mutation(vol,result);
+ if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_delete_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
 }
 int hfs_rename(hfsvol *vol,char *source,char *destination) {
  int result;
- if(mutation_source(&vol,source)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_rename_impl(vol,source,destination);return b_end_mutation(vol,result);
+ if(mutation_source(&vol,source)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_rename_impl(vol,source,destination);return ClassicHfsEndTransaction(vol,result);
 }
 
 static int mutation_target(hfsvol **vol,char *path) {
@@ -1916,18 +1916,18 @@ static int mutation_target(hfsvol **vol,char *path) {
 }
 int hfs_mkdir(hfsvol *vol,char *path) {
  int result;
- if(mutation_target(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_mkdir_impl(vol,path);return b_end_mutation(vol,result);
+ if(mutation_target(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_mkdir_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
 }
 int hfs_create(hfsvol *vol,char *path,char *type,char *creator) {
  int result;
- if(mutation_target(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_create_impl(vol,path,type,creator);return b_end_mutation(vol,result);
+ if(mutation_target(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_create_impl(vol,path,type,creator);return ClassicHfsEndTransaction(vol,result);
 }
 int hfs_rmdir(hfsvol *vol,char *path) {
  int result;
- if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_rmdir_impl(vol,path);return b_end_mutation(vol,result);
+ if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_rmdir_impl(vol,path);return ClassicHfsEndTransaction(vol,result);
 }
 int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
  int result;hfsdirent source,target;
@@ -1935,16 +1935,16 @@ int hfs_editattrs(hfsvol *vol,char *path,char *destination,hfsdirent *entry) {
  if(hfs_stat(vol,path,&source)<0)return -1;
  /* This is a leaf rename, never an implicit move into an existing folder. */
  if(strcmp(path,destination)&&hfs_stat(vol,destination,&target)==0&&target.cnid!=source.cnid){ERROR(EEXIST,"Properties rename destination already exists");return -1;}
- if(b_begin_mutation(vol)<0)return -1;
+ if(ClassicHfsBeginTransaction(vol)<0)return -1;
  result=strcmp(path,destination)?hfs_rename_impl(vol,path,destination):0;
  if(result==0)result=hfs_setattr_impl(vol,destination,entry);
- return b_end_mutation(vol,result);
+ return ClassicHfsEndTransaction(vol,result);
 }
 
 int hfs_setattr(hfsvol *vol,char *path,hfsdirent *entry) {
  int result;
- if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
- result=hfs_setattr_impl(vol,path,entry);return b_end_mutation(vol,result);
+ if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
+ result=hfs_setattr_impl(vol,path,entry);return ClassicHfsEndTransaction(vol,result);
 }
 
 int hfs_getfinderinfo(hfsvol *vol,char *path,unsigned char *finder) {
@@ -1963,14 +1963,14 @@ int hfs_fsetfinderinfo(hfsfile *file,const unsigned char *finder) {
 }
 int hfs_setdirmetadata(hfsvol *vol,char *path,long expected,const unsigned char *finder,const time_t *dates,const unsigned long *backup) {
  CatDataRec data;node n;unsigned char raw[70];int result=-1;
- if(mutation_source(&vol,path)<0||b_begin_mutation(vol)<0)return -1;
+ if(mutation_source(&vol,path)<0||ClassicHfsBeginTransaction(vol)<0)return -1;
  if(v_resolve(vol,path,&data,0,0,&n)<=0)goto done;
  if(data.cdrType!=cdrDirRec||data.u.dir.dirDirID!=expected){ERROR(EINVAL,"Destination folder changed during copying");goto done;}
  if(finder){ClassicHfsEncodeCatalogRecord(raw,sizeof(raw),&data);memcpy(raw+22,finder,32);ClassicHfsDecodeCatalogRecord(raw,sizeof(raw),&data);}
  if(dates){data.u.dir.dirCrDat=ClassicHfsFromUnixSeconds(dates[0]);data.u.dir.dirMdDat=ClassicHfsFromUnixSeconds(dates[1]);}
  if(backup)data.u.dir.dirBkDat=*backup;
  result=v_putcatrec(&data,&n);
- done:return b_end_mutation(vol,result);
+ done:return ClassicHfsEndTransaction(vol,result);
 }
 
 int hfs_truncate(hfsfile *file,unsigned long length) {
@@ -1980,16 +1980,16 @@ int hfs_truncate(hfsfile *file,unsigned long length) {
  logical = ClassicHfsSelectedFork(file).logical;
  if(*logical<=length)return 0;
  vol=file->vol;
- if(b_begin_mutation(vol)<0)return -1;
+ if(ClassicHfsBeginTransaction(vol)<0)return -1;
  result=hfs_truncate_impl(file,length);
  if(result==0&&f_trunc(file)<0)result=-1;
  if(result==0&&ClassicHfsFlushOpenFile(file)<0)result=-1;
- return b_end_mutation(vol,result);
+ return ClassicHfsEndTransaction(vol,result);
 }
 
 int hfs_flush(hfsvol *vol) {
  if(v_getvol(&vol)<0)return -1;
  if(vol->flags&HFS_READONLY)return hfs_flush_raw(vol);
- if(b_begin_mutation(vol)<0)return -1;
- return b_end_mutation(vol,0);
+ if(ClassicHfsBeginTransaction(vol)<0)return -1;
+ return ClassicHfsEndTransaction(vol,0);
 }

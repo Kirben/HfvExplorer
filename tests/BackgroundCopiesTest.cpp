@@ -36,8 +36,8 @@ extern "C" {
 #include "hfs/libhfs/hfs.h"
 #include "hfs/interface.h"
 #include "hfs/binhex.h"
-int b_begin_mutation(hfsvol*);
-int b_end_mutation(hfsvol*,int);
+int ClassicHfsBeginTransaction(hfsvol*);
+int ClassicHfsEndTransaction(hfsvol*,int);
 }
 #include "FakeFloppy.h"
 #include "ReadOnlyCdBackend.h"
@@ -380,7 +380,7 @@ int RunIndependentStorageTest(const char* directory){
   jobs.front().Job()->resolve(Storage::ConflictChoice::Replace);Until([&]{return jobs.front().Job()->done();});Check(!jobs.front().Job()->result().code,"raw converter failed after independent work");{auto a=MacBrowser::OpenClassic((LPCSTR)aPath,"SameLabel:",false);auto id=Find(*a,u"Input");char bytes[11]{};Check(id&&a->Stat(id).forks[0].size==11,"raw import inherited MacBinary mode");a->Read(id,0,0,bytes,11);Check(!memcmp(bytes,"RAW CONTENT",11),"raw import data changed");a->Close();}
   fprintf(report,"PASS: simultaneous real classic raw/MacBinary converters, same-label mount isolation, per-job callbacks/settings/resource forks, seven queued conflicts without worker starvation, independent classic browser navigation, queued cancellation and writer exclusion.\n");
 
-  Gate mutationGate;auto undo=Storage::copyWorker().submit([&](Storage::Job&){LegacyEngine::Scope engine;auto v=hfs_mount(const_cast<char*>((LPCSTR)aPath),0,O_RDWR);Check(v&&b_begin_mutation(v)==0,"begin isolated undo");SetEvent(mutationGate.entered);bool released=WaitForSingleObject(mutationGate.release,15000)==WAIT_OBJECT_0;int rolled=b_end_mutation(v,-1);int closed=hfs_umount(v);Check(released&&rolled<0&&closed==0,"isolated undo cleanup");return Storage::Result{};});
+  Gate mutationGate;auto undo=Storage::copyWorker().submit([&](Storage::Job&){LegacyEngine::Scope engine;auto v=hfs_mount(const_cast<char*>((LPCSTR)aPath),0,O_RDWR);Check(v&&ClassicHfsBeginTransaction(v)==0,"begin isolated undo");SetEvent(mutationGate.entered);bool released=WaitForSingleObject(mutationGate.release,15000)==WAIT_OBJECT_0;int rolled=ClassicHfsEndTransaction(v,-1);int closed=hfs_umount(v);Check(released&&rolled<0&&closed==0,"isolated undo cleanup");return Storage::Result{};});
   struct ReleaseUndo{Gate& gate;std::shared_ptr<Storage::Job> job;~ReleaseUndo(){SetEvent(gate.release);job->wait();}}releaseUndo{mutationGate,undo};Until([&]{return WaitForSingleObject(mutationGate.entered,0)==WAIT_OBJECT_0;});
   auto mutate=Storage::copyWorker().submit([&](Storage::Job&){LegacyEngine::Scope engine;auto v=hfs_mount(const_cast<char*>((LPCSTR)bPath),0,O_RDWR);Check(v!=nullptr,"mount independent undo volume");char name[]=":Concurrent";int changed=hfs_mkdir(v,name);int closed=hfs_umount(v);Check(changed==0&&closed==0,"unrelated mutation inherited another volume's undo state");return Storage::Result{};});Until([&]{return mutate->done();});Check(!mutate->result().code&&!undo->done(),"independent undo operations serialized or failed");SetEvent(mutationGate.release);Until([&]{return undo->done();});Check(!undo->result().code,"first undo lost its state");
   fprintf(report,"PASS: classic mutation/rollback contexts run simultaneously on different volumes without sharing active undo state.\n");

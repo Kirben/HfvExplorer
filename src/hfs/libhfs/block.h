@@ -26,8 +26,11 @@ int ClassicHfsWriteSector(hfsvol *, unsigned long, block *);
 
 int ClassicHfsTransferAllocationSector(hfsvol *, unsigned, unsigned, block *, int writing);
 
-int b_begin_mutation(hfsvol *);
-int b_end_mutation(hfsvol *, int);
+int ClassicHfsCaptureBeforeWrite(hfsvol *, unsigned long);
+int ClassicHfsLoadRawSector(void *, unsigned long, block *);
+int ClassicHfsStoreRawSector(void *, unsigned long, block *);
+int ClassicHfsBeginTransaction(hfsvol *);
+int ClassicHfsEndTransaction(hfsvol *, int);
 
 int hfs_flush_raw(hfsvol *);
 void b_quarantine_volume(hfsvol *, const char *);

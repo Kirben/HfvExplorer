@@ -27,7 +27,7 @@ ARFLAGS =	rcs
 
 NAME =		libhfs
 TARGET =	$(NAME).a
-OBJS =		../ClassicHfsTime.o block.o low.o file.o btree.o node.o volume.o  \
+OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o block.o low.o file.o btree.o node.o volume.o  \
 		hfs.o os2open.o
 
 ###############################################################################

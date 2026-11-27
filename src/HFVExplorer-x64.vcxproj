@@ -54,6 +54,7 @@
     <ClCompile Include="StdAfx.cpp" />
     <ClCompile Include="utils.cpp" />
     <ClCompile Include="hfs\binhex.c" />
+    <ClCompile Include="hfs\ClassicHfsTransaction.c" />
     <ClCompile Include="hfs\libhfs\block.c" />
     <ClCompile Include="hfs\libhfs\btree.c" />
     <ClCompile Include="hfs\copyhfs.c" />

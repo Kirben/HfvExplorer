@@ -11,7 +11,7 @@ extern "C" {
 struct hfs_engine_context {
  struct _hfsvol_ *mounts, *current;
  char *error;
- struct mutation *mutation;
+ struct ClassicHfsTransaction *mutation;
  char failure_after_close[512];
 };
 struct hfs_engine_context *hfs_context_get(void);
