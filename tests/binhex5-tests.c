@@ -123,6 +123,34 @@ static void verify_formatted_tree_headers(const char *image)
     fclose(file);
 }
 
+// Corrupt only the new test image, before its first writable mount.
+static void verify_repeated_tree_map(char *image)
+{
+    unsigned char mdb[512], original[1024], changed[1024];
+    FILE *f = fopen(image, "r+b");
+    must(f && fseek(f, 1024, SEEK_SET) == 0 && fread(mdb, 1, 512, f) == 512, "read test MDB");
+    long tree = ClassicHfsRead16(mdb + 28) * 512L +
+                ClassicHfsRead16(mdb + 134) * ClassicHfsRead32(mdb + 20);
+    must(fseek(f, tree, SEEK_SET) == 0 && fread(original, 1, sizeof(original), f) == sizeof(original),
+         "save extents header and following node");
+    memcpy(changed, original, 512);
+    memset(changed + 512, 0, 512);
+    ClassicHfsWrite32(changed, 1);
+    unsigned char *part = changed + 512;
+    ClassicHfsWrite32(part, 1);
+    part[8] = 2;
+    ClassicHfsWrite16(part + 10, 1);
+    ClassicHfsWrite16(part + 510, 14);
+    ClassicHfsWrite16(part + 508, 506);
+    must(fseek(f, tree, SEEK_SET) == 0 && fwrite(changed, 1, sizeof(changed), f) == sizeof(changed)
+         && fclose(f) == 0, "install self-linked tree map");
+    must(hfs_mount(image, 0, O_RDONLY) == NULL && hfs_error && strstr(hfs_error, "repeated"),
+         "mount rejects repeated map node");
+    f = fopen(image, "r+b");
+    must(f && fseek(f, tree, SEEK_SET) == 0 && fwrite(original, 1, sizeof(original), f) == sizeof(original)
+         && fclose(f) == 0, "restore disposable test image");
+}
+
 int main(int argc,char**argv){
     {
         ClassicHfsTreeHeader header = {0};
@@ -769,7 +797,7 @@ int main(int argc,char**argv){
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
- must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
+ must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  must(ClassicHfsCompareNames("A", "a") == 0 && ClassicHfsCompareNames("a", "ab") < 0 &&
       ClassicHfsCompareNames("\x80", "\x8a") == 0 && ClassicHfsCompareNames("a", "\x80") < 0 &&
       ClassicHfsCompareNames(" ", "\xca") == 0, "classic MacRoman name ordering");

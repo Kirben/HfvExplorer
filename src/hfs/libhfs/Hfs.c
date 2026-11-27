@@ -66,6 +66,7 @@
 #include "../ClassicHfsSystemFiles.h"
 #include "../ClassicHfsFormatTree.h"
 # include "btree.h"
+#include "../ClassicHfsTreeMount.h"
 # include "node.h"
 #include "../ClassicHfsEntry.h"
 # include "volume.h"
@@ -339,8 +340,8 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       /* read the volume bitmap and extents/catalog B*-tree headers */
 
       if (ClassicHfsLoadVolumeBitmap(vol) < 0 ||
-	  bt_readhdr(&vol->ext) < 0 ||
-	  bt_readhdr(&vol->cat) < 0)
+	  ClassicHfsLoadTreeHeader(&vol->ext) < 0 ||
+	  ClassicHfsLoadTreeHeader(&vol->cat) < 0)
 	{
 	  close(vol->fd);
 	  v_destruct(vol);
