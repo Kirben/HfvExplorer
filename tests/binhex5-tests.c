@@ -29,6 +29,10 @@ static void save(const char* path,const unsigned char* bytes,unsigned size){HAND
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
 static unsigned char value(unsigned i,unsigned fork){return (unsigned char)((i*37)^(i>>3)^(fork*91));}
 static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(v,name);unsigned fork;unsigned char b[5000];must(f!=NULL,"open imported forks");for(fork=0;fork<2;fork++){unsigned n=fork?r:d,i;must(hfs_setfork(f,fork)==0,"choose fork");must(hfs_read(f,b,n)==n,"read imported fork");for(i=0;i<n;i++)must(b[i]==value(i,fork),"fork byte fidelity");must(hfs_read(f,b,1)==0,"fork EOF");}must(hfs_close(f)==0,"close imported forks");}
+static int compare_test_keys(unsigned char *left, unsigned char *right)
+{
+ return (int)left[1] - right[1];
+}
 int main(int argc,char**argv){
  char image[1024],path[1024],badpath[1024],source[]="BH5:Source",target[]="BH5:Imported",label[]="BH5";
  HANDLE host;LARGE_INTEGER length;hfsvol*v;unsigned cases[][2]={{0,0},{1,0},{0,1},{127,129},{128,128},{129,127},{4097,3073}};unsigned k,fork;
@@ -188,6 +192,25 @@ int main(int argc,char**argv){
   map[0] = 0;
   must(!ClassicHfsClaimTreeNode(map, 2, 10, 2) && map[0] == 0,
        "reject missing tree header bit");
+ }
+ {
+  unsigned char bytes[512] = {0}, key[2] = {1, 0};
+  uint16_t offsets[9];
+  for (int i = 0; i <= 8; ++i) offsets[i] = (uint16_t)(14 + i * 2);
+  for (unsigned mask = 0; mask < 256; ++mask) {
+   for (int i = 0; i < 8; ++i) {
+    bytes[offsets[i]] = (unsigned char)((mask >> i) & 1);
+    bytes[offsets[i] + 1] = (unsigned char)(2 + 2 * (i / 2));
+   }
+   for (key[1] = 0; key[1] <= 10; ++key[1]) {
+    int expected = -1, observed = -2;
+    for (int i = 0; i < 8; ++i)
+     if (bytes[offsets[i]] && bytes[offsets[i] + 1] <= key[1]) expected = i;
+    int exact = ClassicHfsSearchNode(bytes, offsets, 8, key, compare_test_keys, &observed);
+    must(observed == expected && exact == (expected >= 0 && bytes[offsets[expected] + 1] == key[1]),
+         "node lookup preserves last live predecessor and exact match");
+   }
+  }
  }
  {
   unsigned char source[106], output[107];

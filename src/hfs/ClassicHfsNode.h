@@ -95,6 +95,35 @@ static inline int ClassicHfsMergeNodeRecords(unsigned char *left, uint16_t *offs
     return 1;
 }
 
+// Search a decoded node for its last live key <= the requested key.
+static inline int ClassicHfsSearchNode(unsigned char *bytes, const uint16_t *offsets,
+                                       int count, unsigned char *key,
+                                       int (*compare)(unsigned char *, unsigned char *),
+                                       int *predecessor)
+{
+    int first = 0, end = count, exact = 0;
+    *predecessor = -1;
+    while (first < end) {
+        int middle = first + (end - first) / 2;
+        int live = middle;
+        while (live >= first && !bytes[offsets[live]])
+            --live;
+        if (live < first) {
+            first = middle + 1;
+            continue;
+        }
+        int order = compare(bytes + offsets[live], key);
+        if (order > 0) {
+            end = live;
+        } else {
+            *predecessor = live;
+            exact = order == 0;
+            first = middle + 1;
+        }
+    }
+    return exact;
+}
+
 static inline int ClassicHfsDecodeNode(const unsigned char *bytes, ClassicHfsNodeDescriptor *node,
                                       uint16_t *offsets)
 {

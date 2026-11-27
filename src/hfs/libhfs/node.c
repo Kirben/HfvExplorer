@@ -108,27 +108,8 @@ static int compact_node(node *np)
  */
 int n_search(node *np, unsigned char *key)
 {
-  btree *bt = np->bt;
-  int i, comp = -1;
-
-  for (i = np->nd.ndNRecs; i--; )
-    {
-      unsigned char *rec;
-
-      rec = HFS_NODEREC(*np, i);
-
-      if (HFS_RECKEYLEN(rec) == 0)
-	continue;  /* deleted record */
-
-      comp = bt->compare(rec, key);
-
-      if (comp <= 0)
-	break;
-    }
-
-  np->rnum = i;
-
-  return comp == 0;
+  return ClassicHfsSearchNode(np->data, np->roff, np->nd.ndNRecs,
+                              key, np->bt->compare, &np->rnum);
 }
 
 /*
