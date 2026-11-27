@@ -10,7 +10,7 @@
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtents.h"
-#include "hfs/ClassicHfsNode.h"
+#include "hfs/ClassicHfsNodeIO.h"
 #include "hfs/ClassicHfsGeometry.h"
 #include "hfs/ClassicHfsBitmap.h"
 #include "hfs/ClassicHfsTreeHeader.h"
@@ -29,6 +29,11 @@ static void save(const char* path,const unsigned char* bytes,unsigned size){HAND
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
 static unsigned char value(unsigned i,unsigned fork){return (unsigned char)((i*37)^(i>>3)^(fork*91));}
 static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(v,name);unsigned fork;unsigned char b[5000];must(f!=NULL,"open imported forks");for(fork=0;fork<2;fork++){unsigned n=fork?r:d,i;must(hfs_setfork(f,fork)==0,"choose fork");must(hfs_read(f,b,n)==n,"read imported fork");for(i=0;i<n;i++)must(b[i]==value(i,fork),"fork byte fidelity");must(hfs_read(f,b,1)==0,"fork EOF");}must(hfs_close(f)==0,"close imported forks");}
+static int count_node_transfers(void *context, uint32_t number, unsigned char (*bytes)[512])
+{
+ ++*(int *)context;
+ return 0;
+}
 static int compare_test_keys(unsigned char *left, unsigned char *right)
 {
  return (int)left[1] - right[1];
@@ -269,6 +274,21 @@ int main(int argc,char**argv){
   must(!ClassicHfsRelinkSuccessor(&next, 8, &previous, 6, 8) &&
        ClassicHfsRelinkSuccessor(&next, 9, &previous, 6, 8) && next.ndBLink == 8,
        "reject successor self-link and install valid replacement");
+ }
+ {
+  unsigned char bytes[512] = {0}, map = 0x80;
+  uint16_t offsets[36] = {14}; ClassicHfsNodeDescriptor descriptor = {0};
+  int calls = 0;
+  must(ClassicHfsTransferNode(8, 16, &map, 1, &bytes, &descriptor, offsets, 1,
+       count_node_transfers, &calls) == ClassicHfsNodeUnavailable && calls == 0,
+       "short bitmap blocks writes before storage access");
+  must(ClassicHfsTransferNode(0, 0, NULL, 0, &bytes, &descriptor, offsets, 1,
+       count_node_transfers, &calls) == ClassicHfsNodeUnavailable && calls == 0,
+       "unmapped header cannot be written");
+  ClassicHfsWrite16(bytes + 510, 14);
+  must(ClassicHfsTransferNode(0, 0, NULL, 0, &bytes, &descriptor, offsets, 0,
+       count_node_transfers, &calls) == ClassicHfsNodeOk && calls == 1,
+       "read header before installing bitmap");
  }
  {
   unsigned char source[106], output[107];

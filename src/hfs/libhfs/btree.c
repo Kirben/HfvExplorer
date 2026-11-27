@@ -23,76 +23,43 @@
 
 # include "internal.h"
 #include "../ClassicHfsBytes.h"
+#include "../ClassicHfsNodeIO.h"
 # include "block.h"
 # include "file.h"
 # include "btree.h"
 # include "node.h"
 
-/*
- * NAME:	btree->getnode()
- * DESCRIPTION:	retrieve a numbered node from a B*-tree file
- */
-int bt_getnode(node *np)
+static int read_node_block(void *file, uint32_t number, block *bytes)
 {
-  btree *bt = np->bt;
-  block *bp = &np->data;
-
-  /* verify the node exists and is marked as in-use */
-
-  if (np->nnum < 0 || (np->nnum > 0 && np->nnum >= bt->hdr.bthNNodes))
-    {
-      ERROR(EIO, "read nonexistent b*-tree node");
-      return -1;
-    }
-
-  if (bt->map && (np->nnum / 8 >= bt->mapsz || !ClassicHfsBitIsSet(bt->map, np->nnum)))
-    {
-      ERROR(EIO, "read unallocated b*-tree node");
-      return -1;
-    }
-
-  if (f_getblock(&bt->f, np->nnum, bp) < 0)
-    return -1;
-
-  if (!ClassicHfsDecodeNode(*bp, &np->nd, np->roff)) {
-      ERROR(EIO, "invalid b*-tree node record offsets");
-      return -1;
-  }
-
-  return 0;
+  return f_getblock((hfsfile *)file, number, bytes);
 }
 
-/*
- * NAME:	btree->putnode()
- * DESCRIPTION:	store a numbered node into a B*-tree file
- */
-int bt_putnode(node *np)
+static int write_node_block(void *file, uint32_t number, block *bytes)
+{
+  return f_putblock((hfsfile *)file, number, bytes);
+}
+
+static int transfer_node(node *np, int writing)
 {
   btree *bt = np->bt;
-  block *bp = &np->data;
+  ClassicHfsNodeStatus result = ClassicHfsTransferNode(np->nnum, bt->hdr.bthNNodes,
+      bt->map, bt->mapsz, &np->data, &np->nd, np->roff, writing,
+      writing ? write_node_block : read_node_block, &bt->f);
+  if (result == ClassicHfsNodeUnavailable)
+    { ERROR(EIO, "classic HFS B-tree node outside allocated map"); }
+  else if (result == ClassicHfsNodeBadOffsets)
+    { ERROR(EIO, "invalid classic HFS B-tree node offsets"); }
+  return result == ClassicHfsNodeOk ? 0 : -1;
+}
 
-  /* verify the node exists and is marked as in-use */
+int bt_getnode(node *np)
+{
+  return transfer_node(np, 0);
+}
 
-  if (np->nnum && np->nnum >= bt->hdr.bthNNodes)
-    {
-      ERROR(EIO, "write nonexistent b*-tree node");
-      return -1;
-    }
-  else if (bt->map && ! ClassicHfsBitIsSet(bt->map, np->nnum))
-    {
-      ERROR(EIO, "write unallocated b*-tree node");
-      return -1;
-    }
-
-  if (!ClassicHfsEncodeNode(*bp, &np->nd, np->roff)) {
-      ERROR(EIO, "invalid b*-tree node record offsets");
-      return -1;
-  }
-
-  if (f_putblock(&bt->f, np->nnum, bp) < 0)
-    return -1;
-
-  return 0;
+int bt_putnode(node *np)
+{
+  return transfer_node(np, 1);
 }
 
 /*
