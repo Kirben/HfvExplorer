@@ -19,15 +19,5 @@
 
 #include "../ClassicHfsBytes.h"
 
-void d_fetchb(unsigned char **, char *);
-void d_fetchw(unsigned char **, short *);
-void d_fetchl(unsigned char **, long *);
-void d_fetchs(unsigned char **, char *, int);
-
-void d_storeb(unsigned char **, char);
-void d_storew(unsigned char **, short);
-void d_storel(unsigned char **, long);
-void d_stores(unsigned char **, char *, int);
-
 unsigned long d_tomtime(unsigned long);
 unsigned long d_toutime(unsigned long);

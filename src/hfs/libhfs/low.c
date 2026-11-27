@@ -35,6 +35,7 @@
 
 # include "internal.h"
 # include "data.h"
+# include "../ClassicHfsRecordBytes.h"
 # include "block.h"
 # include "low.h"
 # include "file.h"
@@ -78,16 +79,16 @@ int l_readblock0(hfsvol *vol)
   if (b_readlb(vol, 0, &b) < 0)
     return -1;
 
-  d_fetchw(&ptr, &rec.sbSig);
-  d_fetchw(&ptr, &rec.sbBlkSize);
-  d_fetchl(&ptr, &rec.sbBlkCount);
-  d_fetchw(&ptr, &rec.sbDevType);
-  d_fetchw(&ptr, &rec.sbDevId);
-  d_fetchl(&ptr, &rec.sbData);
-  d_fetchw(&ptr, &rec.sbDrvrCount);
-  d_fetchl(&ptr, &rec.ddBlock);
-  d_fetchw(&ptr, &rec.ddSize);
-  d_fetchw(&ptr, &rec.ddType);
+  rec.sbSig = ClassicHfsTake16(&ptr);
+  rec.sbBlkSize = ClassicHfsTake16(&ptr);
+  rec.sbBlkCount = ClassicHfsTake32(&ptr);
+  rec.sbDevType = ClassicHfsTake16(&ptr);
+  rec.sbDevId = ClassicHfsTake16(&ptr);
+  rec.sbData = ClassicHfsTake32(&ptr);
+  rec.sbDrvrCount = ClassicHfsTake16(&ptr);
+  rec.ddBlock = ClassicHfsTake32(&ptr);
+  rec.ddSize = ClassicHfsTake16(&ptr);
+  rec.ddType = ClassicHfsTake16(&ptr);
 
   switch (rec.sbSig)
     {
@@ -144,11 +145,11 @@ int l_readpm(hfsvol *vol)
 
       ptr = b;
 
-      d_fetchw(&ptr, &map.pmSig);
-      d_fetchw(&ptr, &map.pmSigPad);
-      d_fetchl(&ptr, &map.pmMapBlkCnt);
-      d_fetchl(&ptr, &map.pmPyPartStart);
-      d_fetchl(&ptr, &map.pmPartBlkCnt);
+      map.pmSig = ClassicHfsTake16(&ptr);
+      map.pmSigPad = ClassicHfsTake16(&ptr);
+      map.pmMapBlkCnt = ClassicHfsTake32(&ptr);
+      map.pmPyPartStart = ClassicHfsTake32(&ptr);
+      map.pmPartBlkCnt = ClassicHfsTake32(&ptr);
 
       memcpy(map.pmPartName, ptr, 32);
       map.pmPartName[32] = 0;
@@ -158,16 +159,16 @@ int l_readpm(hfsvol *vol)
       map.pmParType[32] = 0;
       ptr += 32;
 
-      d_fetchl(&ptr, &map.pmLgDataStart);
-      d_fetchl(&ptr, &map.pmDataCnt);
-      d_fetchl(&ptr, &map.pmPartStatus);
-      d_fetchl(&ptr, &map.pmLgBootStart);
-      d_fetchl(&ptr, &map.pmBootSize);
-      d_fetchl(&ptr, &map.pmBootAddr);
-      d_fetchl(&ptr, &map.pmBootAddr2);
-      d_fetchl(&ptr, &map.pmBootEntry);
-      d_fetchl(&ptr, &map.pmBootEntry2);
-      d_fetchl(&ptr, &map.pmBootCksum);
+      map.pmLgDataStart = ClassicHfsTake32(&ptr);
+      map.pmDataCnt = ClassicHfsTake32(&ptr);
+      map.pmPartStatus = ClassicHfsTake32(&ptr);
+      map.pmLgBootStart = ClassicHfsTake32(&ptr);
+      map.pmBootSize = ClassicHfsTake32(&ptr);
+      map.pmBootAddr = ClassicHfsTake32(&ptr);
+      map.pmBootAddr2 = ClassicHfsTake32(&ptr);
+      map.pmBootEntry = ClassicHfsTake32(&ptr);
+      map.pmBootEntry2 = ClassicHfsTake32(&ptr);
+      map.pmBootCksum = ClassicHfsTake32(&ptr);
 
       memcpy(map.pmProcessor, ptr, 16);
       map.pmProcessor[16] = 0;
@@ -227,54 +228,54 @@ int l_readmdb(hfsvol *vol)
   if (b_readlb(vol, 2, &b) < 0)
     return -1;
 
-  d_fetchw(&ptr, &mdb->drSigWord);
-  d_fetchl(&ptr, &mdb->drCrDate);
-  d_fetchl(&ptr, &mdb->drLsMod);
-  d_fetchw(&ptr, &mdb->drAtrb);
-  d_fetchw(&ptr, (short *) &mdb->drNmFls);
-  d_fetchw(&ptr, (short *) &mdb->drVBMSt);
-  d_fetchw(&ptr, (short *) &mdb->drAllocPtr);
-  d_fetchw(&ptr, (short *) &mdb->drNmAlBlks);
-  d_fetchl(&ptr, (long *)  &mdb->drAlBlkSiz);
-  d_fetchl(&ptr, (long *)  &mdb->drClpSiz);
-  d_fetchw(&ptr, (short *) &mdb->drAlBlSt);
-  d_fetchl(&ptr, &mdb->drNxtCNID);
-  d_fetchw(&ptr, (short *) &mdb->drFreeBks);
+  mdb->drSigWord = ClassicHfsTake16(&ptr);
+  mdb->drCrDate = ClassicHfsTake32(&ptr);
+  mdb->drLsMod = ClassicHfsTake32(&ptr);
+  mdb->drAtrb = ClassicHfsTake16(&ptr);
+  mdb->drNmFls = ClassicHfsTake16(&ptr);
+  mdb->drVBMSt = ClassicHfsTake16(&ptr);
+  mdb->drAllocPtr = ClassicHfsTake16(&ptr);
+  mdb->drNmAlBlks = ClassicHfsTake16(&ptr);
+  mdb->drAlBlkSiz = ClassicHfsTake32(&ptr);
+  mdb->drClpSiz = ClassicHfsTake32(&ptr);
+  mdb->drAlBlSt = ClassicHfsTake16(&ptr);
+  mdb->drNxtCNID = ClassicHfsTake32(&ptr);
+  mdb->drFreeBks = ClassicHfsTake16(&ptr);
 
-  d_fetchs(&ptr, mdb->drVN, sizeof(mdb->drVN));
+  ClassicHfsTakeName(&ptr, mdb->drVN, sizeof(mdb->drVN));
 
 # ifdef DEBUG
   if (ptr - b != 64)
     abort();
 # endif
 
-  d_fetchl(&ptr, &mdb->drVolBkUp);
-  d_fetchw(&ptr, &mdb->drVSeqNum);
-  d_fetchl(&ptr, (long *)  &mdb->drWrCnt);
-  d_fetchl(&ptr, (long *)  &mdb->drXTClpSiz);
-  d_fetchl(&ptr, (long *)  &mdb->drCTClpSiz);
-  d_fetchw(&ptr, (short *) &mdb->drNmRtDirs);
-  d_fetchl(&ptr, (long *)  &mdb->drFilCnt);
-  d_fetchl(&ptr, (long *)  &mdb->drDirCnt);
+  mdb->drVolBkUp = ClassicHfsTake32(&ptr);
+  mdb->drVSeqNum = ClassicHfsTake16(&ptr);
+  mdb->drWrCnt = ClassicHfsTake32(&ptr);
+  mdb->drXTClpSiz = ClassicHfsTake32(&ptr);
+  mdb->drCTClpSiz = ClassicHfsTake32(&ptr);
+  mdb->drNmRtDirs = ClassicHfsTake16(&ptr);
+  mdb->drFilCnt = ClassicHfsTake32(&ptr);
+  mdb->drDirCnt = ClassicHfsTake32(&ptr);
 
   for (i = 0; i < 8; ++i)
-    d_fetchl(&ptr, &mdb->drFndrInfo[i]);
+    mdb->drFndrInfo[i] = ClassicHfsTake32(&ptr);
 
 # ifdef DEBUG
   if (ptr - b != 124)
     abort();
 # endif
 
-  d_fetchw(&ptr, (short *) &mdb->drVCSize);
-  d_fetchw(&ptr, (short *) &mdb->drVBMCSize);
-  d_fetchw(&ptr, (short *) &mdb->drCtlCSize);
+  mdb->drVCSize = ClassicHfsTake16(&ptr);
+  mdb->drVBMCSize = ClassicHfsTake16(&ptr);
+  mdb->drCtlCSize = ClassicHfsTake16(&ptr);
 
-  d_fetchl(&ptr, (long *)  &mdb->drXTFlSize);
+  mdb->drXTFlSize = ClassicHfsTake32(&ptr);
 
   for (i = 0; i < 3; ++i)
     {
-      d_fetchw(&ptr, (short *) &mdb->drXTExtRec[i].xdrStABN);
-      d_fetchw(&ptr, (short *) &mdb->drXTExtRec[i].xdrNumABlks);
+      mdb->drXTExtRec[i].xdrStABN = ClassicHfsTake16(&ptr);
+      mdb->drXTExtRec[i].xdrNumABlks = ClassicHfsTake16(&ptr);
     }
 
 # ifdef DEBUG
@@ -282,12 +283,12 @@ int l_readmdb(hfsvol *vol)
     abort();
 # endif
 
-  d_fetchl(&ptr, (long *) &mdb->drCTFlSize);
+  mdb->drCTFlSize = ClassicHfsTake32(&ptr);
 
   for (i = 0; i < 3; ++i)
     {
-      d_fetchw(&ptr, (short *) &mdb->drCTExtRec[i].xdrStABN);
-      d_fetchw(&ptr, (short *) &mdb->drCTExtRec[i].xdrNumABlks);
+      mdb->drCTExtRec[i].xdrStABN = ClassicHfsTake16(&ptr);
+      mdb->drCTExtRec[i].xdrNumABlks = ClassicHfsTake16(&ptr);
     }
 
 # ifdef DEBUG
@@ -397,52 +398,52 @@ int l_writemdb(hfsvol *vol)
   mdb->drCTClpSiz = cat->clump;
   memcpy(mdb->drCTExtRec, cat->cat.u.fil.filExtRec, sizeof(ExtDataRec));
 
-  d_storew(&ptr, mdb->drSigWord);
-  d_storel(&ptr, mdb->drCrDate);
-  d_storel(&ptr, mdb->drLsMod);
-  d_storew(&ptr, mdb->drAtrb);
-  d_storew(&ptr, mdb->drNmFls);
-  d_storew(&ptr, mdb->drVBMSt);
-  d_storew(&ptr, mdb->drAllocPtr);
-  d_storew(&ptr, mdb->drNmAlBlks);
-  d_storel(&ptr, mdb->drAlBlkSiz);
-  d_storel(&ptr, mdb->drClpSiz);
-  d_storew(&ptr, mdb->drAlBlSt);
-  d_storel(&ptr, mdb->drNxtCNID);
-  d_storew(&ptr, mdb->drFreeBks);
-  d_stores(&ptr, mdb->drVN, sizeof(mdb->drVN));
+  ClassicHfsAppend16(&ptr, mdb->drSigWord);
+  ClassicHfsAppend32(&ptr, mdb->drCrDate);
+  ClassicHfsAppend32(&ptr, mdb->drLsMod);
+  ClassicHfsAppend16(&ptr, mdb->drAtrb);
+  ClassicHfsAppend16(&ptr, mdb->drNmFls);
+  ClassicHfsAppend16(&ptr, mdb->drVBMSt);
+  ClassicHfsAppend16(&ptr, mdb->drAllocPtr);
+  ClassicHfsAppend16(&ptr, mdb->drNmAlBlks);
+  ClassicHfsAppend32(&ptr, mdb->drAlBlkSiz);
+  ClassicHfsAppend32(&ptr, mdb->drClpSiz);
+  ClassicHfsAppend16(&ptr, mdb->drAlBlSt);
+  ClassicHfsAppend32(&ptr, mdb->drNxtCNID);
+  ClassicHfsAppend16(&ptr, mdb->drFreeBks);
+  ClassicHfsAppendName(&ptr, mdb->drVN, sizeof(mdb->drVN));
 
 # ifdef DEBUG
   if (ptr - b != 64)
     abort();
 # endif
 
-  d_storel(&ptr, mdb->drVolBkUp);
-  d_storew(&ptr, mdb->drVSeqNum);
-  d_storel(&ptr, mdb->drWrCnt);
-  d_storel(&ptr, mdb->drXTClpSiz);
-  d_storel(&ptr, mdb->drCTClpSiz);
-  d_storew(&ptr, mdb->drNmRtDirs);
-  d_storel(&ptr, mdb->drFilCnt);
-  d_storel(&ptr, mdb->drDirCnt);
+  ClassicHfsAppend32(&ptr, mdb->drVolBkUp);
+  ClassicHfsAppend16(&ptr, mdb->drVSeqNum);
+  ClassicHfsAppend32(&ptr, mdb->drWrCnt);
+  ClassicHfsAppend32(&ptr, mdb->drXTClpSiz);
+  ClassicHfsAppend32(&ptr, mdb->drCTClpSiz);
+  ClassicHfsAppend16(&ptr, mdb->drNmRtDirs);
+  ClassicHfsAppend32(&ptr, mdb->drFilCnt);
+  ClassicHfsAppend32(&ptr, mdb->drDirCnt);
 
   for (i = 0; i < 8; ++i)
-    d_storel(&ptr, mdb->drFndrInfo[i]);
+    ClassicHfsAppend32(&ptr, mdb->drFndrInfo[i]);
 
 # ifdef DEBUG
   if (ptr - b != 124)
     abort();
 # endif
 
-  d_storew(&ptr, mdb->drVCSize);
-  d_storew(&ptr, mdb->drVBMCSize);
-  d_storew(&ptr, mdb->drCtlCSize);
-  d_storel(&ptr, mdb->drXTFlSize);
+  ClassicHfsAppend16(&ptr, mdb->drVCSize);
+  ClassicHfsAppend16(&ptr, mdb->drVBMCSize);
+  ClassicHfsAppend16(&ptr, mdb->drCtlCSize);
+  ClassicHfsAppend32(&ptr, mdb->drXTFlSize);
 
   for (i = 0; i < 3; ++i)
     {
-      d_storew(&ptr, mdb->drXTExtRec[i].xdrStABN);
-      d_storew(&ptr, mdb->drXTExtRec[i].xdrNumABlks);
+      ClassicHfsAppend16(&ptr, mdb->drXTExtRec[i].xdrStABN);
+      ClassicHfsAppend16(&ptr, mdb->drXTExtRec[i].xdrNumABlks);
     }
 
 # ifdef DEBUG
@@ -450,12 +451,12 @@ int l_writemdb(hfsvol *vol)
     abort();
 # endif
 
-  d_storel(&ptr, mdb->drCTFlSize);
+  ClassicHfsAppend32(&ptr, mdb->drCTFlSize);
 
   for (i = 0; i < 3; ++i)
     {
-      d_storew(&ptr, mdb->drCTExtRec[i].xdrStABN);
-      d_storew(&ptr, mdb->drCTExtRec[i].xdrNumABlks);
+      ClassicHfsAppend16(&ptr, mdb->drCTExtRec[i].xdrStABN);
+      ClassicHfsAppend16(&ptr, mdb->drCTExtRec[i].xdrNumABlks);
     }
 
 # ifdef DEBUG

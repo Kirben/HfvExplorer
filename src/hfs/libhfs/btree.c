@@ -23,6 +23,7 @@
 
 # include "internal.h"
 # include "data.h"
+# include "../ClassicHfsRecordBytes.h"
 # include "block.h"
 # include "file.h"
 # include "btree.h"
@@ -58,12 +59,12 @@ int bt_getnode(node *np)
 
   ptr = *bp;
 
-  d_fetchl(&ptr, (long *)  &np->nd.ndFLink);
-  d_fetchl(&ptr, (long *)  &np->nd.ndBLink);
-  d_fetchb(&ptr, (char *)  &np->nd.ndType);
-  d_fetchb(&ptr, (char *)  &np->nd.ndNHeight);
-  d_fetchw(&ptr, (short *) &np->nd.ndNRecs);
-  d_fetchw(&ptr, &np->nd.ndResv2);
+  np->nd.ndFLink = ClassicHfsTake32(&ptr);
+  np->nd.ndBLink = ClassicHfsTake32(&ptr);
+  np->nd.ndType = ClassicHfsTake8(&ptr);
+  np->nd.ndNHeight = ClassicHfsTake8(&ptr);
+  np->nd.ndNRecs = ClassicHfsTake16(&ptr);
+  np->nd.ndResv2 = ClassicHfsTake16(&ptr);
 
   if (np->nd.ndNRecs > HFS_MAXRECS)
     {
@@ -76,7 +77,7 @@ int bt_getnode(node *np)
   ptr = *bp + HFS_BLOCKSZ - (2 * i);
 
   while (i--)
-    d_fetchw(&ptr, (short *) &np->roff[i]);
+    np->roff[i] = ClassicHfsTake16(&ptr);
 
   return 0;
 }
@@ -107,12 +108,12 @@ int bt_putnode(node *np)
 
   ptr = *bp;
 
-  d_storel(&ptr, np->nd.ndFLink);
-  d_storel(&ptr, np->nd.ndBLink);
-  d_storeb(&ptr, np->nd.ndType);
-  d_storeb(&ptr, np->nd.ndNHeight);
-  d_storew(&ptr, np->nd.ndNRecs);
-  d_storew(&ptr, np->nd.ndResv2);
+  ClassicHfsAppend32(&ptr, np->nd.ndFLink);
+  ClassicHfsAppend32(&ptr, np->nd.ndBLink);
+  ClassicHfsAppend8(&ptr, np->nd.ndType);
+  ClassicHfsAppend8(&ptr, np->nd.ndNHeight);
+  ClassicHfsAppend16(&ptr, np->nd.ndNRecs);
+  ClassicHfsAppend16(&ptr, np->nd.ndResv2);
 
   if (np->nd.ndNRecs > HFS_MAXRECS)
     {
@@ -125,7 +126,7 @@ int bt_putnode(node *np)
   ptr = *bp + HFS_BLOCKSZ - (2 * i);
 
   while (i--)
-    d_storew(&ptr, np->roff[i]);
+    ClassicHfsAppend16(&ptr, np->roff[i]);
 
   if (f_putblock(&bt->f, np->nnum, bp) < 0)
     return -1;
@@ -165,18 +166,18 @@ int bt_readhdr(btree *bt)
 
   ptr = HFS_NODEREC(bt->hdrnd, 0);
 
-  d_fetchw(&ptr, (short *) &bt->hdr.bthDepth);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthRoot);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthNRecs);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthFNode);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthLNode);
-  d_fetchw(&ptr, (short *) &bt->hdr.bthNodeSize);
-  d_fetchw(&ptr, (short *) &bt->hdr.bthKeyLen);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthNNodes);
-  d_fetchl(&ptr, (long *)  &bt->hdr.bthFree);
+  bt->hdr.bthDepth = ClassicHfsTake16(&ptr);
+  bt->hdr.bthRoot = ClassicHfsTake32(&ptr);
+  bt->hdr.bthNRecs = ClassicHfsTake32(&ptr);
+  bt->hdr.bthFNode = ClassicHfsTake32(&ptr);
+  bt->hdr.bthLNode = ClassicHfsTake32(&ptr);
+  bt->hdr.bthNodeSize = ClassicHfsTake16(&ptr);
+  bt->hdr.bthKeyLen = ClassicHfsTake16(&ptr);
+  bt->hdr.bthNNodes = ClassicHfsTake32(&ptr);
+  bt->hdr.bthFree = ClassicHfsTake32(&ptr);
 
   for (i = 0; i < 76; ++i)
-    d_fetchb(&ptr, (char *) &bt->hdr.bthResv[i]);
+    bt->hdr.bthResv[i] = ClassicHfsTake8(&ptr);
 
   if (bt->hdr.bthNodeSize != HFS_BLOCKSZ)
     {
@@ -266,18 +267,18 @@ int bt_writehdr(btree *bt)
 
   ptr = HFS_NODEREC(bt->hdrnd, 0);
 
-  d_storew(&ptr, bt->hdr.bthDepth);
-  d_storel(&ptr, bt->hdr.bthRoot);
-  d_storel(&ptr, bt->hdr.bthNRecs);
-  d_storel(&ptr, bt->hdr.bthFNode);
-  d_storel(&ptr, bt->hdr.bthLNode);
-  d_storew(&ptr, bt->hdr.bthNodeSize);
-  d_storew(&ptr, bt->hdr.bthKeyLen);
-  d_storel(&ptr, bt->hdr.bthNNodes);
-  d_storel(&ptr, bt->hdr.bthFree);
+  ClassicHfsAppend16(&ptr, bt->hdr.bthDepth);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthRoot);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthNRecs);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthFNode);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthLNode);
+  ClassicHfsAppend16(&ptr, bt->hdr.bthNodeSize);
+  ClassicHfsAppend16(&ptr, bt->hdr.bthKeyLen);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthNNodes);
+  ClassicHfsAppend32(&ptr, bt->hdr.bthFree);
 
   for (i = 0; i < 76; ++i)
-    d_storeb(&ptr, bt->hdr.bthResv[i]);
+    ClassicHfsAppend8(&ptr, bt->hdr.bthResv[i]);
 
   memcpy(HFS_NODEREC(bt->hdrnd, 2), bt->map, HFS_MAP1SZ);
 

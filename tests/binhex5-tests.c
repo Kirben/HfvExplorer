@@ -7,7 +7,7 @@
 #include <io.h>
 #undef ERROR
 #include "hfs/libhfs/hfs.h"
-#include "hfs/ClassicHfsBytes.h"
+#include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsNames.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
@@ -33,6 +33,22 @@ int main(int argc,char**argv){
   must(memcmp(bytes, "\x55\x80\xfe\x01\xff\xfe\xdc\xaa", 8) == 0, "unaligned big-endian writes");
   must(ClassicHfsRead32(bytes + 1) == UINT32_C(0x80fe01ff) &&
        ClassicHfsRead16(bytes + 5) == UINT16_C(0xfedc), "high-bit big-endian reads");
+ }
+ {
+  unsigned char fields[10] = {0};
+  unsigned char *cursor = fields;
+  char name[4];
+  ClassicHfsAppendName(&cursor, "Mac", 4);
+  ClassicHfsAppendName(&cursor, "X", 4);
+  ClassicHfsAppend16(&cursor, 0xfedc);
+  must(cursor == fields + sizeof(fields) && !memcmp(fields, "\x03Mac\x01X\0\0\xfe\xdc", 10),
+       "fixed Pascal fields and padding");
+  fields[0] = 0xff;
+  cursor = fields;
+  ClassicHfsTakeName(&cursor, name, sizeof(name));
+  must(!name[0] && cursor == fields + 4, "invalid name consumes its field");
+  ClassicHfsTakeName(&cursor, name, sizeof(name));
+  must(!strcmp(name, "X") && ClassicHfsTake16(&cursor) == 0xfedc, "following fields stay aligned");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

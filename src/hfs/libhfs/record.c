@@ -23,6 +23,7 @@
 # include "../ClassicHfsNames.h"
 # include "internal.h"
 # include "data.h"
+# include "../ClassicHfsRecordBytes.h"
 # include "record.h"
 
 /*
@@ -33,10 +34,10 @@ void r_packcatkey(CatKeyRec *key, unsigned char *pkey, int *len)
 {
   unsigned char *start = pkey;
 
-  d_storeb(&pkey, key->ckrKeyLen);
-  d_storeb(&pkey, key->ckrResrv1);
-  d_storel(&pkey, key->ckrParID);
-  d_stores(&pkey, key->ckrCName, sizeof(key->ckrCName));
+  ClassicHfsAppend8(&pkey, key->ckrKeyLen);
+  ClassicHfsAppend8(&pkey, key->ckrResrv1);
+  ClassicHfsAppend32(&pkey, key->ckrParID);
+  ClassicHfsAppendName(&pkey, key->ckrCName, sizeof(key->ckrCName));
 
   if (len)
     *len = HFS_RECKEYSKIP(start);
@@ -48,10 +49,10 @@ void r_packcatkey(CatKeyRec *key, unsigned char *pkey, int *len)
  */
 void r_unpackcatkey(unsigned char *pkey, CatKeyRec *key)
 {
-  d_fetchb(&pkey, (char *) &key->ckrKeyLen);
-  d_fetchb(&pkey, (char *) &key->ckrResrv1);
-  d_fetchl(&pkey, (long *) &key->ckrParID);
-  d_fetchs(&pkey, key->ckrCName, sizeof(key->ckrCName));
+  key->ckrKeyLen = ClassicHfsTake8(&pkey);
+  key->ckrResrv1 = ClassicHfsTake8(&pkey);
+  key->ckrParID = ClassicHfsTake32(&pkey);
+  ClassicHfsTakeName(&pkey, key->ckrCName, sizeof(key->ckrCName));
 }
 
 /*
@@ -62,10 +63,10 @@ void r_packextkey(ExtKeyRec *key, unsigned char *pkey, int *len)
 {
   unsigned char *start = pkey;
 
-  d_storeb(&pkey, key->xkrKeyLen);
-  d_storeb(&pkey, key->xkrFkType);
-  d_storel(&pkey, key->xkrFNum);
-  d_storew(&pkey, key->xkrFABN);
+  ClassicHfsAppend8(&pkey, key->xkrKeyLen);
+  ClassicHfsAppend8(&pkey, key->xkrFkType);
+  ClassicHfsAppend32(&pkey, key->xkrFNum);
+  ClassicHfsAppend16(&pkey, key->xkrFABN);
 
   if (len)
     *len = HFS_RECKEYSKIP(start);
@@ -77,10 +78,10 @@ void r_packextkey(ExtKeyRec *key, unsigned char *pkey, int *len)
  */
 void r_unpackextkey(unsigned char *pkey, ExtKeyRec *key)
 {
-  d_fetchb(&pkey, (char *)  &key->xkrKeyLen);
-  d_fetchb(&pkey, (char *)  &key->xkrFkType);
-  d_fetchl(&pkey, (long *)  &key->xkrFNum);
-  d_fetchw(&pkey, (short *) &key->xkrFABN);
+  key->xkrKeyLen = ClassicHfsTake8(&pkey);
+  key->xkrFkType = ClassicHfsTake8(&pkey);
+  key->xkrFNum = ClassicHfsTake32(&pkey);
+  key->xkrFABN = ClassicHfsTake16(&pkey);
 }
 
 /*
@@ -137,102 +138,102 @@ void r_packcatdata(CatDataRec *data, unsigned char *pdata, int *len)
   unsigned char *start = pdata;
   int i;
 
-  d_storeb(&pdata, data->cdrType);
-  d_storeb(&pdata, data->cdrResrv2);
+  ClassicHfsAppend8(&pdata, data->cdrType);
+  ClassicHfsAppend8(&pdata, data->cdrResrv2);
 
   switch (data->cdrType)
     {
     case cdrDirRec:
-      d_storew(&pdata, data->u.dir.dirFlags);
-      d_storew(&pdata, data->u.dir.dirVal);
-      d_storel(&pdata, data->u.dir.dirDirID);
-      d_storel(&pdata, data->u.dir.dirCrDat);
-      d_storel(&pdata, data->u.dir.dirMdDat);
-      d_storel(&pdata, data->u.dir.dirBkDat);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirFlags);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirVal);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirDirID);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirCrDat);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirMdDat);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirBkDat);
 
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frRect.top);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frRect.left);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frRect.bottom);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frRect.right);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frFlags);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frLocation.v);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frLocation.h);
-      d_storew(&pdata, data->u.dir.dirUsrInfo.frView);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.top);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.left);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.bottom);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frRect.right);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frFlags);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frLocation.v);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frLocation.h);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirUsrInfo.frView);
 
-      d_storew(&pdata, data->u.dir.dirFndrInfo.frScroll.v);
-      d_storew(&pdata, data->u.dir.dirFndrInfo.frScroll.h);
-      d_storel(&pdata, data->u.dir.dirFndrInfo.frOpenChain);
-      d_storew(&pdata, data->u.dir.dirFndrInfo.frUnused);
-      d_storew(&pdata, data->u.dir.dirFndrInfo.frComment);
-      d_storel(&pdata, data->u.dir.dirFndrInfo.frPutAway);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frScroll.v);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frScroll.h);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirFndrInfo.frOpenChain);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frUnused);
+      ClassicHfsAppend16(&pdata, data->u.dir.dirFndrInfo.frComment);
+      ClassicHfsAppend32(&pdata, data->u.dir.dirFndrInfo.frPutAway);
 
       for (i = 0; i < 4; ++i)
-	d_storel(&pdata, data->u.dir.dirResrv[i]);
+	ClassicHfsAppend32(&pdata, data->u.dir.dirResrv[i]);
 
       break;
 
     case cdrFilRec:
-      d_storeb(&pdata, data->u.fil.filFlags);
-      d_storeb(&pdata, data->u.fil.filTyp);
+      ClassicHfsAppend8(&pdata, data->u.fil.filFlags);
+      ClassicHfsAppend8(&pdata, data->u.fil.filTyp);
 
-      d_storel(&pdata, data->u.fil.filUsrWds.fdType);
-      d_storel(&pdata, data->u.fil.filUsrWds.fdCreator);
-      d_storew(&pdata, data->u.fil.filUsrWds.fdFlags);
-      d_storew(&pdata, data->u.fil.filUsrWds.fdLocation.v);
-      d_storew(&pdata, data->u.fil.filUsrWds.fdLocation.h);
-      d_storew(&pdata, data->u.fil.filUsrWds.fdFldr);
+      ClassicHfsAppend32(&pdata, data->u.fil.filUsrWds.fdType);
+      ClassicHfsAppend32(&pdata, data->u.fil.filUsrWds.fdCreator);
+      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdFlags);
+      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdLocation.v);
+      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdLocation.h);
+      ClassicHfsAppend16(&pdata, data->u.fil.filUsrWds.fdFldr);
 
-      d_storel(&pdata, data->u.fil.filFlNum);
+      ClassicHfsAppend32(&pdata, data->u.fil.filFlNum);
 
-      d_storew(&pdata, data->u.fil.filStBlk);
-      d_storel(&pdata, data->u.fil.filLgLen);
-      d_storel(&pdata, data->u.fil.filPyLen);
+      ClassicHfsAppend16(&pdata, data->u.fil.filStBlk);
+      ClassicHfsAppend32(&pdata, data->u.fil.filLgLen);
+      ClassicHfsAppend32(&pdata, data->u.fil.filPyLen);
 
-      d_storew(&pdata, data->u.fil.filRStBlk);
-      d_storel(&pdata, data->u.fil.filRLgLen);
-      d_storel(&pdata, data->u.fil.filRPyLen);
+      ClassicHfsAppend16(&pdata, data->u.fil.filRStBlk);
+      ClassicHfsAppend32(&pdata, data->u.fil.filRLgLen);
+      ClassicHfsAppend32(&pdata, data->u.fil.filRPyLen);
 
-      d_storel(&pdata, data->u.fil.filCrDat);
-      d_storel(&pdata, data->u.fil.filMdDat);
-      d_storel(&pdata, data->u.fil.filBkDat);
+      ClassicHfsAppend32(&pdata, data->u.fil.filCrDat);
+      ClassicHfsAppend32(&pdata, data->u.fil.filMdDat);
+      ClassicHfsAppend32(&pdata, data->u.fil.filBkDat);
 
-      d_storew(&pdata, data->u.fil.filFndrInfo.fdIconID);
+      ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdIconID);
       for (i = 0; i < 4; ++i)
-	d_storew(&pdata, data->u.fil.filFndrInfo.fdUnused[i]);
-      d_storew(&pdata, data->u.fil.filFndrInfo.fdComment);
-      d_storel(&pdata, data->u.fil.filFndrInfo.fdPutAway);
+	ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdUnused[i]);
+      ClassicHfsAppend16(&pdata, data->u.fil.filFndrInfo.fdComment);
+      ClassicHfsAppend32(&pdata, data->u.fil.filFndrInfo.fdPutAway);
 
-      d_storew(&pdata, data->u.fil.filClpSize);
+      ClassicHfsAppend16(&pdata, data->u.fil.filClpSize);
 
       for (i = 0; i < 3; ++i)
 	{
-	  d_storew(&pdata, data->u.fil.filExtRec[i].xdrStABN);
-	  d_storew(&pdata, data->u.fil.filExtRec[i].xdrNumABlks);
+	  ClassicHfsAppend16(&pdata, data->u.fil.filExtRec[i].xdrStABN);
+	  ClassicHfsAppend16(&pdata, data->u.fil.filExtRec[i].xdrNumABlks);
 	}
 
       for (i = 0; i < 3; ++i)
 	{
-	  d_storew(&pdata, data->u.fil.filRExtRec[i].xdrStABN);
-	  d_storew(&pdata, data->u.fil.filRExtRec[i].xdrNumABlks);
+	  ClassicHfsAppend16(&pdata, data->u.fil.filRExtRec[i].xdrStABN);
+	  ClassicHfsAppend16(&pdata, data->u.fil.filRExtRec[i].xdrNumABlks);
 	}
 
-      d_storel(&pdata, data->u.fil.filResrv);
+      ClassicHfsAppend32(&pdata, data->u.fil.filResrv);
       break;
 
     case cdrThdRec:
       for (i = 0; i < 2; ++i)
-	d_storel(&pdata, data->u.dthd.thdResrv[i]);
+	ClassicHfsAppend32(&pdata, data->u.dthd.thdResrv[i]);
 
-      d_storel(&pdata, data->u.dthd.thdParID);
-      d_stores(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
+      ClassicHfsAppend32(&pdata, data->u.dthd.thdParID);
+      ClassicHfsAppendName(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
       break;
 
     case cdrFThdRec:
       for (i = 0; i < 2; ++i)
-	d_storel(&pdata, data->u.fthd.fthdResrv[i]);
+	ClassicHfsAppend32(&pdata, data->u.fthd.fthdResrv[i]);
 
-      d_storel(&pdata, data->u.fthd.fthdParID);
-      d_stores(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
+      ClassicHfsAppend32(&pdata, data->u.fthd.fthdParID);
+      ClassicHfsAppendName(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
       break;
 
 # ifdef DEBUG
@@ -253,102 +254,102 @@ void r_unpackcatdata(unsigned char *pdata, CatDataRec *data)
 {
   int i;
 
-  d_fetchb(&pdata, (char *) &data->cdrType);
-  d_fetchb(&pdata, (char *) &data->cdrResrv2);
+  data->cdrType = ClassicHfsTake8(&pdata);
+  data->cdrResrv2 = ClassicHfsTake8(&pdata);
 
   switch (data->cdrType)
     {
     case cdrDirRec:
-      d_fetchw(&pdata, &data->u.dir.dirFlags);
-      d_fetchw(&pdata, (short *) &data->u.dir.dirVal);
-      d_fetchl(&pdata, (long *)  &data->u.dir.dirDirID);
-      d_fetchl(&pdata, &data->u.dir.dirCrDat);
-      d_fetchl(&pdata, &data->u.dir.dirMdDat);
-      d_fetchl(&pdata, &data->u.dir.dirBkDat);
+      data->u.dir.dirFlags = ClassicHfsTake16(&pdata);
+      data->u.dir.dirVal = ClassicHfsTake16(&pdata);
+      data->u.dir.dirDirID = ClassicHfsTake32(&pdata);
+      data->u.dir.dirCrDat = ClassicHfsTake32(&pdata);
+      data->u.dir.dirMdDat = ClassicHfsTake32(&pdata);
+      data->u.dir.dirBkDat = ClassicHfsTake32(&pdata);
 
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frRect.top);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frRect.left);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frRect.bottom);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frRect.right);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frFlags);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frLocation.v);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frLocation.h);
-      d_fetchw(&pdata, &data->u.dir.dirUsrInfo.frView);
+      data->u.dir.dirUsrInfo.frRect.top = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frRect.left = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frRect.bottom = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frRect.right = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frFlags = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frLocation.v = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frLocation.h = ClassicHfsTake16(&pdata);
+      data->u.dir.dirUsrInfo.frView = ClassicHfsTake16(&pdata);
 
-      d_fetchw(&pdata, &data->u.dir.dirFndrInfo.frScroll.v);
-      d_fetchw(&pdata, &data->u.dir.dirFndrInfo.frScroll.h);
-      d_fetchl(&pdata, &data->u.dir.dirFndrInfo.frOpenChain);
-      d_fetchw(&pdata, &data->u.dir.dirFndrInfo.frUnused);
-      d_fetchw(&pdata, &data->u.dir.dirFndrInfo.frComment);
-      d_fetchl(&pdata, &data->u.dir.dirFndrInfo.frPutAway);
+      data->u.dir.dirFndrInfo.frScroll.v = ClassicHfsTake16(&pdata);
+      data->u.dir.dirFndrInfo.frScroll.h = ClassicHfsTake16(&pdata);
+      data->u.dir.dirFndrInfo.frOpenChain = ClassicHfsTake32(&pdata);
+      data->u.dir.dirFndrInfo.frUnused = ClassicHfsTake16(&pdata);
+      data->u.dir.dirFndrInfo.frComment = ClassicHfsTake16(&pdata);
+      data->u.dir.dirFndrInfo.frPutAway = ClassicHfsTake32(&pdata);
 
       for (i = 0; i < 4; ++i)
-	d_fetchl(&pdata, &data->u.dir.dirResrv[i]);
+	data->u.dir.dirResrv[i] = ClassicHfsTake32(&pdata);
 
       break;
 
     case cdrFilRec:
-      d_fetchb(&pdata, (char *) &data->u.fil.filFlags);
-      d_fetchb(&pdata, (char *) &data->u.fil.filTyp);
+      data->u.fil.filFlags = ClassicHfsTake8(&pdata);
+      data->u.fil.filTyp = ClassicHfsTake8(&pdata);
 
-      d_fetchl(&pdata, &data->u.fil.filUsrWds.fdType);
-      d_fetchl(&pdata, &data->u.fil.filUsrWds.fdCreator);
-      d_fetchw(&pdata, &data->u.fil.filUsrWds.fdFlags);
-      d_fetchw(&pdata, &data->u.fil.filUsrWds.fdLocation.v);
-      d_fetchw(&pdata, &data->u.fil.filUsrWds.fdLocation.h);
-      d_fetchw(&pdata, &data->u.fil.filUsrWds.fdFldr);
+      data->u.fil.filUsrWds.fdType = ClassicHfsTake32(&pdata);
+      data->u.fil.filUsrWds.fdCreator = ClassicHfsTake32(&pdata);
+      data->u.fil.filUsrWds.fdFlags = ClassicHfsTake16(&pdata);
+      data->u.fil.filUsrWds.fdLocation.v = ClassicHfsTake16(&pdata);
+      data->u.fil.filUsrWds.fdLocation.h = ClassicHfsTake16(&pdata);
+      data->u.fil.filUsrWds.fdFldr = ClassicHfsTake16(&pdata);
 
-      d_fetchl(&pdata, (long *)  &data->u.fil.filFlNum);
+      data->u.fil.filFlNum = ClassicHfsTake32(&pdata);
 
-      d_fetchw(&pdata, (short *) &data->u.fil.filStBlk);
-      d_fetchl(&pdata, (long *)  &data->u.fil.filLgLen);
-      d_fetchl(&pdata, (long *)  &data->u.fil.filPyLen);
+      data->u.fil.filStBlk = ClassicHfsTake16(&pdata);
+      data->u.fil.filLgLen = ClassicHfsTake32(&pdata);
+      data->u.fil.filPyLen = ClassicHfsTake32(&pdata);
 
-      d_fetchw(&pdata, (short *) &data->u.fil.filRStBlk);
-      d_fetchl(&pdata, (long *)  &data->u.fil.filRLgLen);
-      d_fetchl(&pdata, (long *)  &data->u.fil.filRPyLen);
+      data->u.fil.filRStBlk = ClassicHfsTake16(&pdata);
+      data->u.fil.filRLgLen = ClassicHfsTake32(&pdata);
+      data->u.fil.filRPyLen = ClassicHfsTake32(&pdata);
 
-      d_fetchl(&pdata, &data->u.fil.filCrDat);
-      d_fetchl(&pdata, &data->u.fil.filMdDat);
-      d_fetchl(&pdata, &data->u.fil.filBkDat);
+      data->u.fil.filCrDat = ClassicHfsTake32(&pdata);
+      data->u.fil.filMdDat = ClassicHfsTake32(&pdata);
+      data->u.fil.filBkDat = ClassicHfsTake32(&pdata);
 
-      d_fetchw(&pdata, &data->u.fil.filFndrInfo.fdIconID);
+      data->u.fil.filFndrInfo.fdIconID = ClassicHfsTake16(&pdata);
       for (i = 0; i < 4; ++i)
-	d_fetchw(&pdata, &data->u.fil.filFndrInfo.fdUnused[i]);
-      d_fetchw(&pdata, &data->u.fil.filFndrInfo.fdComment);
-      d_fetchl(&pdata, &data->u.fil.filFndrInfo.fdPutAway);
+	data->u.fil.filFndrInfo.fdUnused[i] = ClassicHfsTake16(&pdata);
+      data->u.fil.filFndrInfo.fdComment = ClassicHfsTake16(&pdata);
+      data->u.fil.filFndrInfo.fdPutAway = ClassicHfsTake32(&pdata);
 
-      d_fetchw(&pdata, (short *) &data->u.fil.filClpSize);
+      data->u.fil.filClpSize = ClassicHfsTake16(&pdata);
 
       for (i = 0; i < 3; ++i)
 	{
-	  d_fetchw(&pdata, (short *) &data->u.fil.filExtRec[i].xdrStABN);
-	  d_fetchw(&pdata, (short *) &data->u.fil.filExtRec[i].xdrNumABlks);
+	  data->u.fil.filExtRec[i].xdrStABN = ClassicHfsTake16(&pdata);
+	  data->u.fil.filExtRec[i].xdrNumABlks = ClassicHfsTake16(&pdata);
 	}
 
       for (i = 0; i < 3; ++i)
 	{
-	  d_fetchw(&pdata, (short *) &data->u.fil.filRExtRec[i].xdrStABN);
-	  d_fetchw(&pdata, (short *) &data->u.fil.filRExtRec[i].xdrNumABlks);
+	  data->u.fil.filRExtRec[i].xdrStABN = ClassicHfsTake16(&pdata);
+	  data->u.fil.filRExtRec[i].xdrNumABlks = ClassicHfsTake16(&pdata);
 	}
 
-      d_fetchl(&pdata, &data->u.fil.filResrv);
+      data->u.fil.filResrv = ClassicHfsTake32(&pdata);
       break;
 
     case cdrThdRec:
       for (i = 0; i < 2; ++i)
-	d_fetchl(&pdata, &data->u.dthd.thdResrv[i]);
+	data->u.dthd.thdResrv[i] = ClassicHfsTake32(&pdata);
 
-      d_fetchl(&pdata, (long *) &data->u.dthd.thdParID);
-      d_fetchs(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
+      data->u.dthd.thdParID = ClassicHfsTake32(&pdata);
+      ClassicHfsTakeName(&pdata, data->u.dthd.thdCName, sizeof(data->u.dthd.thdCName));
       break;
 
     case cdrFThdRec:
       for (i = 0; i < 2; ++i)
-	d_fetchl(&pdata, &data->u.fthd.fthdResrv[i]);
+	data->u.fthd.fthdResrv[i] = ClassicHfsTake32(&pdata);
 
-      d_fetchl(&pdata, (long *) &data->u.fthd.fthdParID);
-      d_fetchs(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
+      data->u.fthd.fthdParID = ClassicHfsTake32(&pdata);
+      ClassicHfsTakeName(&pdata, data->u.fthd.fthdCName, sizeof(data->u.fthd.fthdCName));
       break;
 
 # ifdef DEBUG
@@ -369,8 +370,8 @@ void r_packextdata(ExtDataRec *data, unsigned char *pdata, int *len)
 
   for (i = 0; i < 3; ++i)
     {
-      d_storew(&pdata, (*data)[i].xdrStABN);
-      d_storew(&pdata, (*data)[i].xdrNumABlks);
+      ClassicHfsAppend16(&pdata, (*data)[i].xdrStABN);
+      ClassicHfsAppend16(&pdata, (*data)[i].xdrNumABlks);
     }
 
   if (len)
@@ -387,8 +388,8 @@ void r_unpackextdata(unsigned char *pdata, ExtDataRec *data)
 
   for (i = 0; i < 3; ++i)
     {
-      d_fetchw(&pdata, (short *) &(*data)[i].xdrStABN);
-      d_fetchw(&pdata, (short *) &(*data)[i].xdrNumABlks);
+      (*data)[i].xdrStABN = ClassicHfsTake16(&pdata);
+      (*data)[i].xdrNumABlks = ClassicHfsTake16(&pdata);
     }
 }
 
