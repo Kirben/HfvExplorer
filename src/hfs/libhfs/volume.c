@@ -24,6 +24,7 @@
 
 # include "../ClassicHfsNames.h"
 # include "internal.h"
+#include "../ClassicHfsPath.h"
 #include "../ClassicHfsTime.h"
 # include "low.h"
 # include "btree.h"
@@ -271,87 +272,35 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
 	      long *parid, char *fname, node *np)
 {
   long dirid;
-  char name[HFS_MAX_FLEN + 1], *nptr;
+  char name[HFS_MAX_FLEN + 1];
+  const char *cursor = path;
   int found;
-
-  if (*path == 0)
-    {
-      ERROR(ENOENT, "empty path");
-      return -1;
-    }
-
-  if (parid)
+  if (parid && *path)
     *parid = 0;
-
-	// Hack by lp to tolerate invalid CD's.
-	// Delete the volume name and always use aprtial names.
-
-	if(m_invalid_cd_hack) {
-		if(*path != ':') {
-			char *p = strchr( path, ':' );
-			if(p) {
-				path = p;
-			}
-		}
-	}
-
-  nptr = strchr(path, ':');
-
-  if (*path == ':' || nptr == 0)
-    {
-      dirid = vol->cwd;  /* relative path */
-
-      if (*path == ':')
-	++path;
-
-      if (*path == 0)
-	{
-	  found = v_getdthread(vol, dirid, data, 0);
-	  if (found <= 0)
-	    return found;
-
-	  if (parid)
-	    *parid = data->u.dthd.thdParID;
-
-	  return v_catsearch(vol, data->u.dthd.thdParID,
-			     data->u.dthd.thdCName, data, fname, np);
-	}
-    }
-  else
-    {
-      dirid = HFS_CNID_ROOTPAR;  /* absolute path */
-
-      if (nptr - path > HFS_MAX_VLEN)
-	{
-	  ERROR(ENAMETOOLONG, 0);
-	  return -1;
-	}
-
-      strncpy(name, path, nptr - path);
-      name[nptr - path] = 0;
-
-      /* The caller already selected the mount. A label only confirms it. */
-      if (ClassicHfsCompareNames(vol->mdb.drVN, name) != 0)
-        {
-          ERROR(ENOENT, "path does not name the selected HFS volume");
-          return -1;
-        }
-    }
+  switch (ClassicHfsBeginPath(&cursor, vol->mdb.drVN, m_invalid_cd_hack)) {
+  case ClassicHfsPathEmpty: ERROR(ENOENT, "empty path"); return -1;
+  case ClassicHfsPathWrongVolume: ERROR(ENOENT, "path does not name the selected HFS volume"); return -1;
+  case ClassicHfsPathTooLong: ERROR(ENAMETOOLONG, 0); return -1;
+  case ClassicHfsPathAbsolute: dirid = HFS_CNID_ROOTPAR; break;
+  default: dirid = vol->cwd; break;
+  }
 
   while (1)
     {
-      while (*path == ':')
-	{
-	  ++path;
+      int part = ClassicHfsNextPathPart(&cursor, name);
+      if (part == ClassicHfsPathTooLong) {
+        ERROR(ENAMETOOLONG, 0);
+        return -1;
+      }
+      if (part == ClassicHfsPathParent) {
+        found = v_getdthread(vol, dirid, data, 0);
+        if (found <= 0)
+          return found;
+        dirid = data->u.dthd.thdParID;
+        continue;
+      }
 
-	  found = v_getdthread(vol, dirid, data, 0);
-	  if (found <= 0)
-	    return found;
-
-	  dirid = data->u.dthd.thdParID;
-	}
-
-      if (*path == 0)
+      if (part == ClassicHfsPathEnd)
 	{
 	  found = v_getdthread(vol, dirid, data, 0);
 	  if (found <= 0)
@@ -363,20 +312,6 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
 	  return v_catsearch(vol, data->u.dthd.thdParID,
 			     data->u.dthd.thdCName, data, fname, np);
 	}
-
-      nptr = name;
-      while (nptr < name + sizeof(name) - 1 && *path && *path != ':')
-	*nptr++ = *path++;
-
-      if (*path && *path != ':')
-	{
-	  ERROR(ENAMETOOLONG, 0);
-	  return -1;
-	}
-
-      *nptr = 0;
-      if (*path == ':')
-	++path;
 
       if (parid)
 	*parid = dirid;
@@ -387,10 +322,10 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
 
       if (found == 0)
 	{
-	  if (*path && parid)
+	  if (*cursor && parid)
 	    *parid = 0;
 
-	  if (*path == 0 && fname)
+	  if (*cursor == 0 && fname)
 	    strcpy(fname, name);
 
 	  return 0;
@@ -399,14 +334,14 @@ int v_resolve(hfsvol *vol, char *path, CatDataRec *data,
       switch (data->cdrType)
 	{
 	case cdrDirRec:
-	  if (*path == 0)
+	  if (*cursor == 0)
 	    return 1;
 
 	  dirid = data->u.dir.dirDirID;
 	  break;
 
 	case cdrFilRec:
-	  if (*path == 0)
+	  if (*cursor == 0)
 	    return 1;
 
 	  ERROR(ENOTDIR, "invalid pathname");

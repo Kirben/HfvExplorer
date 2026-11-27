@@ -48,6 +48,7 @@ static int record_cache_write(void *context, unsigned long sector, unsigned char
 }
 
 #include "hfs/ClassicHfsForkIO.h"
+#include "hfs/ClassicHfsPath.h"
 static int read_pattern_block(void *context, uint32_t sector, unsigned char (*bytes)[512])
 {
  if (sector == *(uint32_t *)context) return -1;
@@ -482,6 +483,19 @@ int main(int argc,char**argv){
   must(ClassicHfsSeekFork(10, &position, 4, SEEK_SET) && position == 4 &&
        ClassicHfsSeekFork(10, &position, -3, SEEK_CUR) && position == 1,
        "absolute and relative fork seeks preserve interior offsets");
+ }
+ {
+  char name[32]; const char *path = "disk:Folder::Other:";
+  must(ClassicHfsBeginPath(&path,"Disk",0)==ClassicHfsPathAbsolute &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathName && !strcmp(name,"disk") &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathName && !strcmp(name,"Folder") &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathParent &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathName && !strcmp(name,"Other") &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathEnd, "absolute path and parent navigation");
+  path="Other::File";
+  must(ClassicHfsBeginPath(&path,"Disk",0)==ClassicHfsPathWrongVolume &&
+       ClassicHfsBeginPath(&path,"Disk",1)==ClassicHfsPathRelative &&
+       ClassicHfsNextPathPart(&path,name)==ClassicHfsPathParent, "legacy CD label tolerance");
  }
  {
   unsigned char source[106], output[107];
