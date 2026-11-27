@@ -60,7 +60,6 @@
 #include "../ClassicHfsTime.h"
 #include "../ClassicHfsBytes.h"
 # include "block.h"
-# include "low.h"
 #include "../ClassicHfsVolumeBitmap.h"
 # include "file.h"
 #include "../ClassicHfsSystemFiles.h"
@@ -117,6 +116,30 @@ int hfs_recognizes_image_fd(int fd) {
  * NAME:	hfs->mount()
  * DESCRIPTION:	open an HFS volume; return volume descriptor or 0 (error)
  */
+// Windows file hooks establish sharing when acquiring the descriptor. On
+// hosts with POSIX device locking, keep the advisory lock until close.
+static int open_volume_device(char *path, int flags)
+{
+#ifdef __EMX__
+    flags |= O_BINARY;
+#endif
+    int fd = open(path, flags);
+#if !defined(WIN32) && !defined(NODEVLOCKS)
+    if (fd >= 0) {
+        struct flock lock = {0};
+        lock.l_type = (flags & (O_WRONLY | O_RDWR)) ? F_WRLCK : F_RDLCK;
+        lock.l_whence = SEEK_SET;
+        if (fcntl(fd, F_SETLK, &lock) < 0) {
+            int error = errno;
+            close(fd);
+            ERROR(error, "unable to obtain lock for device");
+            return -2;
+        }
+    }
+#endif
+    return fd;
+}
+
 static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supplied_fd)
 {
   struct _stat64 dev;
@@ -236,16 +259,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
         }
       else if (flags & (O_WRONLY | O_RDWR))
 	{
-#ifdef __EMX__
-	  vol->fd = open(path, O_BINARY | O_RDWR);
-#else
-	  vol->fd = open(path, O_RDWR);
-#endif
-	  if (vol->fd >= 0 && l_lockvol(vol) < 0)
-	    {
-	      close(vol->fd);
-	      vol->fd = -2;
-	    }
+	  vol->fd = open_volume_device(path, O_RDWR);
 	}
 
       if (supplied_fd < 0 && (! (flags & (O_WRONLY | O_RDWR)) ||
@@ -254,16 +268,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	   (flags & O_RDWR))))
 	{
 	  vol->flags |= HFS_READONLY;
-#ifdef __EMX__
-	  vol->fd = open(path, O_BINARY | O_RDONLY);
-#else
-	  vol->fd = open(path, O_RDONLY);
-#endif
-	  if (vol->fd >= 0 && l_lockvol(vol) < 0)
-	    {
-	      close(vol->fd);
-	      vol->fd = -2;
-	    }
+	  vol->fd = open_volume_device(path, O_RDONLY);
 	}
 
       if (vol->fd < 0)
@@ -651,22 +656,13 @@ int hfs_format(char *path, int pnum, char *vname)
   vol.prev   = 0;
   vol.next   = 0;
 
-#ifdef __EMX__
-  vol.fd = open(path, O_BINARY | O_RDWR);
-#else
-  vol.fd = open(path, O_RDWR);
-#endif
-  if (vol.fd < 0)
-    {
+  vol.fd = open_volume_device(path, O_RDWR);
+  if (vol.fd < 0) {
+    if (vol.fd != -2) {
       ERROR(errno, "error opening device for writing");
-      return -1;
     }
-
-  if (l_lockvol(&vol) < 0)
-    {
-      close(vol.fd);
-      return -1;
-    }
+    return -1;
+  }
 
   if (pnum > 0)
     {

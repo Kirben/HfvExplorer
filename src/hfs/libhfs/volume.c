@@ -27,7 +27,6 @@
 #include "../ClassicHfsCatalogLeaf.h"
 #include "../ClassicHfsPath.h"
 #include "../ClassicHfsTime.h"
-# include "low.h"
 #include "../ClassicHfsVolumeBitmap.h"
 # include "btree.h"
 #include "../ClassicHfsTreeFlush.h"
