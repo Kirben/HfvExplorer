@@ -24,7 +24,7 @@ static inline int ClassicHfsGrowTreeMap(btree *tree)
             return -1;
         }
         tail.nnum = next;
-        if (bt_getnode(&tail) < 0)
+        if (ClassicHfsReadTreeNode(&tail) < 0)
             return -1;
         if (tail.nd.ndType != ndMapNode || tail.nd.ndNRecs != 1 ||
             tail.roff[0] != 14 || tail.roff[1] != 506) {
@@ -53,11 +53,11 @@ static inline int ClassicHfsGrowTreeMap(btree *tree)
         added.nd.ndNRecs = 1;
         added.roff[1] = 14 + HFS_MAPXSZ;
         added.nd.ndBLink = count ? tail.nnum : 0;
-        if (bt_putnode(&added) < 0)
+        if (ClassicHfsWriteTreeNode(&added) < 0)
             return -1;
         if (count) {
             tail.nd.ndFLink = added.nnum;
-            if (bt_putnode(&tail) < 0)
+            if (ClassicHfsWriteTreeNode(&tail) < 0)
                 return -1;
         } else {
             tree->hdrnd.nd.ndFLink = added.nnum;

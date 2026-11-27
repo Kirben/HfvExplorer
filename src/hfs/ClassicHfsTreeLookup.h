@@ -13,7 +13,7 @@ static inline int ClassicHfsFindTreeKey(btree *tree, unsigned char *key, node *c
         return -1;
     }
     for (unsigned height = tree->hdr.bthDepth; height; --height) {
-        if (bt_getnode(cursor) < 0)
+        if (ClassicHfsReadTreeNode(cursor) < 0)
             return -1;
         uint32_t child;
         int result = ClassicHfsLookupLevel(cursor->data, &cursor->nd, cursor->roff, height,

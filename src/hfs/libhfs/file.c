@@ -22,11 +22,35 @@
 
 # include "internal.h"
 #include "../ClassicHfsGeometry.h"
+#include "../ClassicHfsNodeIO.h"
 # include "block.h"
 # include "file.h"
 # include "btree.h"
 # include "volume.h"
 #include "../ClassicHfsVolumeAllocation.h"
+
+static int read_node_block(void *file, uint32_t number, block *bytes)
+{
+  return f_getblock((hfsfile *)file, number, bytes);
+}
+
+static int write_node_block(void *file, uint32_t number, block *bytes)
+{
+  return f_putblock((hfsfile *)file, number, bytes);
+}
+
+int ClassicHfsTransferTreeCursor(node *np, int writing)
+{
+  btree *bt = np->bt;
+  ClassicHfsNodeStatus result = ClassicHfsTransferNode(np->nnum, bt->hdr.bthNNodes,
+      bt->map, bt->mapsz, &np->data, &np->nd, np->roff, writing,
+      writing ? write_node_block : read_node_block, &bt->f);
+  if (result == ClassicHfsNodeUnavailable)
+    { ERROR(EIO, "classic HFS B-tree node outside allocated map"); }
+  else if (result == ClassicHfsNodeBadOffsets)
+    { ERROR(EIO, "invalid classic HFS B-tree node offsets"); }
+  return result == ClassicHfsNodeOk ? 0 : -1;
+}
 
 // The extents file can describe its own overflow. Walk readable leaves when
 // its root cannot be reached without first resolving the requested extent.
@@ -41,7 +65,7 @@ static int ClassicHfsFindOwnOverflow(btree *tree, unsigned char *key, node *leaf
         }
         leaf->bt = tree;
         leaf->nnum = number;
-        if (bt_getnode(leaf) < 0)
+        if (ClassicHfsReadTreeNode(leaf) < 0)
             return -1;
         if ((unsigned char)leaf->nd.ndType != ndLeafNode || leaf->nd.ndNHeight != 1 || leaf->nd.ndBLink != previous) {
             ERROR(EIO, "invalid classic HFS overflow leaf link");
@@ -104,7 +128,7 @@ static int ClassicHfsStoreOverflow(hfsfile *file, unsigned first, const ExtDataR
         return -1;
     }
     ClassicHfsEncodeExtents(leaf->data + payload, data);
-    return bt_putnode(leaf);
+    return ClassicHfsWriteTreeNode(leaf);
 }
 
 /*

@@ -977,7 +977,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	      return -1;
 	    }
 
-	  if (bt_getnode(&dir->n) < 0)
+	  if (ClassicHfsReadTreeNode(&dir->n) < 0)
 	    {
 	      dir->n.rnum = -1;
 	      return -1;
@@ -1061,7 +1061,7 @@ int hfs_readdir2(
 	      ERROR(ENOENT, "no more entries");
 	      return -1;
 	    }
-		  if (bt_getnode(&dir->n) < 0) {
+		  if (ClassicHfsReadTreeNode(&dir->n) < 0) {
 	      dir->n.rnum = -1;
 	      return -1;
 	    }

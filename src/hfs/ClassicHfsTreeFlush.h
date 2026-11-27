@@ -33,7 +33,7 @@ static inline int ClassicHfsFlushTreeHeader(btree *tree)
         node *part = &parts[i];
         part->bt = tree;
         part->nnum = next;
-        if (bt_getnode(part) < 0)
+        if (ClassicHfsReadTreeNode(part) < 0)
             goto failed;
         if (part->nd.ndType != ndMapNode || part->nd.ndNRecs != 1 ||
             part->roff[0] != 14 || part->roff[1] != 506 ||
@@ -47,9 +47,9 @@ static inline int ClassicHfsFlushTreeHeader(btree *tree)
     ClassicHfsEncodeTreeHeader(header.data + 14, ClassicHfsTreeHeaderBytes, &tree->hdr);
     memcpy(header.data + 248, tree->map, HFS_MAP1SZ);
     for (unsigned i = 0; i < count; ++i)
-        if (bt_putnode(&parts[i]) < 0)
+        if (ClassicHfsWriteTreeNode(&parts[i]) < 0)
             goto failed;
-    if (bt_putnode(&header) < 0)
+    if (ClassicHfsWriteTreeNode(&header) < 0)
         goto failed;
     tree->hdrnd = header;
     tree->flags &= ~HFS_UPDATE_BTHDR;

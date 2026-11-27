@@ -18,11 +18,22 @@ static inline ClassicHfsNodeStatus ClassicHfsTransferNode(
     if ((number >= total && (number || writing || map)) || (writing && !map) ||
         (map && (number / 8 >= mapBytes || !ClassicHfsBitIsSet(map, number))))
         return ClassicHfsNodeUnavailable;
-    if (writing && !ClassicHfsEncodeNode(*bytes, descriptor, offsets))
-        return ClassicHfsNodeBadOffsets;
-    if (transfer(context, number, bytes) < 0)
+    unsigned char staged[ClassicHfsNodeSize];
+    if (writing) {
+        memcpy(staged, *bytes, sizeof(staged));
+        if (!ClassicHfsEncodeNode(staged, descriptor, offsets))
+            return ClassicHfsNodeBadOffsets;
+    }
+    if (transfer(context, number, &staged) < 0)
         return ClassicHfsNodeTransferFailed;
-    if (!writing && !ClassicHfsDecodeNode(*bytes, descriptor, offsets))
-        return ClassicHfsNodeBadOffsets;
+    if (!writing) {
+        ClassicHfsNodeDescriptor decoded;
+        uint16_t positions[ClassicHfsMaxRecords + 1];
+        if (!ClassicHfsDecodeNode(staged, &decoded, positions))
+            return ClassicHfsNodeBadOffsets;
+        *descriptor = decoded;
+        memcpy(offsets, positions, (decoded.ndNRecs + 1) * sizeof(*offsets));
+    }
+    memcpy(*bytes, staged, sizeof(staged));
     return ClassicHfsNodeOk;
 }

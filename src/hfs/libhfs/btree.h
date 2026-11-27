@@ -17,8 +17,17 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-int bt_getnode(node *);
-int bt_putnode(node *);
+int ClassicHfsTransferTreeCursor(node *, int writing);
+
+static inline int ClassicHfsReadTreeNode(node *cursor)
+{
+    return ClassicHfsTransferTreeCursor(cursor, 0);
+}
+
+static inline int ClassicHfsWriteTreeNode(node *cursor)
+{
+    return ClassicHfsTransferTreeCursor(cursor, 1);
+}
 
 
 int ClassicHfsReserveTreeSpace(btree *, unsigned int);

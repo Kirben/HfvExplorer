@@ -108,7 +108,7 @@ int v_putcatrec(CatDataRec *data, node *np)
     ERROR(EIO, "invalid classic HFS catalog update");
     return -1;
   }
-  return bt_putnode(np);
+  return ClassicHfsWriteTreeNode(np);
 }
 
 /*
@@ -443,7 +443,7 @@ static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
           ERROR(EIO, "invalid B-tree leaf number during HFS recovery");
           return -1;
         }
-      if (bt_getnode(&leaf) < 0)
+      if (ClassicHfsReadTreeNode(&leaf) < 0)
         return -1;
       if (!v_recovery_leaf_valid(&leaf, previous))
         {

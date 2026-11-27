@@ -56,7 +56,7 @@ static int prepare_successor(node *next, node *previous, unsigned long replaceme
   }
   if (!next->nnum)
     return 0;
-  if (bt_getnode(next) < 0)
+  if (ClassicHfsReadTreeNode(next) < 0)
     return -1;
   if (!ClassicHfsRelinkSuccessor(&next->nd, next->nnum, &previous->nd, previous->nnum, replacement)) {
     ERROR(EIO, "inconsistent classic HFS successor link");
@@ -71,7 +71,7 @@ int ClassicHfsInsertAtCursor(node *cursor, unsigned char *record, int *length)
     node left = *cursor;
     unsigned slot = (unsigned)(left.rnum + 1);
     if (ClassicHfsInsertNodeRecord(left.data, left.roff, &left.nd.ndNRecs, slot, record, *length)) {
-        if (bt_putnode(&left) < 0)
+        if (ClassicHfsWriteTreeNode(&left) < 0)
             return -1;
         *cursor = left;
         *length = 0;
@@ -96,7 +96,7 @@ int ClassicHfsInsertAtCursor(node *cursor, unsigned char *record, int *length)
         return -1;
     }
     left.nd.ndFLink = right.nnum;
-    if (bt_putnode(&right) < 0 || bt_putnode(&left) < 0 || (next.nnum && bt_putnode(&next) < 0))
+    if (ClassicHfsWriteTreeNode(&right) < 0 || ClassicHfsWriteTreeNode(&left) < 0 || (next.nnum && ClassicHfsWriteTreeNode(&next) < 0))
         return -1;
     if (left.bt->hdr.bthLNode == left.nnum) {
         left.bt->hdr.bthLNode = right.nnum;
@@ -123,7 +123,7 @@ static int ClassicHfsFinishNodeMerge(node *right, node *left, unsigned char *rec
     if (prepare_successor(&successor, right, left->nnum) < 0)
         return -1;
     left->nd.ndFLink = right->nd.ndFLink;
-    if (bt_putnode(left) < 0 || (successor.nnum && bt_putnode(&successor) < 0))
+    if (ClassicHfsWriteTreeNode(left) < 0 || (successor.nnum && ClassicHfsWriteTreeNode(&successor) < 0))
         return -1;
     if (ClassicHfsFreeTreeNode(right) < 0)
         return -1;
@@ -146,7 +146,7 @@ int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, int *cha
         node left;
         left.bt = remaining.bt;
         left.nnum = remaining.nd.ndBLink;
-        if (bt_getnode(&left) < 0)
+        if (ClassicHfsReadTreeNode(&left) < 0)
             return -1;
         if (left.nnum == remaining.nnum || left.nd.ndFLink != remaining.nnum ||
             left.nd.ndType != remaining.nd.ndType || left.nd.ndNHeight != remaining.nd.ndNHeight) {
@@ -161,7 +161,7 @@ int ClassicHfsDeleteNodeRecord(node *current, unsigned char *separator, int *cha
     int length = 0;
     if (remaining.rnum == 0 && remaining.nd.ndNRecs && n_index(&remaining, replacement, &length) < 0)
         return -1;
-    if (bt_putnode(&remaining) < 0)
+    if (ClassicHfsWriteTreeNode(&remaining) < 0)
         return -1;
     if (length) {
         memcpy(separator, replacement, length);

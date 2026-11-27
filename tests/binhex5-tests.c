@@ -94,7 +94,14 @@ static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent
 static int count_node_transfers(void *context, uint32_t number, unsigned char (*bytes)[512])
 {
  ++*(int *)context;
+ memset(*bytes, 0, 512);
+ ClassicHfsWrite16(*bytes + 510, 14);
  return 0;
+}
+static int partial_node_transfer(void *context, uint32_t number, unsigned char (*bytes)[512])
+{
+ memset(*bytes, 0, 512);
+ return *(int *)context;
 }
 static int compare_test_keys(unsigned char *left, unsigned char *right)
 {
@@ -533,6 +540,19 @@ int main(int argc,char**argv){
   must(ClassicHfsTransferNode(0, 0, NULL, 0, &bytes, &descriptor, offsets, 0,
        count_node_transfers, &calls) == ClassicHfsNodeOk && calls == 1,
        "read header before installing bitmap");
+  bytes[19] = 42;
+  descriptor.ndFLink = 17;
+  int failure = -1;
+  for (int writing = 0; writing <= 1; ++writing)
+    must(ClassicHfsTransferNode(0, 1, &map, 1, &bytes, &descriptor, offsets, writing,
+         partial_node_transfer, &failure) == ClassicHfsNodeTransferFailed &&
+         bytes[19] == 42 && !bytes[3] && descriptor.ndFLink == 17 && offsets[0] == 14,
+         "failed node transfer preserves caller data, descriptor and offsets");
+  failure = 0;
+  must(ClassicHfsTransferNode(0, 1, &map, 1, &bytes, &descriptor, offsets, 0,
+       partial_node_transfer, &failure) == ClassicHfsNodeBadOffsets &&
+       bytes[19] == 42 && offsets[0] == 14 && descriptor.ndFLink == 17,
+       "malformed read preserves the prior decoded node");
  }
  {
   ClassicHfsExtent initial[3] = {{10,1},{12,1},{14,1}}, cached[3];

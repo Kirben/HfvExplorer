@@ -11,7 +11,7 @@ static inline int ClassicHfsLoadTreeHeader(btree *tree)
     header->bt = tree;
     header->nnum = 0;
     memset(&tree->hdr, 0, sizeof(tree->hdr));
-    if (bt_getnode(header) < 0)
+    if (ClassicHfsReadTreeNode(header) < 0)
         return -1;
     if (header->nd.ndType != ndHdrNode || header->nd.ndNRecs != 3 ||
         header->roff[0] != 14 || header->roff[1] != 120 || header->roff[2] != 248 ||
@@ -44,7 +44,7 @@ static inline int ClassicHfsLoadTreeHeader(btree *tree)
         node part;
         part.bt = tree;
         part.nnum = next;
-        if (bt_getnode(&part) < 0)
+        if (ClassicHfsReadTreeNode(&part) < 0)
             goto failed;
         if (part.nd.ndType != ndMapNode || part.nd.ndNRecs != 1 ||
             part.roff[0] != 14 || part.roff[1] != 506 || size > UINT32_MAX - HFS_MAPXSZ) {

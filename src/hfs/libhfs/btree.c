@@ -30,39 +30,6 @@
 # include "node.h"
 #include "../ClassicHfsGrowTreeMap.h"
 
-static int read_node_block(void *file, uint32_t number, block *bytes)
-{
-  return f_getblock((hfsfile *)file, number, bytes);
-}
-
-static int write_node_block(void *file, uint32_t number, block *bytes)
-{
-  return f_putblock((hfsfile *)file, number, bytes);
-}
-
-static int transfer_node(node *np, int writing)
-{
-  btree *bt = np->bt;
-  ClassicHfsNodeStatus result = ClassicHfsTransferNode(np->nnum, bt->hdr.bthNNodes,
-      bt->map, bt->mapsz, &np->data, &np->nd, np->roff, writing,
-      writing ? write_node_block : read_node_block, &bt->f);
-  if (result == ClassicHfsNodeUnavailable)
-    { ERROR(EIO, "classic HFS B-tree node outside allocated map"); }
-  else if (result == ClassicHfsNodeBadOffsets)
-    { ERROR(EIO, "invalid classic HFS B-tree node offsets"); }
-  return result == ClassicHfsNodeOk ? 0 : -1;
-}
-
-int bt_getnode(node *np)
-{
-  return transfer_node(np, 0);
-}
-
-int bt_putnode(node *np)
-{
-  return transfer_node(np, 1);
-}
-
 /* High-Level B*-Tree Routines ============================================= */
 
 // Reserve enough free nodes for a split at every level. Growing either
@@ -141,7 +108,7 @@ static int ClassicHfsReadMutationPath(node *root, unsigned depth, unsigned char 
         current = &(*children)[level];
         current->bt = tree;
         current->nnum = child;
-        if (bt_getnode(current) < 0)
+        if (ClassicHfsReadTreeNode(current) < 0)
             break;
     }
     free(*children);
@@ -166,7 +133,7 @@ static int ClassicHfsInsertAlongPath(node *root, unsigned depth, unsigned char *
                 break;
             parent->rnum = 0;
             if (!*length)
-                result = bt_putnode(parent);
+                result = ClassicHfsWriteTreeNode(parent);
         }
         if (*length)
             result = ClassicHfsInsertAtCursor(parent, record, length);
@@ -197,7 +164,7 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
             ERROR(EIO, "classic HFS record exceeds leaf capacity");
             return -1;
         }
-        if (ClassicHfsAllocateTreeNode(&root) < 0 || bt_putnode(&root) < 0)
+        if (ClassicHfsAllocateTreeNode(&root) < 0 || ClassicHfsWriteTreeNode(&root) < 0)
             return -1;
         tree->hdr.bthDepth = 1;
         tree->hdr.bthRoot = tree->hdr.bthFNode = tree->hdr.bthLNode = root.nnum;
@@ -205,7 +172,7 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
         root.bt = tree;
         root.nnum = tree->hdr.bthRoot;
         memcpy(record, input, length);
-        if (bt_getnode(&root) < 0 ||
+        if (ClassicHfsReadTreeNode(&root) < 0 ||
             ClassicHfsInsertAlongPath(&root, tree->hdr.bthDepth, record, &length) < 0)
             return -1;
         if (length) {
@@ -224,7 +191,7 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
                 ERROR(EIO, "classic HFS root separators exceed node capacity");
                 return -1;
             }
-            if (ClassicHfsAllocateTreeNode(&parent) < 0 || bt_putnode(&parent) < 0)
+            if (ClassicHfsAllocateTreeNode(&parent) < 0 || ClassicHfsWriteTreeNode(&parent) < 0)
                 return -1;
             tree->hdr.bthRoot = parent.nnum;
             ++tree->hdr.bthDepth;
@@ -260,7 +227,7 @@ static int ClassicHfsDeleteAlongPath(node *root, unsigned depth, unsigned char *
                     goto done;
                 changed = 1;
             }
-            if (bt_putnode(current) < 0)
+            if (ClassicHfsWriteTreeNode(current) < 0)
                 goto done;
         }
         if (!level || !changed)
@@ -284,7 +251,7 @@ int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
         ERROR(EIO, "invalid or empty classic HFS deletion root");
         return -1;
     }
-    if (bt_getnode(&root) < 0)
+    if (ClassicHfsReadTreeNode(&root) < 0)
         return -1;
     if (root.nd.ndFLink || root.nd.ndBLink ||
         (depth == 1 && (tree->hdr.bthFNode != root.nnum || tree->hdr.bthLNode != root.nnum ||
@@ -307,7 +274,7 @@ int ClassicHfsDeleteTreeKey(btree *tree, unsigned char *key)
         node child;
         child.bt = tree;
         child.nnum = number;
-        if (bt_getnode(&child) < 0)
+        if (ClassicHfsReadTreeNode(&child) < 0)
             return -1;
         if (!ClassicHfsPromotableChild(&child.nd, depth, number, tree->hdr.bthFNode, tree->hdr.bthLNode)) {
             ERROR(EIO, "invalid classic HFS child for root promotion");
