@@ -37,8 +37,6 @@
 # include "../ClassicHfsRecordBytes.h"
 # include "block.h"
 # include "low.h"
-# include "file.h"
-#include "../ClassicHfsSystemFiles.h"
 
 /*
  * NAME:	low->lockvol()
@@ -210,61 +208,4 @@ int l_readpm(hfsvol *vol)
 
       ++bnum;
     }
-}
-
-/*
- * NAME:	low->readmdb()
- * DESCRIPTION:	read the master directory block into memory
- */
-int l_readmdb(hfsvol *vol)
-{
-  block b;
-  MDB *mdb = &vol->mdb;
-  if (ClassicHfsReadSector(vol, 2, &b) < 0)
-    return -1;
-
-  ClassicHfsDecodeMasterDirectory(b, mdb);
-
-  vol->lpa = mdb->drAlBlkSiz >> HFS_BLOCKSZ_BITS;
-
-  ClassicHfsInitSystemFiles(vol);
-
-  return 0;
-}
-
-/*
- * NAME:	low->writemdb()
- * DESCRIPTION:	write the master directory block to disk
- */
-int l_writemdb(hfsvol *vol)
-{
-  block b;
-  MDB *mdb = &vol->mdb;
-  hfsfile *ext = &vol->ext.f;
-  hfsfile *cat = &vol->cat.f;
-
-  memset(&b, 0, sizeof(b));
-
-  mdb->drXTFlSize = ext->cat.u.fil.filPyLen;
-  mdb->drXTClpSiz = ext->clump;
-  memcpy(mdb->drXTExtRec, ext->cat.u.fil.filExtRec, sizeof(ExtDataRec));
-
-  mdb->drCTFlSize = cat->cat.u.fil.filPyLen;
-  mdb->drCTClpSiz = cat->clump;
-  memcpy(mdb->drCTExtRec, cat->cat.u.fil.filExtRec, sizeof(ExtDataRec));
-
-  ClassicHfsEncodeMasterDirectory(b, mdb);
-
-  if (ClassicHfsWriteSector(vol, 2, &b) < 0)
-    return -1;
-
-  if (vol->flags & HFS_UPDATE_ALTMDB)
-    {
-      if (ClassicHfsWriteSector(vol, vol->vlen - 2, &b) < 0)
-	return -1;
-    }
-
-  vol->flags &= ~(HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB);
-
-  return 0;
 }

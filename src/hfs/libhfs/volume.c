@@ -264,7 +264,7 @@ int v_flush(hfsvol *vol, int umounting)
 	}
 
       if ((vol->flags & (HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB)) &&
-	  l_writemdb(vol) < 0)
+	  ClassicHfsStoreVolumeHeader(vol) < 0)
 	return -1;
     }
 

@@ -234,6 +234,14 @@ int main(int argc,char**argv){
     {
         hfsvol volume = {0};
         block sector = {0}, bitmap = {0x80};
+        volume.flags = HFS_UPDATE_ALTMDB | HFS_UPDATE_MDB;
+        volume.vlen = 4;
+        volume.cat.f.clump = 4096;
+        must(ClassicHfsEnableVolumeCache(&volume) == 0 &&
+             ClassicHfsStoreVolumeHeader(&volume) < 0 && errno == EIO &&
+             volume.mdb.drCTClpSiz == 0 && volume.flags == (HFS_UPDATE_ALTMDB | HFS_UPDATE_MDB) &&
+             ClassicHfsCloseVolumeCache(&volume) == 0, "overlapping master directories reject before staging sectors");
+        volume.flags = 0;
         volume.lpa = 1; volume.vlen = 8;
         volume.flags = HFS_READONLY;
         must(ClassicHfsStoreRawSector(&volume, 0, &sector) < 0 && errno == EROFS,

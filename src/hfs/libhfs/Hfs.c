@@ -110,7 +110,7 @@ int hfs_recognizes_image_fd(int fd) {
   vol.fd=fd;
   vol.pnum=1;
   vol.flags=HFS_READONLY;
-  return l_readblock0(&vol)==0 && l_readmdb(&vol)==0 && vol.mdb.drSigWord==HFS_SIGWORD;
+  return l_readblock0(&vol)==0 && ClassicHfsLoadVolumeHeader(&vol)==0 && vol.mdb.drSigWord==HFS_SIGWORD;
 }
 
 /*
@@ -290,7 +290,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       /* find out what kind of media this is and read the MDB */
 
       if (l_readblock0(vol) < 0 ||
-	  l_readmdb(vol) < 0)
+	  ClassicHfsLoadVolumeHeader(vol) < 0)
 	{
 	  close(vol->fd);
 	  v_destruct(vol);

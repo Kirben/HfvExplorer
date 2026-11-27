@@ -21,12 +21,54 @@
 #include <stdio.h>
 #include "libhfs/internal.h"
 #include "libhfs/block.h"
+#include "libhfs/file.h"
+#include "ClassicHfsSystemFiles.h"
 #include "ClassicHfsGeometry.h"
 #include "ClassicHfsSectorIO.h"
 #include "ClassicHfsTime.h"
 #ifdef WIN32
 #include "../ClassicHfsRecovery.h"
 #endif
+
+int ClassicHfsLoadVolumeHeader(hfsvol *volume)
+{
+    block bytes;
+    if (ClassicHfsReadSector(volume, 2, &bytes) < 0)
+        return -1;
+    ClassicHfsDecodeMasterDirectory(bytes, &volume->mdb);
+    volume->lpa = volume->mdb.drAlBlkSiz / HFS_BLOCKSZ;
+    ClassicHfsInitSystemFiles(volume);
+    return 0;
+}
+
+int ClassicHfsStoreVolumeHeader(hfsvol *volume)
+{
+    block bytes = {0};
+    MDB header = volume->mdb;
+    const hfsfile *catalog = &volume->cat.f;
+    const hfsfile *extents = &volume->ext.f;
+    int alternate = volume->flags & HFS_UPDATE_ALTMDB;
+
+    // Reserve distinct sectors for the primary header, alternate, and final sector.
+    if (alternate && volume->vlen < 5) {
+        ERROR(EIO, "classic HFS volume too small for alternate master directory");
+        return -1;
+    }
+    header.drXTFlSize = extents->cat.u.fil.filPyLen;
+    header.drXTClpSiz = extents->clump;
+    memcpy(header.drXTExtRec, extents->cat.u.fil.filExtRec, sizeof(header.drXTExtRec));
+    header.drCTFlSize = catalog->cat.u.fil.filPyLen;
+    header.drCTClpSiz = catalog->clump;
+    memcpy(header.drCTExtRec, catalog->cat.u.fil.filExtRec, sizeof(header.drCTExtRec));
+
+    ClassicHfsEncodeMasterDirectory(bytes, &header);
+    if (ClassicHfsWriteSector(volume, 2, &bytes) < 0 ||
+        (alternate && ClassicHfsWriteSector(volume, volume->vlen - 2, &bytes) < 0))
+        return -1;
+    volume->mdb = header;
+    volume->flags &= ~(HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB);
+    return 0;
+}
 
 int ClassicHfsEnableVolumeCache(hfsvol *volume)
 {
