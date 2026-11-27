@@ -444,6 +444,13 @@ int main(int argc,char**argv){
   ClassicHfsWriteExtentKey(key, 0, 3, 6);
   must(ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsExtentMissing &&
        slot == -1, "extent bootstrap stops in sorted gap");
+  must(!ClassicHfsExtentPayload(leaf, offsets, 2, 1, key), "overflow slot must match the requested key");
+  ClassicHfsWriteExtentKey(key, 0, 3, 9);
+  must(ClassicHfsExtentPayload(leaf, offsets, 2, 1, key) == 42, "validated overflow payload offset");
+  offsets[2] = 514;
+  must(!ClassicHfsExtentPayload(leaf, offsets, 2, 1, key) &&
+       ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsBadExtentLeaf,
+       "reject overflow offset beyond the sector");
   offsets[2] = 52;
   must(ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsBadExtentLeaf,
        "extent bootstrap rejects truncated extent payload");

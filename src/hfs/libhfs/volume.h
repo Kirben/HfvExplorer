@@ -18,7 +18,6 @@
  */
 
 int v_catsearch(hfsvol *, long, char *, CatDataRec *, char *, node *);
-int v_extsearch(hfsfile *, unsigned int, ExtDataRec *, node *);
 
 int v_getthread(hfsvol *, long, CatDataRec *, node *, int);
 
@@ -28,7 +27,6 @@ int v_getthread(hfsvol *, long, CatDataRec *, node *, int);
     v_getthread(vol, id, thread, np, cdrFThdRec)
 
 int v_putcatrec(CatDataRec *, node *);
-int v_putextrec(ExtDataRec *, node *);
 
 int v_allocblocks(hfsvol *, ExtDescriptor *);
 int v_freeblocks(hfsvol *, const ExtDescriptor *);

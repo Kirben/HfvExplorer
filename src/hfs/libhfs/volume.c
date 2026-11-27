@@ -73,88 +73,6 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
 }
 
 /*
- * NAME:	vol->extsearch()
- * DESCRIPTION:	search extents tree
- */
-int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
-{
-  ExtDataRec extsave;
-  unsigned int fabnsave;
-  unsigned char pkey[HFS_EXTKEYLEN];
-  node n;
-  unsigned char *ptr;
-  int found;
-
-  if (np == 0)
-    np = &n;
-
-  ClassicHfsWriteExtentKey(pkey, file->fork, file->cat.u.fil.filFlNum, fabn);
-
-  /* in case bt_search() clobbers these */
-
-  memcpy(&extsave, &file->ext, sizeof(ExtDataRec));
-  fabnsave = file->fabn;
-
-  if (file->cat.u.fil.filFlNum == 3)
-    {
-      /* The root can itself be beyond the inline extents. Bootstrap the
-         overflow file from readable leaves instead of recursing via its root. */
-      unsigned long previous = 0, visits = 0;
-      if (file->flags & HFS_EXT_BOOTSTRAP) {
-        ERROR(EIO, "recursive extents-file bootstrap");
-        return -1;
-      }
-      file->flags |= HFS_EXT_BOOTSTRAP;
-      np->bt = &file->vol->ext;
-      np->nnum = np->bt->hdr.bthFNode;
-      found = 0;
-      while (np->nnum) {
-        if (++visits > np->bt->hdr.bthNNodes) {
-          ERROR(EIO, "cycle in classic HFS overflow leaf chain");
-          found = -1;
-          break;
-        }
-        if (bt_getnode(np) < 0) { found = -1; break; }
-        if (np->nd.ndType != -1 || np->nd.ndNHeight != 1 || np->nd.ndBLink != previous) {
-          ERROR(EIO, "invalid classic HFS overflow leaf link");
-          found = -1;
-          break;
-        }
-        found = ClassicHfsScanExtentLeaf(np->data, np->roff, np->nd.ndNRecs, pkey, &np->rnum);
-        if (found == ClassicHfsBadExtentLeaf)
-          { ERROR(EIO, "invalid classic HFS overflow leaf record"); }
-        if (found != ClassicHfsContinueExtentScan)
-          break;
-        previous = np->nnum;
-        np->nnum = np->nd.ndFLink;
-        found = 0;
-      }
-      file->flags &= ~HFS_EXT_BOOTSTRAP;
-    }
-  else
-    found = bt_search(&file->vol->ext, pkey, np);
-
-
-  memcpy(&file->ext, &extsave, sizeof(ExtDataRec));
-  file->fabn = fabnsave;
-
-  if (found <= 0)
-    return found;
-
-  if (data)
-    {
-      ptr = HFS_NODEREC(*np, np->rnum);
-      if (!ClassicHfsValidExtentRecord(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum])) {
-          ERROR(EIO, "invalid overflow extent record");
-          return -1;
-      }
-      ClassicHfsDecodeExtents(ptr + ClassicHfsExtentKeySize, *data);
-    }
-
-  return 1;
-}
-
-/*
  * NAME:	vol->getthread()
  * DESCRIPTION:	retrieve catalog thread information for a file or directory
  */
@@ -189,22 +107,6 @@ int v_putcatrec(CatDataRec *data, node *np)
     ERROR(EIO, "invalid classic HFS catalog update");
     return -1;
   }
-  return bt_putnode(np);
-}
-
-/*
- * NAME:	vol->putextrec()
- * DESCRIPTION:	store extent information
- */
-int v_putextrec(ExtDataRec *data, node *np)
-{
-  unsigned char *ptr = HFS_NODEREC(*np, np->rnum);
-  if (!ClassicHfsValidExtentRecord(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum])) {
-      ERROR(EIO, "invalid overflow extent record");
-      return -1;
-  }
-  ClassicHfsEncodeExtents(ptr + ClassicHfsExtentKeySize, *data);
-
   return bt_putnode(np);
 }
 

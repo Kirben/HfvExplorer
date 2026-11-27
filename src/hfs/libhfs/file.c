@@ -27,13 +27,92 @@
 # include "btree.h"
 # include "volume.h"
 
+// The extents file can describe its own overflow. Walk readable leaves when
+// its root cannot be reached without first resolving the requested extent.
+static int ClassicHfsFindOwnOverflow(btree *tree, unsigned char *key, node *leaf)
+{
+    unsigned long previous = 0;
+    unsigned long number = tree->hdr.bthFNode;
+    for (unsigned long visits = 0; number; ++visits) {
+        if (visits >= tree->hdr.bthNNodes || number >= tree->hdr.bthNNodes) {
+            ERROR(EIO, "invalid classic HFS overflow leaf chain");
+            return -1;
+        }
+        leaf->bt = tree;
+        leaf->nnum = number;
+        if (bt_getnode(leaf) < 0)
+            return -1;
+        if ((unsigned char)leaf->nd.ndType != ndLeafNode || leaf->nd.ndNHeight != 1 || leaf->nd.ndBLink != previous) {
+            ERROR(EIO, "invalid classic HFS overflow leaf link");
+            return -1;
+        }
+        int found = ClassicHfsScanExtentLeaf(leaf->data, leaf->roff, leaf->nd.ndNRecs, key, &leaf->rnum);
+        if (found == ClassicHfsBadExtentLeaf)
+            { ERROR(EIO, "invalid classic HFS overflow leaf record"); }
+        if (found != ClassicHfsContinueExtentScan)
+            return found;
+        previous = number;
+        number = leaf->nd.ndFLink;
+    }
+    return 0;
+}
+
+static int ClassicHfsFindOverflow(hfsfile *file, unsigned first, ExtDataRec *data, node *leaf)
+{
+    node local;
+    if (!leaf)
+        leaf = &local;
+    if (first > UINT16_MAX || (file->flags & HFS_EXT_BOOTSTRAP)) {
+        ERROR(EIO, "invalid classic HFS overflow lookup");
+        return -1;
+    }
+    unsigned char key[ClassicHfsExtentKeySize];
+    ClassicHfsWriteExtentKey(key, file->fork, file->cat.u.fil.filFlNum, first);
+    ExtDataRec saved;
+    memcpy(saved, file->ext, sizeof(saved));
+    unsigned savedStart = file->fabn;
+    int found;
+    if (file->cat.u.fil.filFlNum == HFS_CNID_EXT) {
+        file->flags |= HFS_EXT_BOOTSTRAP;
+        found = ClassicHfsFindOwnOverflow(&file->vol->ext, key, leaf);
+        file->flags &= ~HFS_EXT_BOOTSTRAP;
+    } else {
+        found = bt_search(&file->vol->ext, key, leaf);
+    }
+    memcpy(file->ext, saved, sizeof(saved));
+    file->fabn = savedStart;
+    if (found <= 0)
+        return found;
+    unsigned payload = ClassicHfsExtentPayload(leaf->data, leaf->roff, leaf->nd.ndNRecs, leaf->rnum, key);
+    if (!payload || (unsigned char)leaf->nd.ndType != ndLeafNode) {
+        ERROR(EIO, "invalid classic HFS overflow lookup result");
+        return -1;
+    }
+    if (data)
+        ClassicHfsDecodeExtents(leaf->data + payload, *data);
+    return 1;
+}
+
+static int ClassicHfsStoreOverflow(hfsfile *file, unsigned first, const ExtDataRec data, node *leaf)
+{
+    unsigned char key[ClassicHfsExtentKeySize];
+    ClassicHfsWriteExtentKey(key, file->fork, file->cat.u.fil.filFlNum, first);
+    unsigned payload = ClassicHfsExtentPayload(leaf->data, leaf->roff, leaf->nd.ndNRecs, leaf->rnum, key);
+    if (!payload || first > UINT16_MAX || (unsigned char)leaf->nd.ndType != ndLeafNode || leaf->bt != &file->vol->ext) {
+        ERROR(EIO, "invalid classic HFS overflow update");
+        return -1;
+    }
+    ClassicHfsEncodeExtents(leaf->data + payload, data);
+    return bt_putnode(leaf);
+}
+
 /*
  * NAME:	file->doblock()
  * DESCRIPTION:	read or write a numbered block from a file
  */
 static int load_fork_extents(void *context, unsigned first, ExtDataRec *record)
 {
-  return v_extsearch((hfsfile *)context, first, record, 0);
+  return ClassicHfsFindOverflow((hfsfile *)context, first, record, 0);
 }
 
 int f_doblock(hfsfile *file, unsigned long num, block *bp,
@@ -119,7 +198,7 @@ int f_alloc(hfsfile *file)
       if (start == end)
 	break;
 
-      if (v_extsearch(file, start, &file->ext, &n) <= 0)
+      if (ClassicHfsFindOverflow(file, start, &file->ext, &n) <= 0)
 	{
 	  v_freeblocks(vol, &blocks);
 	  return -1;
@@ -151,8 +230,8 @@ int f_alloc(hfsfile *file)
       if (file->fabn)
 	{
 	  if ((n.nnum == 0 &&
-	       v_extsearch(file, file->fabn, 0, &n) <= 0) ||
-	      v_putextrec(&updated, &n) < 0)
+	       ClassicHfsFindOverflow(file, file->fabn, 0, &n) <= 0) ||
+	      ClassicHfsStoreOverflow(file, file->fabn, updated, &n) < 0)
 	    {
 	      v_freeblocks(vol, &blocks);
 	      return -1;
@@ -201,7 +280,7 @@ int f_trunc(hfsfile *file)
     ExtDataRec current;
     node n;
     if (start) {
-      if (v_extsearch(file, start, &current, &n) <= 0)
+      if (ClassicHfsFindOverflow(file, start, &current, &n) <= 0)
         return -1;
     } else
       memcpy(current, *extrec, sizeof(current));
@@ -219,7 +298,7 @@ int f_trunc(hfsfile *file)
       if (!start)
         memcpy(*extrec, plan.kept, sizeof(plan.kept));
       else if (plan.kept[0].xdrNumABlks) {
-        if (v_putextrec(&plan.kept, &n) < 0)
+        if (ClassicHfsStoreOverflow(file, start, plan.kept, &n) < 0)
           return -1;
       } else if (bt_delete(&file->vol->ext, HFS_NODEREC(n, n.rnum)) < 0)
         return -1;

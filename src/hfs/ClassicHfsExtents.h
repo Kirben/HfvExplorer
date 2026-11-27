@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ClassicHfsExtentKey.h"
+#include "ClassicHfsNode.h"
 #include <string.h>
 
 typedef struct {
@@ -186,6 +187,18 @@ static inline int ClassicHfsValidExtentRecord(const unsigned char *record, int s
            record[0] == ClassicHfsExtentKeySize - 1;
 }
 
+static inline unsigned ClassicHfsExtentPayload(const unsigned char *sector, const uint16_t *offsets,
+                                              unsigned count, int slot, const unsigned char *key)
+{
+    if (slot < 0 || (unsigned)slot >= count || !ClassicHfsValidOffsets(count, offsets))
+        return 0;
+    const unsigned char *record = sector + offsets[slot];
+    if (!ClassicHfsValidExtentRecord(record, offsets[slot + 1] - offsets[slot]) ||
+        ClassicHfsCompareExtentKeyBytes(record, key))
+        return 0;
+    return offsets[slot] + ClassicHfsExtentKeySize;
+}
+
 enum { ClassicHfsBadExtentLeaf = -1, ClassicHfsExtentMissing, ClassicHfsExtentFound,
        ClassicHfsContinueExtentScan };
 
@@ -194,6 +207,8 @@ enum { ClassicHfsBadExtentLeaf = -1, ClassicHfsExtentMissing, ClassicHfsExtentFo
 static inline int ClassicHfsScanExtentLeaf(const unsigned char *bytes, const uint16_t *offsets,
                                            unsigned count, const unsigned char *key, int *slot)
 {
+    if (!ClassicHfsValidOffsets(count, offsets))
+        return ClassicHfsBadExtentLeaf;
     for (unsigned i = 0; i < count; ++i) {
         const unsigned char *record = bytes + offsets[i];
         if (!ClassicHfsValidExtentRecord(record, offsets[i + 1] - offsets[i]))
