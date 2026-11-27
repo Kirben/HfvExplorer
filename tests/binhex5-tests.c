@@ -235,6 +235,10 @@ int main(int argc,char**argv){
         hfsvol volume = {0};
         block sector = {0}, bitmap = {0x80};
         volume.lpa = 1; volume.vlen = 8;
+        volume.flags = HFS_READONLY;
+        must(ClassicHfsStoreRawSector(&volume, 0, &sector) < 0 && errno == EROFS,
+             "raw sector write rejects a read-only volume before accessing storage");
+        volume.flags = 0;
         {
             bcache before;
             must(ClassicHfsEnableVolumeCache(&volume) == 0, "initialize logical sector cache");

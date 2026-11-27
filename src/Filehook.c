@@ -36,7 +36,7 @@
 /* 
 	Hook:
 		hfs\libhfs\hfs.c
-		hfs\libhfs\block.c
+		hfs\ClassicHfsVolumeIO.c
 
 	Do not hook:
 		hfs\copyin.c

@@ -27,7 +27,7 @@ ARFLAGS =	rcs
 
 NAME =		libhfs
 TARGET =	$(NAME).a
-OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o block.o low.o file.o btree.o node.o volume.o  \
+OBJS =		../ClassicHfsTime.o ../ClassicHfsTransaction.o ../ClassicHfsVolumeIO.o low.o file.o btree.o node.o volume.o  \
 		hfs.o os2open.o
 
 ###############################################################################
@@ -48,7 +48,7 @@ $(TARGET): $(OBJS)
 
 ### DEPENDENCIES FOLLOW #######################################################
 
-block.o: block.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h low.h
+../ClassicHfsVolumeIO.o: ../ClassicHfsVolumeIO.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h low.h
 btree.o: btree.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h node.h
 ../ClassicHfsTime.o: ../ClassicHfsTime.c ../ClassicHfsTime.h
 file.o: file.c internal.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h block.h file.h btree.h \

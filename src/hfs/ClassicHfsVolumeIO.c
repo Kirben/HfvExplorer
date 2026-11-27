@@ -17,36 +17,16 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-# include <sys/types.h>
-
+#include <errno.h>
+#include <stdio.h>
+#include "libhfs/internal.h"
+#include "libhfs/block.h"
+#include "ClassicHfsGeometry.h"
+#include "ClassicHfsSectorIO.h"
+#include "ClassicHfsTime.h"
 #ifdef WIN32
-# include <io.h>
-# include <windows.h>
-# undef ERROR
-# include <stdio.h>
-#else
-# include <unistd.h>
+#include "../ClassicHfsRecovery.h"
 #endif
-
-# include <stdlib.h>
-# include <string.h>
-# include <errno.h>
-# include <time.h>
-
-# ifdef DEBUG
-# include <stdio.h>
-# endif
-
-# include "internal.h"
-#ifdef WIN32
-# include "../../ClassicHfsRecovery.h"
-#endif
-#include "../ClassicHfsTime.h"
-#include "../ClassicHfsGeometry.h"
-# include "block.h"
-# include "low.h"
-
-#include "../ClassicHfsSectorIO.h"
 
 int ClassicHfsEnableVolumeCache(hfsvol *volume)
 {
@@ -113,85 +93,53 @@ void b_debugcache(hfsvol *vol)
 }
 # endif
 
-/*
- * NAME:	getblock()
- * DESCRIPTION:	read a block from the physical device
- */
-static
-int getblock(hfsvol *vol, unsigned long bnum, block *bp)
+int ClassicHfsLoadRawSector(void *context, unsigned long sector, block *bytes)
 {
-  hfv_offset_t offset;
-  if (!ClassicHfsSectorOffset(vol->vstart, vol->vlen, bnum, 0, &offset)) {
-    ERROR(EIO, "classic HFS read outside volume");
-    return -1;
-  }
-  if (ClassicHfsTransferSector(vol->fd, offset, bp, 0, lseek, read, write) < 0) {
-    ERROR(errno, "cannot read complete classic HFS sector");
-    return -1;
-  }
-  return 0;
+    hfsvol *volume = (hfsvol *)context;
+    hfv_offset_t offset;
+    if (!ClassicHfsSectorOffset(volume->vstart, volume->vlen, sector, 0, &offset)) {
+        ERROR(EIO, "classic HFS read outside volume");
+        return -1;
+    }
+    if (ClassicHfsTransferSector(volume->fd, offset, bytes, 0, fhook_lseek, fhook_read, fhook_write) < 0) {
+        ERROR(errno, "cannot read complete classic HFS sector");
+        return -1;
+    }
+    return 0;
 }
 
-int ClassicHfsLoadRawSector(void *volume, unsigned long sector, block *bytes)
+int ClassicHfsStoreRawSector(void *context, unsigned long sector, block *bytes)
 {
-    return getblock((hfsvol *)volume, sector, bytes);
-}
-
-/*
- * NAME:	putblock()
- * DESCRIPTION:	write a block to the physical device
- */
-static
-int putblock(hfsvol *vol, unsigned long bnum, block *bp)
-{
-  hfv_offset_t offset;
-  if (!ClassicHfsSectorOffset(vol->vstart, vol->vlen, bnum, 1, &offset)) {
-    ERROR(EIO, "classic HFS write outside volume");
-    return -1;
-  }
-  if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
-  if(ClassicHfsCaptureBeforeWrite(vol,bnum)<0)return -1;
+    hfsvol *volume = (hfsvol *)context;
+    hfv_offset_t offset;
+    if (!ClassicHfsSectorOffset(volume->vstart, volume->vlen, sector, 1, &offset)) {
+        ERROR(EIO, "classic HFS write outside volume");
+        return -1;
+    }
+    if (volume->flags & HFS_WRITE_FAILED) {
+        ERROR(EIO, "Classic HFS writes are disabled");
+        return -1;
+    }
+    if (volume->flags & HFS_READONLY) {
+        ERROR(EROFS, "classic HFS volume is read-only");
+        return -1;
+    }
+    if (ClassicHfsCaptureBeforeWrite(volume, sector) < 0)
+        return -1;
 #ifdef WIN32
-  if(hfv_hfs_before_sector_write(vol->fd,offset)<0){
-    ERROR(EIO,"cannot publish classic HFS sector undo");
-    return -1;
-  }
+    if (hfv_hfs_before_sector_write(volume->fd, offset) < 0) {
+        ERROR(EIO, "cannot publish classic HFS sector undo");
+        return -1;
+    }
 #endif
-
-  if (ClassicHfsTransferSector(vol->fd, offset, bp, 1, lseek, read, write) < 0) {
-    ERROR(errno, "cannot write complete classic HFS sector");
-    return -1;
-  }
-
+    if (ClassicHfsTransferSector(volume->fd, offset, bytes, 1, fhook_lseek, fhook_read, fhook_write) < 0) {
+        ERROR(errno, "cannot write complete classic HFS sector");
+        return -1;
+    }
 #ifdef WIN32
-  hfv_hfs_after_sector_write(vol->fd);
+    hfv_hfs_after_sector_write(volume->fd);
 #endif
-  return 0;
-}
-
-/*
- * NAME:	getbucket()
- * DESCRIPTION:	fill a bucket's block buffer
- */
-static
-int getbucket(hfsvol *vol, bucket *b)
-{
-  if (getblock(vol, b->bnum, b->data) < 0)
-    return -1;
-
-  b->flags |=  HFS_BLOCK_INUSE;
-  b->flags &= ~HFS_BLOCK_DIRTY;
-
-  return 0;
-}
-
-/*
- * NAME:	putbucket()
- * DESCRIPTION:	store a bucket's block buffer
- */
-int ClassicHfsStoreRawSector(void *volume, unsigned long sector, block *data)
-{
-  return putblock((hfsvol *)volume, sector, data);
+    return 0;
 }
 
 int ClassicHfsFlushVolumeCache(hfsvol *volume)
@@ -227,7 +175,7 @@ static int transfer_logical_sector(hfsvol *volume, unsigned long sector, block *
         return -1;
     }
     if (!volume->cache)
-        return writing ? putblock(volume, sector, bytes) : getblock(volume, sector, bytes);
+        return writing ? ClassicHfsStoreRawSector(volume, sector, bytes) : ClassicHfsLoadRawSector(volume, sector, bytes);
 
     found = ClassicHfsFindCacheEntry(volume->cache, sector, &entry, ClassicHfsStoreRawSector, volume);
     if (found < 0)
@@ -236,8 +184,11 @@ static int transfer_logical_sector(hfsvol *volume, unsigned long sector, block *
         memcpy(entry->data, bytes, HFS_BLOCKSZ);
         entry->flags |= HFS_BLOCK_INUSE | HFS_BLOCK_DIRTY;
     } else {
-        if (!found && getbucket(volume, entry) < 0)
-            return -1;
+        if (!found) {
+            if (ClassicHfsLoadRawSector(volume, sector, entry->data) < 0)
+                return -1;
+            entry->flags = ClassicHfsCacheValid;
+        }
         memcpy(bytes, entry->data, HFS_BLOCKSZ);
     }
     return 0;
