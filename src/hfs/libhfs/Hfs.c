@@ -670,7 +670,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   if (pnum > 0)
     {
-      if (l_readpm(&vol) < 0)
+      if (ClassicHfsSelectPartition(&vol) < 0)
 	{
 	  close(vol.fd);
 	  return -1;

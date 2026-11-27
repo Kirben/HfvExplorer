@@ -255,6 +255,25 @@ int main(int argc,char**argv){
             must(ClassicHfsWriteSector(&volume, 0, &sector) == 0 &&
                  ClassicHfsLocateVolume(&volume) == 0 && !volume.pnum && volume.vlen == 8,
                  "bootable floppy selects whole volume");
+            memset(sector, 0, sizeof(sector));
+            ClassicHfsWrite16(sector, 0x504d);
+            ClassicHfsWrite32(sector + 4, 2);
+            ClassicHfsWrite32(sector + 8, 3);
+            ClassicHfsWrite32(sector + 12, 3);
+            memcpy(sector + 48, "Apple_HFS", 9);
+            volume.pnum = 1;
+            must(ClassicHfsWriteSector(&volume, 1, &sector) == 0, "stage first partition");
+            ClassicHfsWrite32(sector + 8, 5);
+            must(ClassicHfsWriteSector(&volume, 2, &sector) == 0 &&
+                 ClassicHfsSelectPartition(&volume) < 0 && !volume.vstart && volume.vlen == 8,
+                 "reject later overlapping partition before publishing geometry");
+            ClassicHfsWrite32(sector + 8, 6);
+            ClassicHfsWrite32(sector + 12, 2);
+            volume.pnum = 2;
+            must(ClassicHfsWriteSector(&volume, 2, &sector) == 0 &&
+                 ClassicHfsSelectPartition(&volume) == 0 && volume.vstart == 6 && volume.vlen == 2,
+                 "select second HFS partition ending at disk boundary");
+            volume.vstart = 0; volume.vlen = 8;
             free(volume.cache); // Discard the synthetic sectors without device I/O.
             volume.cache = NULL;
         }

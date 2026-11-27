@@ -17,6 +17,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+int ClassicHfsSelectPartition(hfsvol *);
 int ClassicHfsLocateVolume(hfsvol *);
 int ClassicHfsLoadVolumeHeader(hfsvol *);
 int ClassicHfsStoreVolumeHeader(hfsvol *);

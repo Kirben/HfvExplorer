@@ -22,7 +22,6 @@
 #include "libhfs/internal.h"
 #include "libhfs/block.h"
 #include "libhfs/file.h"
-#include "libhfs/low.h"
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsSystemFiles.h"
 #include "ClassicHfsGeometry.h"
@@ -31,6 +30,69 @@
 #ifdef WIN32
 #include "../ClassicHfsRecovery.h"
 #endif
+
+int ClassicHfsSelectPartition(hfsvol *volume)
+{
+    block bytes;
+    if (ClassicHfsReadSector(volume, 1, &bytes) < 0)
+        return -1;
+    unsigned count = ClassicHfsRead32(bytes + 4);
+    if (!count || count > 4096 || (volume->vlen && count >= volume->vlen)) {
+        ERROR(EINVAL, "invalid Apple partition count");
+        return -1;
+    }
+
+    typedef struct { uint32_t start, length; } Range;
+    Range *ranges = (Range *)calloc(count, sizeof(*ranges));
+    if (!ranges) {
+        ERROR(ENOMEM, "cannot allocate Apple partition ranges");
+        return -1;
+    }
+    int remaining = volume->pnum;
+    Range selected = {0};
+    unsigned selectedIndex = count;
+    int result = -1;
+    for (unsigned i = 0; i < count; ++i) {
+        if (i && ClassicHfsReadSector(volume, i + 1, &bytes) < 0)
+            goto done;
+        if (ClassicHfsRead16(bytes) != 0x504d || ClassicHfsRead32(bytes + 4) != count) {
+            ERROR(EINVAL, "inconsistent Apple partition map");
+            goto done;
+        }
+        Range range = {ClassicHfsRead32(bytes + 8), ClassicHfsRead32(bytes + 12)};
+        ranges[i] = range;
+        if (remaining > 0 && range.length && !strncmp((const char *)bytes + 48, "Apple_HFS", 32) &&
+            --remaining == 0) {
+            if (ClassicHfsRead32(bytes + 80) || range.start <= count ||
+                (uint64_t)range.start + range.length > (volume->vlen ? volume->vlen : (uint64_t)UINT32_MAX + 1)) {
+                ERROR(EINVAL, "invalid classic HFS partition range");
+                goto done;
+            }
+            selected = range;
+            selectedIndex = i;
+        }
+    }
+    if (!selected.length) {
+        ERROR(EINVAL, "cannot find requested classic HFS partition");
+        goto done;
+    }
+    for (unsigned i = 0; i < count; ++i) {
+        if (i != selectedIndex && ranges[i].length &&
+            ranges[i].start < (uint64_t)selected.start + selected.length &&
+            selected.start < (uint64_t)ranges[i].start + ranges[i].length) {
+            ERROR(EINVAL, "classic HFS partition overlaps another entry");
+            goto done;
+        }
+    }
+    if (!volume->vlen && ClassicHfsReadSector(volume, selected.start + (selected.length - 1), &bytes) < 0)
+        goto done;
+    volume->vstart = selected.start;
+    volume->vlen = selected.length;
+    result = 0;
+done:
+    free(ranges);
+    return result;
+}
 
 int ClassicHfsLocateVolume(hfsvol *volume)
 {
@@ -50,7 +112,7 @@ int ClassicHfsLocateVolume(hfsvol *volume)
         }
         const unsigned long previousLength = volume->vlen;
         volume->vlen = sectors;
-        if (l_readpm(volume) < 0) {
+        if (ClassicHfsSelectPartition(volume) < 0) {
             volume->vlen = previousLength;
             return -1;
         }
@@ -58,8 +120,13 @@ int ClassicHfsLocateVolume(hfsvol *volume)
     }
     // Bootable floppies start at sector zero. Other media may have a map
     // without a driver descriptor, so retain the historical optional probe.
-    if (signature == 0x4c4b || l_readpm(volume) < 0)
-        volume->pnum = 0;
+    if (signature != 0x4c4b) {
+        if (ClassicHfsReadSector(volume, 1, &bytes) < 0)
+            return -1;
+        if (ClassicHfsRead16(bytes) == 0x504d)
+            return ClassicHfsSelectPartition(volume);
+    }
+    volume->pnum = 0;
     return 0;
 }
 
