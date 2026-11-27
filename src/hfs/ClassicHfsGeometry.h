@@ -2,6 +2,40 @@
 #pragma once
 #include <stdint.h>
 
+enum { ClassicHfsBadForkSize = -1, ClassicHfsForkSizeLimit = 0, ClassicHfsForkSizeOk = 1 };
+
+static inline int ClassicHfsGrowthRequest(uint32_t physical, uint32_t blockBytes,
+                                          uint32_t clumpBytes, uint16_t *blocks)
+{
+    if (!blockBytes || physical % blockBytes)
+        return ClassicHfsBadForkSize;
+    uint32_t remaining = (UINT32_MAX - physical) / blockBytes;
+    if (!remaining)
+        return ClassicHfsForkSizeLimit;
+    uint32_t request = clumpBytes / blockBytes;
+    if (!request)
+        request = 1;
+    if (request > remaining)
+        request = remaining;
+    *blocks = (uint16_t)(request > UINT16_MAX ? UINT16_MAX : request);
+    return ClassicHfsForkSizeOk;
+}
+
+static inline int ClassicHfsTruncatedSize(uint32_t logical, uint32_t physical,
+                                          uint32_t blockBytes, uint32_t *rounded)
+{
+    if (!blockBytes || physical % blockBytes)
+        return ClassicHfsBadForkSize;
+    uint64_t blocks = ((uint64_t)logical + blockBytes - 1) / blockBytes;
+    uint64_t bytes = blocks * blockBytes;
+    if (bytes > UINT32_MAX)
+        return ClassicHfsForkSizeLimit;
+    if (bytes > physical)
+        return ClassicHfsBadForkSize;
+    *rounded = (uint32_t)bytes;
+    return ClassicHfsForkSizeOk;
+}
+
 // Classic volume lengths and logical sector numbers are 32-bit. Byte offsets
 // into an image may be larger. Keep intermediate sector arithmetic wide.
 static inline int ClassicHfsVolumeSectors(uint16_t first, uint16_t blocks,

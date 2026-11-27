@@ -21,6 +21,7 @@
 # include <errno.h>
 
 # include "internal.h"
+#include "../ClassicHfsGeometry.h"
 # include "block.h"
 # include "file.h"
 # include "btree.h"
@@ -116,15 +117,14 @@ int f_alloc(hfsfile *file)
     clumpsz = vol->mdb.drClpSiz;
 
   f_getptrs(file, 0, &pylen, 0);
-  /* Physical EOF is also a 32-bit on-disk field. Never wrap at 4 GiB. */
-  {
-    unsigned long available = (0xffffffffUL - *pylen) / vol->mdb.drAlBlkSiz;
-    unsigned long request = clumpsz / vol->mdb.drAlBlkSiz;
-    if (!available) { ERROR(EFBIG, "classic HFS physical fork size limit"); return -1; }
-    if (!request) request = 1;
-    if (request > available) request = available;
-    if (request > 65535UL) request = 65535UL;
-    blocks.xdrNumABlks = (unsigned short)request;
+  int sizeStatus = ClassicHfsGrowthRequest(*pylen, vol->mdb.drAlBlkSiz, clumpsz,
+                                          &blocks.xdrNumABlks);
+  if (sizeStatus != ClassicHfsForkSizeOk) {
+    if (sizeStatus == ClassicHfsForkSizeLimit)
+      { ERROR(EFBIG, "classic HFS physical fork size limit"); }
+    else
+      { ERROR(EIO, "invalid physical fork length"); }
+    return -1;
   }
 
   if (v_allocblocks(vol, &blocks) < 0)
@@ -226,21 +226,16 @@ int f_alloc(hfsfile *file)
 int f_trunc(hfsfile *file)
 {
   ExtDataRec *extrec;
-  unsigned long *lglen, *pylen, alblksz, newpylen;
+  unsigned long *lglen, *pylen, alblksz;
+  uint32_t newpylen;
   f_getptrs(file, &lglen, &pylen, &extrec);
   alblksz = file->vol->mdb.drAlBlkSiz;
-  if (!alblksz || *pylen % alblksz) {
-    ERROR(EIO, "invalid physical fork length");
-    return -1;
-  }
-  hfv_size_t rounded = ((hfv_size_t)*lglen + alblksz - 1) / alblksz * alblksz;
-  if (rounded > UINT32_MAX) {
-    ERROR(EFBIG, "classic HFS physical fork size limit");
-    return -1;
-  }
-  newpylen = (unsigned long)rounded;
-  if (newpylen > *pylen) {
-    ERROR(EIO, "file size exceeds physical length");
+  int sizeStatus = ClassicHfsTruncatedSize(*lglen, *pylen, alblksz, &newpylen);
+  if (sizeStatus != ClassicHfsForkSizeOk) {
+    if (sizeStatus == ClassicHfsForkSizeLimit)
+      { ERROR(EFBIG, "classic HFS physical fork size limit"); }
+    else
+      { ERROR(EIO, "invalid physical fork length"); }
     return -1;
   }
   if (newpylen == *pylen)

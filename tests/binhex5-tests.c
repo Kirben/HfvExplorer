@@ -459,6 +459,19 @@ int main(int argc,char**argv){
        "failed second write preserves completed bytes and logical EOF");
  }
  {
+  uint16_t blocks = 17;
+  uint32_t bytes = 99;
+  must(ClassicHfsGrowthRequest(1,512,512,&blocks) == ClassicHfsBadForkSize &&
+       ClassicHfsGrowthRequest(0,0,512,&blocks) == ClassicHfsBadForkSize && blocks == 17,
+       "reject invalid physical fork before allocation");
+  must(ClassicHfsGrowthRequest(0xfffffc00,512,4096,&blocks) == ClassicHfsForkSizeOk &&
+       blocks == 1 && ClassicHfsGrowthRequest(0xfffffe00,512,0,&blocks) == ClassicHfsForkSizeLimit,
+       "limit clump to last representable allocation block");
+  must(ClassicHfsTruncatedSize(UINT32_MAX,0xfffffe00,512,&bytes) == ClassicHfsForkSizeLimit &&
+       bytes == 99 && ClassicHfsTruncatedSize(513,1536,512,&bytes) == ClassicHfsForkSizeOk &&
+       bytes == 1024, "round retained physical EOF without 32-bit wraparound");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;
