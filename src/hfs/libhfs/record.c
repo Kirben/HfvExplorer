@@ -28,35 +28,6 @@
 # include "record.h"
 
 /*
- * NAME:	record->packcatkey()
- * DESCRIPTION:	pack a catalog record key
- */
-void r_packcatkey(CatKeyRec *key, unsigned char *pkey, int *len)
-{
-  unsigned char *start = pkey;
-
-  ClassicHfsAppend8(&pkey, key->ckrKeyLen);
-  ClassicHfsAppend8(&pkey, key->ckrResrv1);
-  ClassicHfsAppend32(&pkey, key->ckrParID);
-  ClassicHfsAppendName(&pkey, key->ckrCName, sizeof(key->ckrCName));
-
-  if (len)
-    *len = HFS_RECKEYSKIP(start);
-}
-
-/*
- * NAME:	record->unpackcatkey()
- * DESCRIPTION:	unpack a catalog record key
- */
-void r_unpackcatkey(unsigned char *pkey, CatKeyRec *key)
-{
-  key->ckrKeyLen = ClassicHfsTake8(&pkey);
-  key->ckrResrv1 = ClassicHfsTake8(&pkey);
-  key->ckrParID = ClassicHfsTake32(&pkey);
-  ClassicHfsTakeName(&pkey, key->ckrCName, sizeof(key->ckrCName));
-}
-
-/*
  * NAME:	record->packcatdata()
  * DESCRIPTION:	pack catalog record data
  */
@@ -318,23 +289,6 @@ void r_unpackextdata(unsigned char *pdata, ExtDataRec *data)
       (*data)[i].xdrStABN = ClassicHfsTake16(&pdata);
       (*data)[i].xdrNumABlks = ClassicHfsTake16(&pdata);
     }
-}
-
-/*
- * NAME:	record->makecatkey()
- * DESCRIPTION:	construct a catalog record key
- */
-void r_makecatkey(CatKeyRec *key, long parid, char *name)
-{
-  int len;
-
-  len = strlen(name) + 1;
-
-  key->ckrKeyLen = 0x05 + len + (len & 1);
-  key->ckrResrv1 = 0;
-  key->ckrParID  = parid;
-
-  strcpy(key->ckrCName, name);
 }
 
 /*

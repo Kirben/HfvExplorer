@@ -92,14 +92,8 @@ typedef ExtDescriptor ExtDataRec[3];
 
 #include "../ClassicHfsExtentKey.h"
 
-#pragma pack(1)
-typedef struct {
-  SignedByte	ckrKeyLen;	/* key length */
-  SignedByte	ckrResrv1;	/* reserved */
-  ULongInt	ckrParID;	/* parent directory ID */
-  Str31		ckrCName;	/* catalog node name */
-} CatKeyRec;
-#pragma pack()
+#include "../ClassicHfsCatalogKey.h"
+typedef ClassicHfsCatalogKey CatKeyRec;
 
 # define HFS_MAP1SZ  256
 # define HFS_MAPXSZ  492

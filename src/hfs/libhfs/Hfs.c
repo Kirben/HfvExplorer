@@ -1033,7 +1033,6 @@ int hfs_dirinfo(hfsvol *vol, long *id, char *name)
 hfsdir *hfs_opendir(hfsvol *vol, char *path)
 {
   hfsdir *dir;
-  CatKeyRec key;
   CatDataRec data;
   unsigned char pkey[HFS_CATKEYLEN];
 
@@ -1073,8 +1072,7 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
       dir->dirid = data.u.dir.dirDirID;
       dir->vptr  = 0;
 
-      r_makecatkey(&key, dir->dirid, "");
-      r_packcatkey(&key, pkey, 0);
+      ClassicHfsWriteCatalogKey(pkey, dir->dirid, "");
 
       if (bt_search(&vol->cat, pkey, &dir->n) <= 0)
 	{
@@ -1167,7 +1165,10 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 
       ptr = HFS_NODEREC(dir->n, dir->n.rnum);
 
-      r_unpackcatkey(ptr, &key);
+      if (!ClassicHfsReadCatalogKey(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], &key)) {
+        ERROR(EIO, "invalid catalog key");
+        return -1;
+      }
 
       if (key.ckrParID != dir->dirid)
 	{
@@ -1249,7 +1250,10 @@ int hfs_readdir2(
 		  dir->n.rnum = 0;
 		}
     ptr = HFS_NODEREC(dir->n, dir->n.rnum);
-    r_unpackcatkey(ptr, pkey);
+    if (!ClassicHfsReadCatalogKey(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], pkey)) {
+      ERROR(EIO, "invalid catalog key");
+      return -1;
+    }
     if (pkey->ckrParID != dir->dirid) {
 		  dir->n.rnum = -1;
 		  ERROR(ENOENT, "no more entries");
@@ -1725,7 +1729,6 @@ static int hfs_mkdir_impl(hfsvol *vol, char *path)
  */
 static int hfs_rmdir_impl(hfsvol *vol, char *path)
 {
-  CatKeyRec key;
   CatDataRec data;
   long parid;
   char name[HFS_MAX_FLEN + 1];
@@ -1761,16 +1764,17 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
 
   /* delete directory record */
 
-  r_makecatkey(&key, parid, name);
-  r_packcatkey(&key, pkey, 0);
+  if (ClassicHfsWriteCatalogKey(pkey, parid, name) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
 
   if (bt_delete(&vol->cat, pkey) < 0)
     return -1;
 
   /* delete thread record */
 
-  r_makecatkey(&key, data.u.dir.dirDirID, "");
-  r_packcatkey(&key, pkey, 0);
+  ClassicHfsWriteCatalogKey(pkey, data.u.dir.dirDirID, "");
 
   if (bt_delete(&vol->cat, pkey) < 0 ||
       v_adjvalence(vol, parid, 1, -1) < 0)
@@ -1785,7 +1789,6 @@ static int hfs_rmdir_impl(hfsvol *vol, char *path)
  */
 static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 {
-  CatKeyRec key;
   CatDataRec data;
   long id, parid;
   char name[HFS_MAX_FLEN + 1];
@@ -1863,8 +1866,10 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 
   data.u.fil.filResrv = 0;
 
-  r_makecatkey(&key, parid, name);
-  r_packcatkey(&key, record, &reclen);
+  if ((reclen = ClassicHfsWriteCatalogKey(record, parid, name)) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
   r_packcatdata(&data, HFS_RECDATA(record), &reclen);
 
   if (bt_insert(&vol->cat, record, reclen) < 0 ||
@@ -1881,7 +1886,6 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 static int hfs_delete_impl(hfsvol *vol, char *path)
 {
   hfsfile file;
-  CatKeyRec key;
   unsigned char pkey[HFS_CATKEYLEN];
   int found;
 
@@ -1936,8 +1940,10 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
 
   /* delete file record */
 
-  r_makecatkey(&key, file.parid, file.name);
-  r_packcatkey(&key, pkey, 0);
+  if (ClassicHfsWriteCatalogKey(pkey, file.parid, file.name) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
 
   if (bt_delete(&vol->cat, pkey) < 0 ||
       v_adjvalence(vol, file.parid, 0, -1) < 0)
@@ -1951,8 +1957,7 @@ static int hfs_delete_impl(hfsvol *vol, char *path)
 
   if (found)
     {
-      r_makecatkey(&key, file.cat.u.fil.filFlNum, "");
-      r_packcatkey(&key, pkey, 0);
+      ClassicHfsWriteCatalogKey(pkey, file.cat.u.fil.filFlNum, "");
 
       if (bt_delete(&vol->cat, pkey) < 0)
 	return -1;
@@ -1969,7 +1974,6 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 {
   CatDataRec src, dst;
   long srcid, dstid;
-  CatKeyRec key;
   char srcname[HFS_MAX_FLEN + 1], dstname[HFS_MAX_FLEN + 1];
   unsigned char record[HFS_CATRECMAXLEN];
   int found, isdir, moving, reclen;
@@ -2101,16 +2105,20 @@ static int hfs_rename_impl(hfsvol *vol, char *srcpath, char *dstpath)
 
   /* remove source record */
 
-  r_makecatkey(&key, srcid, srcname);
-  r_packcatkey(&key, record, 0);
+  if (ClassicHfsWriteCatalogKey(record, srcid, srcname) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
 
   if (bt_delete(&vol->cat, record) < 0)
     return -1;
 
   /* insert destination record */
 
-  r_makecatkey(&key, dstid, dstname);
-  r_packcatkey(&key, record, &reclen);
+  if ((reclen = ClassicHfsWriteCatalogKey(record, dstid, dstname)) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
   r_packcatdata(&src, HFS_RECDATA(record), &reclen);
 
   if (bt_insert(&vol->cat, record, reclen) < 0)

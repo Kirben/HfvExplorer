@@ -17,8 +17,6 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-void r_packcatkey(CatKeyRec *, unsigned char *, int *);
-void r_unpackcatkey(unsigned char *, CatKeyRec *);
 
 
 
@@ -28,7 +26,6 @@ void r_unpackcatdata(unsigned char *, CatDataRec *);
 void r_packextdata(ExtDataRec *, unsigned char *, int *);
 void r_unpackextdata(unsigned char *, ExtDataRec *);
 
-void r_makecatkey(CatKeyRec *, long, char *);
 
 void r_unpackdirent(long, char *, CatDataRec *, hfsdirent *);
 void r_packdirent(CatDataRec *, hfsdirent *);

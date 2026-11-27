@@ -76,6 +76,18 @@ int main(int argc,char**argv){
        "extent block order and equality");
  }
  {
+  unsigned char bytes[39];
+  ClassicHfsCatalogKey decoded;
+  const char full[] = "1234567890123456789012345678901";
+  memset(bytes, 0xcc, sizeof(bytes));
+  must(ClassicHfsWriteCatalogKey(bytes, 42, full) == 38 && bytes[38] == 0xcc &&
+       ClassicHfsReadCatalogKey(bytes, 38, &decoded) && decoded.ckrParID == 42 &&
+       !strcmp(decoded.ckrCName, full), "maximum catalog key round trip");
+  must(!ClassicHfsReadCatalogKey(bytes, 37, &decoded), "truncated catalog key");
+  must(ClassicHfsWriteCatalogKey(bytes, 42, "12345678901234567890123456789012") < 0 &&
+       bytes[0] == 37, "long name rejected before encoding");
+  must(ClassicHfsWriteCatalogKey(bytes, 1, "") == 8 && bytes[7] == 0 &&
+       ClassicHfsReadCatalogKey(bytes, 8, &decoded) && !decoded.ckrCName[0], "thread key padding");
   unsigned char thread[] = {6, 0, 0, 0, 0, 1, 0};
   unsigned char leaf[] = {7, 0, 0, 0, 0, 1, 1, 0x80};
   unsigned char index[38] = {37, 0, 0, 0, 0, 1, 1, 0x8a};

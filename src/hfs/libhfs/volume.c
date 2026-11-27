@@ -53,8 +53,10 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
   if (np == 0)
     np = &n;
 
-  r_makecatkey(&key, parid, name);
-  r_packcatkey(&key, pkey, 0);
+  if (ClassicHfsWriteCatalogKey(pkey, parid, name) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
 
   found = bt_search(&vol->cat, pkey, np);
   if (found <= 0)
@@ -64,7 +66,10 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
 
   if (cname)
     {
-      r_unpackcatkey(ptr, &key);
+      if (!ClassicHfsReadCatalogKey(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum], &key)) {
+        ERROR(EIO, "invalid catalog key");
+        return -1;
+      }
       strcpy(cname, key.ckrCName);
     }
 
@@ -580,7 +585,6 @@ int v_adjvalence(hfsvol *vol, long parid, int isdir, int adj)
  */
 int v_newfolder(hfsvol *vol, long parid, char *name)
 {
-  CatKeyRec key;
   CatDataRec data;
   long id;
   unsigned char record[HFS_CATRECMAXLEN];
@@ -609,8 +613,10 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   for (i = 0; i < 4; ++i)
     data.u.dir.dirResrv[i] = 0;
 
-  r_makecatkey(&key, parid, name);
-  r_packcatkey(&key, record, &reclen);
+  if ((reclen = ClassicHfsWriteCatalogKey(record, parid, name)) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
   r_packcatdata(&data, HFS_RECDATA(record), &reclen);
 
   if (bt_insert(&vol->cat, record, reclen) < 0)
@@ -626,8 +632,10 @@ int v_newfolder(hfsvol *vol, long parid, char *name)
   data.u.dthd.thdParID    = parid;
   strcpy(data.u.dthd.thdCName, name);
 
-  r_makecatkey(&key, id, "");
-  r_packcatkey(&key, record, &reclen);
+  if ((reclen = ClassicHfsWriteCatalogKey(record, id, "")) < 0) {
+    ERROR(ENAMETOOLONG, "catalog name exceeds 31 bytes");
+    return -1;
+  }
   r_packcatdata(&data, HFS_RECDATA(record), &reclen);
 
   if (bt_insert(&vol->cat, record, reclen) < 0 ||
