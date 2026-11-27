@@ -46,7 +46,7 @@
 # include "block.h"
 # include "low.h"
 
-#include "..\..\filehook.h"
+#include "../ClassicHfsSectorIO.h"
 
 static HFV_THREAD_LOCAL int rollback_status;
 void hfs_note_rollback(int status) {
@@ -189,36 +189,15 @@ void b_debugcache(hfsvol *vol)
 static
 int getblock(hfsvol *vol, unsigned long bnum, block *bp)
 {
-  int bytes;
-
-# ifdef DEBUG
-  printf("READ: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
-# endif
-
-  if (lseek(vol->fd, ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ, SEEK_SET) < 0)
-    {
-      ERROR(errno, "error seeking device");
-      return -1;
-    }
-
-  bytes = read(vol->fd, bp, HFS_BLOCKSZ);
-
-  if (bytes < 0)
-    {
-      ERROR(errno, "error reading from device");
-      return -1;
-    }
-  else if (bytes == 0)
-    {
-      ERROR(EIO, "read EOF on volume");
-      return -1;
-    }
-  else if (bytes != HFS_BLOCKSZ)
-    {
-      ERROR(EIO, "read incomplete block");
-      return -1;
-    }
-
+  hfv_offset_t offset;
+  if (!ClassicHfsSectorOffset(vol->vstart, vol->vlen, bnum, 0, &offset)) {
+    ERROR(EIO, "classic HFS read outside volume");
+    return -1;
+  }
+  if (ClassicHfsTransferSector(vol->fd, offset, bp, 0, lseek, read, write) < 0) {
+    ERROR(errno, "cannot read complete classic HFS sector");
+    return -1;
+  }
   return 0;
 }
 
@@ -385,8 +364,11 @@ int b_end_mutation(hfsvol *vol,int result) {
 static
 int putblock(hfsvol *vol, unsigned long bnum, block *bp)
 {
-  int bytes;
-  hfv_offset_t offset = ((hfv_offset_t)vol->vstart + bnum) * HFS_BLOCKSZ;
+  hfv_offset_t offset;
+  if (!ClassicHfsSectorOffset(vol->vstart, vol->vlen, bnum, 1, &offset)) {
+    ERROR(EIO, "classic HFS write outside volume");
+    return -1;
+  }
   if(vol->flags&HFS_WRITE_FAILED){ERROR(EIO,"Classic HFS writes are disabled");return -1;}
   if(remember_block(vol,bnum)<0)return -1;
 #ifdef WIN32
@@ -396,28 +378,10 @@ int putblock(hfsvol *vol, unsigned long bnum, block *bp)
   }
 #endif
 
-# ifdef DEBUG
-  printf("WRITE: vol 0x%x block %lu\n", (unsigned int) vol, bnum);
-# endif
-
-  if (lseek(vol->fd, offset, SEEK_SET) < 0)
-    {
-      ERROR(errno, "error seeking device");
-      return -1;
-    }
-
-  bytes = write(vol->fd, bp, HFS_BLOCKSZ);
-
-  if (bytes < 0)
-    {
-      ERROR(errno, "error writing to device");
-      return -1;
-    }
-  else if (bytes != HFS_BLOCKSZ)
-    {
-      ERROR(EIO, "wrote incomplete block");
-      return -1;
-    }
+  if (ClassicHfsTransferSector(vol->fd, offset, bp, 1, lseek, read, write) < 0) {
+    ERROR(errno, "cannot write complete classic HFS sector");
+    return -1;
+  }
 
 #ifdef WIN32
   hfv_hfs_after_sector_write(vol->fd);

@@ -29,6 +29,15 @@ static void save(const char* path,const unsigned char* bytes,unsigned size){HAND
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
 static unsigned char value(unsigned i,unsigned fork){return (unsigned char)((i*37)^(i>>3)^(fork*91));}
 static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(v,name);unsigned fork;unsigned char b[5000];must(f!=NULL,"open imported forks");for(fork=0;fork<2;fork++){unsigned n=fork?r:d,i;must(hfs_setfork(f,fork)==0,"choose fork");must(hfs_read(f,b,n)==n,"read imported fork");for(i=0;i<n;i++)must(b[i]==value(i,fork),"fork byte fidelity");must(hfs_read(f,b,1)==0,"fork EOF");}must(hfs_close(f)==0,"close imported forks");}
+#include "hfs/ClassicHfsSectorIO.h"
+static hfv_offset_t test_sector_seek(int delta, hfv_offset_t offset, int origin)
+{
+ return offset + delta;
+}
+static int short_sector_write(int fd, const void *buffer, unsigned size)
+{
+ return size - 1;
+}
 static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent (*record)[3])
 {
  unsigned *calls = context;
@@ -323,6 +332,17 @@ int main(int argc,char**argv){
   offsets[2] = 52;
   must(ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsBadExtentLeaf,
        "extent bootstrap rejects truncated extent payload");
+ }
+ {
+  unsigned char bytes[512]; hfv_offset_t offset;
+  must(ClassicHfsSectorOffset(UINT32_MAX, 2, 1, 1, &offset) &&
+       offset == ((hfv_offset_t)UINT32_MAX + 1) * 512, "wide partition sector offset");
+  must(!ClassicHfsSectorOffset(0, 2, 2, 1, &offset) &&
+       !ClassicHfsSectorOffset(0, 0, 0, 1, &offset) &&
+       ClassicHfsSectorOffset(0, 0, 2, 0, &offset), "reject unbounded writes, allow probing reads");
+  must(ClassicHfsTransferSector(1, offset, bytes, 1, test_sector_seek, NULL, NULL) < 0 &&
+       ClassicHfsTransferSector(0, offset, bytes, 1, test_sector_seek, NULL, short_sector_write) < 0,
+       "reject displaced seek before transfer and reject a short write");
  }
  {
   unsigned char source[106], output[107];
