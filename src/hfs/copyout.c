@@ -207,14 +207,14 @@ int do_macb(hfsfile *ifile, int ofile, int version, const unsigned char *finder)
 
   buf[73] = ent.fdflags >> 8;
 
-  d_putl(&buf[83], ent.u.file.dsize);
-  d_putl(&buf[87], ent.u.file.rsize);
+  ClassicHfsWrite32(&buf[83], ent.u.file.dsize);
+  ClassicHfsWrite32(&buf[87], ent.u.file.rsize);
 
-  d_putl(&buf[91], d_tomtime(ent.crdate));
-  d_putl(&buf[95], d_tomtime(ent.mddate));
+  ClassicHfsWrite32(&buf[91], d_tomtime(ent.crdate));
+  ClassicHfsWrite32(&buf[95], d_tomtime(ent.mddate));
 
-  d_putw(buf + 75, ent.fdlocation.v);
-  d_putw(buf + 77, ent.fdlocation.h);
+  ClassicHfsWrite16(buf + 75, ent.fdlocation.v);
+  ClassicHfsWrite16(buf + 77, ent.fdlocation.h);
   buf[81] = (ent.flags & HFS_ISLOCKED) ? 1 : 0;
   if (version != MacBinaryI) buf[101] = ent.fdflags & 0xff;
   if (version == MacBinaryIII) {
@@ -338,21 +338,21 @@ int binhx(hfsfile *ifile)
       return -1;
     }
 
-  d_putw(word, ent.fdflags);
+  ClassicHfsWrite16(word, ent.fdflags);
   if (bh_insert(word, 2) < 0)
     {
       cpo_error = bh_error;
       return -1;
     }
 
-  d_putl(lword, ent.u.file.dsize);
+  ClassicHfsWrite32(lword, ent.u.file.dsize);
   if (bh_insert(lword, 4) < 0)
     {
       cpo_error = bh_error;
       return -1;
     }
 
-  d_putl(lword, ent.u.file.rsize);
+  ClassicHfsWrite32(lword, ent.u.file.rsize);
   if (bh_insert(lword, 4) < 0 ||
       bh_insertcrc() < 0)
     {

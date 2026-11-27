@@ -17,13 +17,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-char d_getb(unsigned char *);
-short d_getw(unsigned char *);
-long d_getl(unsigned char *);
-
-void d_putb(unsigned char *, char);
-void d_putw(unsigned char *, short);
-void d_putl(unsigned char *, long);
+#include "../ClassicHfsBytes.h"
 
 void d_fetchb(unsigned char **, char *);
 void d_fetchw(unsigned char **, short *);

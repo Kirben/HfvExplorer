@@ -187,7 +187,7 @@ void n_index(btree *bt, unsigned char *key, unsigned long nnum,
   else
     memcpy(record, key, HFS_RECKEYSKIP(key));
 
-  d_putl(HFS_RECDATA(record), nnum);
+  ClassicHfsWrite32(HFS_RECDATA(record), nnum);
 
   if (reclen)
     *reclen = HFS_RECKEYSKIP(record) + 4;

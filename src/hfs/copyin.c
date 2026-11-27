@@ -545,13 +545,13 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
         }
   memcpy(macname, buf + 2, buf[1]);
   macname[buf[1]] = 0;
-  dsize = d_getl(&buf[83]);
-  rsize = d_getl(&buf[87]);
+  dsize = ClassicHfsRead32(&buf[83]);
+  rsize = ClassicHfsRead32(&buf[87]);
   if (dsize > HFS_MAX_FORK_SIZE || rsize > HFS_MAX_FORK_SIZE) {
     cpi_error = "bad file length: classic HFS maximum is 2 GiB minus one per fork"; close(ifile); return -1;
   }
 
-  secondary = legacy ? 0 : ((unsigned short)d_getw(buf + 120) + 127u) & ~127u;
+  secondary = legacy ? 0 : ((unsigned short)ClassicHfsRead16(buf + 120) + 127u) & ~127u;
 #ifdef WIN32
   {
     __int64 length = _filelengthi64(ifile);
@@ -600,10 +600,10 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
 
   if (buf[81] & 1) ent.flags |= HFS_ISLOCKED;
   else ent.flags &= ~HFS_ISLOCKED;
-  ent.fdlocation.v = d_getw(buf + 75);
-  ent.fdlocation.h = d_getw(buf + 77);
-  ent.crdate = d_toutime(d_getl(&buf[91]));
-  ent.mddate = d_toutime(d_getl(&buf[95]));
+  ent.fdlocation.v = ClassicHfsRead16(buf + 75);
+  ent.fdlocation.h = ClassicHfsRead16(buf + 77);
+  ent.crdate = d_toutime(ClassicHfsRead32(&buf[91]));
+  ent.mddate = d_toutime(ClassicHfsRead32(&buf[95]));
 
   }
 
@@ -616,7 +616,7 @@ int cpi_macb(char *srcname, hfsvol *vol, char *dstname)
   if (result == 0 && version == MacBinaryIII) {
     unsigned char finder[32] = {0};
     memcpy(finder, buf + 65, 8);
-    d_putw(finder + 8, ent.fdflags);
+    ClassicHfsWrite16(finder + 8, ent.fdflags);
     memcpy(finder + 10, buf + 75, 6);
     finder[24] = buf[106];
     finder[25] = buf[107];
@@ -675,21 +675,21 @@ int binhx(char *fname, char *type, char *creator, short *fdflags,
       cpi_error = bh_error;
       return -1;
     }
-  *fdflags = d_getw(word);
+  *fdflags = ClassicHfsRead16(word);
 
   if (bh_read(lword, 4) < 4)
     {
       cpi_error = bh_error;
       return -1;
     }
-  *dsize = d_getl(lword);
+  *dsize = ClassicHfsRead32(lword);
 
   if (bh_read(lword, 4) < 4)
     {
       cpi_error = bh_error;
       return -1;
     }
-  *rsize = d_getl(lword);
+  *rsize = ClassicHfsRead32(lword);
   if (*dsize > HFS_MAX_FORK_SIZE || *rsize > HFS_MAX_FORK_SIZE) {
     cpi_error = "bad file length: classic HFS maximum is 2 GiB minus one per fork"; return -1;
   }

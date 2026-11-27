@@ -40,7 +40,7 @@
 #include "libhfs\file.h"
 
 // # include "libhfs\hfs.h"
-# include "libhfs\data.h"
+# include "ClassicHfsBytes.h"
 # include "copyhfs.h"
 # include "copyout.h"
 #ifdef __EMX__
@@ -214,9 +214,9 @@ int cphfs_raw( hfsvol *vol1, hfsvol *vol2, char *srcname, char *dstname )
 	type = ifile->cat.u.fil.filUsrWds.fdType;
 	creator = ifile->cat.u.fil.filUsrWds.fdCreator;
 
-	d_putl( typestr, type );
+	ClassicHfsWrite32( typestr, type );
 	typestr[4] = 0;
-	d_putl( creatorstr, creator );
+	ClassicHfsWrite32( creatorstr, creator );
 	creatorstr[4] = 0;
 	
 

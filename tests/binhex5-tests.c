@@ -7,10 +7,16 @@
 #include <io.h>
 #undef ERROR
 #include "hfs/libhfs/hfs.h"
-#include "hfs/libhfs/data.h"
+#include "hfs/ClassicHfsBytes.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
 #include "hfs/crc.h"
+/* This transfer-format harness operates only on its own new image, without
+   a recovery transaction. The release build links the real sector hooks. */
+int hfv_hfs_recover_image(int fd, int writable) { return 0; }
+int hfv_hfs_before_sector_write(int fd, unsigned long long sector) { return 0; }
+void hfv_hfs_after_sector_write(int fd) {}
+
 static void must(int ok,const char* action){if(!ok){fprintf(stderr,"FAIL: BinHex 5: %s (%s; %s; %s)\n",action,hfs_error?hfs_error:"",cpi_error,cpo_error);exit(1);}}
 static void save(const char* path,const unsigned char* bytes,unsigned size){HANDLE f=CreateFileA(path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,0,NULL);DWORD wrote=0;must(f!=INVALID_HANDLE_VALUE,"create host fixture");must(WriteFile(f,bytes,size,&wrote,NULL)&&wrote==size,"write host fixture");CloseHandle(f);}
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
@@ -19,6 +25,14 @@ static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(
 int main(int argc,char**argv){
  char image[1024],path[1024],badpath[1024],source[]="BH5:Source",target[]="BH5:Imported",label[]="BH5";
  HANDLE host;LARGE_INTEGER length;hfsvol*v;unsigned cases[][2]={{0,0},{1,0},{0,1},{127,129},{128,128},{129,127},{4097,3073}};unsigned k,fork;
+ {
+  unsigned char bytes[8] = {0x55, 0, 0, 0, 0, 0, 0, 0xaa};
+  ClassicHfsWrite32(bytes + 1, UINT32_C(0x80fe01ff));
+  ClassicHfsWrite16(bytes + 5, UINT16_C(0xfedc));
+  must(memcmp(bytes, "\x55\x80\xfe\x01\xff\xfe\xdc\xaa", 8) == 0, "unaligned big-endian writes");
+  must(ClassicHfsRead32(bytes + 1) == UINT32_C(0x80fe01ff) &&
+       ClassicHfsRead16(bytes + 5) == UINT16_C(0xfedc), "high-bit big-endian reads");
+ }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
@@ -33,7 +47,7 @@ int main(int argc,char**argv){
   must(size==128+((d+127)&~127u)+((r+127)&~127u),"MacBinary I aligned file length");
   must(exported[0]==0&&exported[74]==0&&exported[82]==0,"legacy header zero bytes");for(i=99;i<128;i++)must(exported[i]==0,"MacBinary I reserved tail zero");
   must(!memcmp(exported+65,"APPLTEST",8)&&exported[73]==(unsigned char)(original.fdflags>>8),"type creator high Finder flags");
-  must((unsigned long)d_getl(exported+83)==d&&(unsigned long)d_getl(exported+87)==r,"unsigned fork lengths");
+  must((unsigned long)ClassicHfsRead32(exported+83)==d&&(unsigned long)ClassicHfsRead32(exported+87)==r,"unsigned fork lengths");
   must(cpi_macb(path,v,target)==0,"MacBinary I import");verify(v,target,d,r);must(hfs_stat(v,target,&restored)==0,"imported metadata");
   must(restored.fdflags==(original.fdflags&0xff00)&&restored.fdlocation.v==-11&&restored.fdlocation.h==37&&restored.crdate==original.crdate&&restored.mddate==original.mddate,"legacy metadata and low-flag limitation");
   // A final fork need not carry transport padding. Inter-fork padding remains.
@@ -42,7 +56,7 @@ int main(int argc,char**argv){
   if(d||r){unsigned minimum=128+(r?((d+127)&~127u)+r:d);save(badpath,exported,minimum-1);must(cpi_macb(badpath,v,target)==-1&&strstr(cpi_error,"truncated"),"truncated source preflight");verify(v,target,d,r);}
   exported[110]=1;save(badpath,exported,size);must(cpi_macb(badpath,v,target)==-1,"invalid legacy reserved tail");verify(v,target,d,r);free(exported);
   must(cpo_macb(v,source,path)==0,"existing MacBinary II export");exported=load(path,&size);
-  must(exported[122]==129&&exported[123]==129&&(unsigned short)d_getw(exported+124)==crc_macb(exported,124,0),"MacBinary II version and CRC unchanged");
+  must(exported[122]==129&&exported[123]==129&&(unsigned short)ClassicHfsRead16(exported+124)==crc_macb(exported,124,0),"MacBinary II version and CRC unchanged");
   must(cpi_macb(path,v,target)==0,"MacBinary II import");verify(v,target,d,r);
   exported[65]^=1;save(badpath,exported,size);must(cpi_macb(badpath,v,target)==-1&&strstr(cpi_error,"CRC"),"corrupt II must not downgrade to I");verify(v,target,d,r);free(exported);
  }
@@ -55,7 +69,7 @@ int main(int argc,char**argv){
   b[1]=4;memcpy(b+2,"Name",4);b[81]=1;save(badpath,b,size);must(cpi_macb(badpath,v,target)==0&&hfs_stat(v,target,&e)==0&&(e.flags&HFS_ISLOCKED),"protected flag restored");
   must(cpo_macb1(v,target,path)==0,"protected file export");free(b);b=load(path,&size);must(b[81]==1,"protected flag exported");free(b);
   // Versioned files may have a secondary header; its rounded size is honored.
-  must(cpo_macb(v,source,path)==0,"secondary header fixture");b=load(path,&size);b=realloc(b,size+128);must(b!=NULL,"secondary header allocation");memmove(b+256,b+128,size-128);memset(b+128,0x5a,128);d_putw(b+120,3);d_putw(b+124,crc_macb(b,124,0));save(badpath,b,size+128);
+  must(cpo_macb(v,source,path)==0,"secondary header fixture");b=load(path,&size);b=realloc(b,size+128);must(b!=NULL,"secondary header allocation");memmove(b+256,b+128,size-128);memset(b+128,0x5a,128);ClassicHfsWrite16(b+120,3);ClassicHfsWrite16(b+124,crc_macb(b,124,0));save(badpath,b,size+128);
   {char other[]="BH5:Secondary";must(cpi_macb(badpath,v,other)==0,"MacBinary II secondary header skip");verify(v,other,4097,3073);}
   // No silent signed-length overflow on either legacy fork.
   for(i=0;i<2;i++){memset(b,0,128);b[1]=1;b[2]='X';b[83+4*i]=0x80;save(badpath,b,128);{char absent[]="BH5:TooLarge";must(cpi_macb(badpath,v,absent)==-1&&strstr(cpi_error,"bad file length")&&hfs_stat(v,absent,&e)==-1,"legacy fork limit preflight");}}

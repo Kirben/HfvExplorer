@@ -456,7 +456,7 @@ int bt_insertx(node *np, unsigned char *record, int *reclen)
 	rec = HFS_NODEREC(*np, np->rnum);
 
       child.bt   = np->bt;
-      child.nnum = d_getl(HFS_RECDATA(rec));
+      child.nnum = ClassicHfsRead32(HFS_RECDATA(rec));
 
       if (bt_getnode(&child) < 0 ||
 	  bt_insertx(&child, record, reclen) < 0)
@@ -576,7 +576,7 @@ int bt_deletex(node *np, unsigned char *key, unsigned char *record, int *flag)
       rec = HFS_NODEREC(*np, np->rnum);
 
       child.bt   = np->bt;
-      child.nnum = d_getl(HFS_RECDATA(rec));
+      child.nnum = ClassicHfsRead32(HFS_RECDATA(rec));
 
       if (bt_getnode(&child) < 0 ||
 	  bt_deletex(&child, key, rec, flag) < 0)
@@ -647,7 +647,7 @@ int bt_delete(btree *bt, unsigned char *key)
       rec = HFS_NODEREC(root, 0);
 
       --bt->hdr.bthDepth;
-      bt->hdr.bthRoot = d_getl(HFS_RECDATA(rec));
+      bt->hdr.bthRoot = ClassicHfsRead32(HFS_RECDATA(rec));
 
       n_free(&root);
     }
@@ -704,7 +704,7 @@ int bt_search(btree *bt, unsigned char *key, node *np)
 	    }
 
 	  rec = HFS_NODEREC(*np, np->rnum);
-	  np->nnum = d_getl(HFS_RECDATA(rec));
+	  np->nnum = ClassicHfsRead32(HFS_RECDATA(rec));
 	  break;
 
 	case ndLeafNode:

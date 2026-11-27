@@ -1832,8 +1832,8 @@ static int hfs_create_impl(hfsvol *vol, char *path, char *type, char *creator)
 
   memset(&data.u.fil.filUsrWds, 0, sizeof(data.u.fil.filUsrWds));
 
-  data.u.fil.filUsrWds.fdType    = d_getl((unsigned char *) type);
-  data.u.fil.filUsrWds.fdCreator = d_getl((unsigned char *) creator);
+  data.u.fil.filUsrWds.fdType    = ClassicHfsRead32((unsigned char *) type);
+  data.u.fil.filUsrWds.fdCreator = ClassicHfsRead32((unsigned char *) creator);
 
   data.u.fil.filFlNum  = id;
   data.u.fil.filStBlk  = 0;

@@ -467,9 +467,9 @@ void r_unpackdirent(long parid, char *name, CatDataRec *data, hfsdirent *ent)
       ent->u.file.dsize = data->u.fil.filLgLen;
       ent->u.file.rsize = data->u.fil.filRLgLen;
 
-      d_putl((unsigned char *) ent->u.file.type,
+      ClassicHfsWrite32((unsigned char *) ent->u.file.type,
 	     data->u.fil.filUsrWds.fdType);
-      d_putl((unsigned char *) ent->u.file.creator,
+      ClassicHfsWrite32((unsigned char *) ent->u.file.creator,
 	     data->u.fil.filUsrWds.fdCreator);
 
       ent->u.file.type[4] = ent->u.file.creator[4] = 0;
@@ -517,9 +517,9 @@ void r_packdirent(CatDataRec *data, hfsdirent *ent)
       data->u.fil.filUsrWds.fdLocation.h = ent->fdlocation.h;
 
       data->u.fil.filUsrWds.fdType =
-	d_getl((unsigned char *) ent->u.file.type);
+	ClassicHfsRead32((unsigned char *) ent->u.file.type);
       data->u.fil.filUsrWds.fdCreator =
-	d_getl((unsigned char *) ent->u.file.creator);
+	ClassicHfsRead32((unsigned char *) ent->u.file.creator);
 
       break;
     }

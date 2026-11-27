@@ -72,76 +72,12 @@ unsigned char hfs_charorder[256] = {
 };
 
 /*
- * NAME:	data->getb()
- * DESCRIPTION:	marshal 1 byte into local host format
- */
-char d_getb(unsigned char *ptr)
-{
-  return (char) ptr[0];
-}
-
-/*
- * NAME:	data->getw()
- * DESCRIPTION:	marshal 2 bytes into local host format
- */
-short d_getw(unsigned char *ptr)
-{
-  return (short)
-    ((ptr[0] << 8) |
-     (ptr[1] << 0));
-}
-
-/*
- * NAME:	data->getl()
- * DESCRIPTION:	marshal 4 bytes into local host format
- */
-long d_getl(unsigned char *ptr)
-{
-  return (long)
-    ((ptr[0] << 24) |
-     (ptr[1] << 16) |
-     (ptr[2] <<  8) |
-     (ptr[3] <<  0));
-}
-
-/*
- * NAME:	data->putb()
- * DESCRIPTION:	marshal 1 byte out to Macintosh (big-endian) format
- */
-void d_putb(unsigned char *ptr, char data)
-{
-  ptr[0] = (unsigned char) data;
-}
-
-/*
- * NAME:	data->putw()
- * DESCRIPTION:	marshal 2 bytes out to Macintosh (big-endian) format
- */
-void d_putw(unsigned char *ptr, short data)
-{
-  ptr[0] = ((unsigned short) data & 0xff00) >> 8;
-  ptr[1] = ((unsigned short) data & 0x00ff) >> 0;
-}
-
-/*
- * NAME:	data->putl()
- * DESCRIPTION:	marshal 4 bytes out to Macintosh (big-endian) format
- */
-void d_putl(unsigned char *ptr, long data)
-{
-  ptr[0] = ((unsigned long) data & 0xff000000) >> 24;
-  ptr[1] = ((unsigned long) data & 0x00ff0000) >> 16;
-  ptr[2] = ((unsigned long) data & 0x0000ff00) >>  8;
-  ptr[3] = ((unsigned long) data & 0x000000ff) >>  0;
-}
-
-/*
  * NAME:	data->fetchb()
  * DESCRIPTION:	incrementally retrieve a byte of data
  */
 void d_fetchb(unsigned char **ptr, char *dest)
 {
-  *dest = d_getb(*ptr);
+  *dest = (char)**ptr;
   *ptr += 1;
 }
 
@@ -151,7 +87,7 @@ void d_fetchb(unsigned char **ptr, char *dest)
  */
 void d_fetchw(unsigned char **ptr, short *dest)
 {
-  *dest = d_getw(*ptr);
+  *dest = ClassicHfsRead16(*ptr);
   *ptr += 2;
 }
 
@@ -161,7 +97,7 @@ void d_fetchw(unsigned char **ptr, short *dest)
  */
 void d_fetchl(unsigned char **ptr, long *dest)
 {
-  *dest = d_getl(*ptr);
+  *dest = ClassicHfsRead32(*ptr);
   *ptr += 4;
 }
 
@@ -193,7 +129,7 @@ void d_fetchs(unsigned char **ptr, char *dest, int size)
  */
 void d_storeb(unsigned char **ptr, char data)
 {
-  d_putb(*ptr, data);
+  **ptr = (unsigned char)data;
   *ptr += 1;
 }
 
@@ -203,7 +139,7 @@ void d_storeb(unsigned char **ptr, char data)
  */
 void d_storew(unsigned char **ptr, short data)
 {
-  d_putw(*ptr, data);
+  ClassicHfsWrite16(*ptr, data);
   *ptr += 2;
 }
 
@@ -213,7 +149,7 @@ void d_storew(unsigned char **ptr, short data)
  */
 void d_storel(unsigned char **ptr, long data)
 {
-  d_putl(*ptr, data);
+  ClassicHfsWrite32(*ptr, data);
   *ptr += 4;
 }
 
