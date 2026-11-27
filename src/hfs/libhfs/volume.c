@@ -27,6 +27,7 @@
 #include "../ClassicHfsPath.h"
 #include "../ClassicHfsTime.h"
 # include "low.h"
+#include "../ClassicHfsVolumeBitmap.h"
 # include "btree.h"
 # include "volume.h"
 
@@ -409,7 +410,7 @@ int v_flush(hfsvol *vol, int umounting)
 	return -1;
 
       if ((vol->flags & HFS_UPDATE_VBM) &&
-	  l_writevbm(vol) < 0)
+	  ClassicHfsFlushVolumeBitmap(vol) < 0)
 	return -1;
 
       if (umounting &&

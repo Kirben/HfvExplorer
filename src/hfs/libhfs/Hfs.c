@@ -60,6 +60,7 @@
 #include "../ClassicHfsBytes.h"
 # include "block.h"
 # include "low.h"
+#include "../ClassicHfsVolumeBitmap.h"
 # include "file.h"
 # include "btree.h"
 # include "node.h"
@@ -315,7 +316,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 
       /* read the volume bitmap and extents/catalog B*-tree headers */
 
-      if (l_readvbm(vol) < 0 ||
+      if (ClassicHfsLoadVolumeBitmap(vol) < 0 ||
 	  bt_readhdr(&vol->ext) < 0 ||
 	  bt_readhdr(&vol->cat) < 0)
 	{
@@ -693,7 +694,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   vol.lpa = 1 + vol.vlen / 65536;
 
-  vbmsz = (vol.vlen / vol.lpa + 4095) / 4096;
+  vbmsz = ClassicHfsBitmapSectors(vol.vlen / vol.lpa);
 
   vol.mdb.drSigWord  = HFS_SIGWORD;
   vol.mdb.drCrDate   = ClassicHfsFromUnixSeconds(time(0));

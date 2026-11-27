@@ -2,6 +2,20 @@
 #pragma once
 #include <stdint.h>
 
+static inline unsigned ClassicHfsBitmapSectors(uint32_t blocks)
+{
+    return blocks / 4096 + (blocks % 4096 != 0);
+}
+
+// The boot blocks and master directory block occupy sectors 0 through 2.
+static inline int ClassicHfsBitmapFits(unsigned start, unsigned sectors,
+                                       unsigned allocationStart, uint32_t volumeSectors)
+{
+    return start >= 3 && sectors && start <= allocationStart &&
+           sectors <= allocationStart - start && start <= volumeSectors &&
+           sectors <= volumeSectors - start;
+}
+
 static inline int ClassicHfsBitIsSet(const void *bitmap, uint32_t index)
 {
     const unsigned char *bytes = (const unsigned char *)bitmap;

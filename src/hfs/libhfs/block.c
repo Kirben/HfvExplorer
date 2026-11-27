@@ -191,7 +191,7 @@ int b_begin_mutation(hfsvol *vol) {
  m=(struct mutation*)calloc(1,sizeof(*m));
  if(!m){ERROR(ENOMEM,"Cannot allocate HFS undo state");return -1;}
  m->volume=vol;m->saved=*vol;
- bitmap_size=SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096);
+ bitmap_size=SIZE(block,ClassicHfsBitmapSectors(vol->mdb.drNmAlBlks));
  m->bitmap=(block*)save_memory(vol->vbm,bitmap_size);
  m->extmap=(char*)save_memory(vol->ext.map,vol->ext.mapsz);
  m->catmap=(char*)save_memory(vol->cat.map,vol->cat.mapsz);
@@ -303,7 +303,7 @@ int b_end_mutation(hfsvol *vol,int result) {
      The copied cache links still refer to this same original cache allocation. */
   FREE(vol->ext.map);FREE(vol->cat.map);
   *vol=m->saved;vol->ext.map=m->extmap;vol->cat.map=m->catmap;m->extmap=m->catmap=0;
-  if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,(vol->mdb.drNmAlBlks+4095)/4096));
+  if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,ClassicHfsBitmapSectors(vol->mdb.drNmAlBlks)));
   if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
   for(i=0;i<m->file_count;++i)*m->files[i].file=m->files[i].saved;
   if(m->used)hfs_note_rollback(rollback?3:1);

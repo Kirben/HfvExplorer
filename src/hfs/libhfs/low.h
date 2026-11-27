@@ -95,6 +95,3 @@ int l_readpm(hfsvol *);
 
 int l_readmdb(hfsvol *);
 int l_writemdb(hfsvol *);
-
-int l_readvbm(hfsvol *);
-int l_writevbm(hfsvol *);

@@ -93,6 +93,11 @@ static int compare_test_keys(unsigned char *left, unsigned char *right)
  return (int)left[1] - right[1];
 }
 int main(int argc,char**argv){
+    must(ClassicHfsBitmapSectors(4096) == 1 && ClassicHfsBitmapSectors(4097) == 2 &&
+         ClassicHfsBitmapSectors(65535) == 16, "bitmap sector rounding");
+    must(ClassicHfsBitmapFits(3, 2, 5, 100) && !ClassicHfsBitmapFits(2, 1, 5, 100) &&
+         !ClassicHfsBitmapFits(3, 2, 4, 100) && !ClassicHfsBitmapFits(3, 2, 5, 4) &&
+         !ClassicHfsBitmapFits(3, 0, 5, 100), "bitmap reserved and truncated ranges");
  char image[1024],path[1024],badpath[1024],source[]="BH5:Source",target[]="BH5:Imported",label[]="BH5";
  HANDLE host;LARGE_INTEGER length;hfsvol*v;unsigned cases[][2]={{0,0},{1,0},{0,1},{127,129},{128,128},{129,127},{4097,3073}};unsigned k,fork;
  {
