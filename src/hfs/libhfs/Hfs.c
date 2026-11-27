@@ -1401,10 +1401,22 @@ long hfs_read(hfsfile *file, void *buf, unsigned long len)
  * NAME:	hfs->write()
  * DESCRIPTION:	write to an open file
  */
+static int write_fork_block(void *context, uint32_t sector, block *bytes)
+{
+  return f_putblock((hfsfile *)context, sector, bytes);
+}
+
+static int grow_fork(void *context)
+{
+  hfsfile *file = (hfsfile *)context;
+  if (bt_space(&file->vol->ext, 1) < 0)
+    return -1;
+  return f_alloc(file);
+}
+
 long hfs_write(hfsfile *file, void *buf, unsigned long len)
 {
-  unsigned long *lglen, *pylen, count;
-  unsigned char *ptr = buf;
+  unsigned long *lglen, *pylen;
 
   if (file->vol->flags & HFS_READONLY)
     {
@@ -1416,62 +1428,14 @@ long hfs_write(hfsfile *file, void *buf, unsigned long len)
 
   if (len > 0x7fffffffUL) { ERROR(EINVAL, "transfer count exceeds signed API range"); return -1; }
   if (file->pos > HFS_MAX_FORK_SIZE || len > HFS_MAX_FORK_SIZE - file->pos) { ERROR(EFBIG, "classic HFS fork exceeds Apple limit"); return -1; }
-  count = len;
-
-  /* set flag to update (at least) the modification time */
-
-  if (count)
+  if (len)
     {
       file->cat.u.fil.filMdDat = ClassicHfsFromUnixSeconds(time(0));
       file->flags |= HFS_UPDATE_CATREC;
     }
 
-  while (count)
-    {
-      unsigned long bnum, offs, chunk;
-
-      bnum  = file->pos >> HFS_BLOCKSZ_BITS;
-      offs  = file->pos & (HFS_BLOCKSZ - 1);
-
-      chunk = HFS_BLOCKSZ - offs;
-      if (chunk > count)
-	chunk = count;
-
-      if (file->pos + chunk > *pylen)
-	{
-	  if (bt_space(&file->vol->ext, 1) < 0 ||
-	      f_alloc(file) < 0)
-	    return -1;
-	}
-
-      if (offs == 0 && chunk == HFS_BLOCKSZ)
-	{
-	  if (f_putblock(file, bnum, (block *) ptr) < 0)
-	    return -1;
-	}
-      else
-	{
-	  block b;
-
-	  if (f_getblock(file, bnum, &b) < 0)
-	    return -1;
-
-	  memcpy(b + offs, ptr, chunk);
-
-	  if (f_putblock(file, bnum, &b) < 0)
-	    return -1;
-	}
-
-      ptr += chunk;
-
-      file->pos += chunk;
-      count     -= chunk;
-
-      if (file->pos > *lglen)
-	*lglen = file->pos;
-    }
-
-  return len;
+  return ClassicHfsWriteFork(file, read_fork_block, write_fork_block, grow_fork,
+                             pylen, lglen, &file->pos, buf, len);
 }
 
 /*

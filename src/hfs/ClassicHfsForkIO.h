@@ -36,3 +36,40 @@ static inline int32_t ClassicHfsReadFork(void *context, ClassicHfsReadForkBlock 
     }
     return (int32_t)done;
 }
+
+typedef int (*ClassicHfsGrowFork)(void *);
+
+// Caller checks access and the format's logical length limit before writing.
+static inline int32_t ClassicHfsWriteFork(void *context, ClassicHfsReadForkBlock load,
+                                         int (*store)(void *, uint32_t, unsigned char (*)[512]),
+                                         ClassicHfsGrowFork grow, unsigned long *physical,
+                                         unsigned long *logical, unsigned long *position,
+                                         void *source, uint32_t length)
+{
+    unsigned char *input = (unsigned char *)source;
+    uint32_t done = 0;
+    while (done < length) {
+        uint32_t sector = (uint32_t)(*position / 512);
+        unsigned offset = *position % 512;
+        unsigned chunk = 512 - offset;
+        if (chunk > length - done)
+            chunk = length - done;
+        if (*position + chunk > *physical && grow(context) < 0)
+            return -1;
+        unsigned char scratch[512];
+        unsigned char (*bytes)[512] = (unsigned char (*)[512])(input + done);
+        if (chunk != 512) {
+            if (load(context, sector, &scratch) < 0)
+                return -1;
+            memcpy(scratch + offset, input + done, chunk);
+            bytes = &scratch;
+        }
+        if (store(context, sector, bytes) < 0)
+            return -1;
+        done += chunk;
+        *position += chunk;
+        if (*position > *logical)
+            *logical = *position;
+    }
+    return (int32_t)done;
+}

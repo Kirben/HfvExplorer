@@ -55,6 +55,21 @@ static int read_pattern_block(void *context, uint32_t sector, unsigned char (*by
  return 0;
 }
 
+typedef struct { unsigned char bytes[512]; unsigned long capacity; } ForkWriteTest;
+static int test_load_fork(void *context, uint32_t sector, unsigned char (*out)[512])
+{
+ memcpy(*out, ((ForkWriteTest *)context)->bytes, 512); return 0;
+}
+static int test_store_fork(void *context, uint32_t sector, unsigned char (*in)[512])
+{
+ if (sector != 0) return -1;
+ memcpy(((ForkWriteTest *)context)->bytes, *in, 512); return 0;
+}
+static int test_grow_fork(void *context)
+{
+ ((ForkWriteTest *)context)->capacity += 512; return 0;
+}
+
 static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent (*record)[3])
 {
  unsigned *calls = context;
@@ -428,6 +443,20 @@ int main(int argc,char**argv){
        pos == 1025 && out[0] == 1 && out[511] == 0 && out[512] == 2 && out[513] == 0xaa &&
        ClassicHfsReadFork(&fail, read_pattern_block, 1025, &pos, NULL, UINT32_MAX) == 0,
        "retry full sector and partial tail up to logical EOF");
+ }
+ {
+  ForkWriteTest disk;
+  unsigned char input[] = {11,22,33,44};
+  unsigned long pos = 507, logical = 512;
+  memset(disk.bytes, 99, 512); disk.capacity = 512;
+  must(ClassicHfsWriteFork(&disk,test_load_fork,test_store_fork,test_grow_fork,
+       &disk.capacity,&logical,&pos,input,3) == 3 && disk.bytes[506] == 99 &&
+       disk.bytes[507] == 11 && disk.bytes[509] == 33 && disk.bytes[510] == 99,
+       "partial fork overwrite preserves both neighbors");
+  must(ClassicHfsWriteFork(&disk,test_load_fork,test_store_fork,test_grow_fork,
+       &disk.capacity,&logical,&pos,input,4) < 0 && disk.capacity == 1024 &&
+       pos == 512 && logical == 512 && disk.bytes[510] == 11 && disk.bytes[511] == 22,
+       "failed second write preserves completed bytes and logical EOF");
  }
  {
   unsigned char source[106], output[107];
