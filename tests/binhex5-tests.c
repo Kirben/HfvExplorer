@@ -1150,6 +1150,8 @@ int main(int argc,char**argv){
  must(hfs_format(image,-1,label)<0 && errno==EINVAL,"negative partition cannot select a whole-image format");
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  {
+  must(hfs_mount(image,-1,O_RDWR)==NULL && errno==EINVAL && hfs_getvol(NULL)==v,
+       "invalid partition cannot reuse or replace an active raw mount");
   CatDataRec folder;
   node slot;
   must(hfs_mkdir(v, ":CountTest") == 0 && hfs_create(v, ":CountTest:Child", "TEXT", "TEST") == 0 &&

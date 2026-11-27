@@ -35,7 +35,7 @@
 
 /* 
 	Hook:
-		hfs\libhfs\hfs.c
+		hfs\ClassicHfsMount.c
 		hfs\ClassicHfsVolumeIO.c
 
 	Do not hook:

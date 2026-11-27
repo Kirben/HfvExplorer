@@ -172,7 +172,7 @@ endif
 
 LIBHFS_SRC = ClassicHfsEntry.h ClassicHfsCatalogRecord.h ClassicHfsCatalogFile.h ClassicHfsDirectory.h ClassicHfsCatalogThread.h ClassicHfsPath.h ClassicHfsForkIO.h ClassicHfsCache.h ClassicHfsSectorIO.h ClassicHfsNodeIO.h ClassicHfsGeometry.h ClassicHfsBitmap.h ClassicHfsTreeHeader.h ClassicHfsNode.h ClassicHfsExtents.h ClassicHfsCatalogKey.h ClassicHfsExtentKey.h ClassicHfsBytes.h ClassicHfsRecordBytes.h ClassicHfsNames.h ClassicHfsTime.c ClassicHfsTime.h $(addprefix $(LIBHFS_DIR)/, \
 	../ClassicHfsVolumeIO.c block.h ../ClassicHfsMetadata.c ../ClassicHfsTreeMutation.c btree.h \
-	../ClassicHfsForkStorage.c file.h hfs.c hfs.h internal.h \
+	../ClassicHfsForkStorage.c file.h ../ClassicHfsMount.c hfs.h internal.h \
 	../ClassicHfsNodeMutation.c node.h volume.h \
 	os2open.c os2open.h \
 	Makefile)

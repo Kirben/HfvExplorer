@@ -44,33 +44,25 @@
 
 #ifndef WIN32
 #include <os2.h>
-#include "os2open.h"
+#include "libhfs/os2open.h"
 #endif
 
 #endif
 
-# include "../ClassicHfsCatalogKey.h"
-#include "../ClassicHfsGeometry.h"
-#include "../ClassicHfsForkIO.h"
-# include "internal.h"
-#include "../ClassicHfsCatalogLeaf.h"
+#include "libhfs/internal.h"
+#include "libhfs/volume.h"
+#include "libhfs/block.h"
+#include "libhfs/file.h"
+#include "libhfs/btree.h"
+#include "ClassicHfsCatalogKey.h"
+#include "ClassicHfsExtentKey.h"
+#include "ClassicHfsGeometry.h"
+#include "ClassicHfsVolumeBitmap.h"
+#include "ClassicHfsTreeMount.h"
 #ifdef WIN32
-# include "../../ClassicHfsRecovery.h"
+#include "../ClassicHfsRecovery.h"
 #endif
-#include "../ClassicHfsTime.h"
-#include "../ClassicHfsBytes.h"
-# include "block.h"
-#include "../ClassicHfsVolumeBitmap.h"
-# include "file.h"
-#include "../ClassicHfsSystemFiles.h"
-#include "../ClassicHfsFormatTree.h"
-# include "btree.h"
-#include "../ClassicHfsTreeMount.h"
-# include "node.h"
-#include "../ClassicHfsEntry.h"
-# include "volume.h"
-
-#include "..\..\filehook.h"
+#include "../filehook.h"
 
 /* Explicit mount/error contexts survive adapter migration between workers. */
 static HFV_THREAD_LOCAL struct hfs_engine_context fallback_context;
@@ -133,9 +125,14 @@ int ClassicHfsOpenVolumeDevice(char *path, int flags)
 
 static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supplied_fd)
 {
-  struct _stat64 dev;
+  /* File identity is checked on the open descriptor. */
   hfsvol *vol = 0;
   int recovered = 0;
+  if (pnum < 0 || (!path && supplied_fd < 0)) {
+    if (supplied_fd >= 0) close(supplied_fd);
+    ERROR(EINVAL, "invalid classic HFS mount request");
+    return NULL;
+  }
 
 #ifndef WIN32
 #ifdef __EMX__
@@ -169,6 +166,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
     }
   }
 #else
+  struct _stat64 dev;
   if (fhook_stat(path, &dev) >= 0)
 	// if (stat(path, &dev) >= 0)
 
@@ -203,7 +201,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 
   if (vol == 0)
     {
-      vol = ALLOC(hfsvol, 1);
+      vol = (hfsvol *)calloc(1, sizeof(*vol));
       if (vol == 0)
 	{
 	  if (supplied_fd >= 0) close(supplied_fd);
@@ -211,33 +209,9 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 	  return 0;
 	}
 
-      vol->flags  = 0;
-      vol->failure_message = 0;
-      vol->pnum   = pnum;
-      vol->vstart = 0;
-      vol->vlen   = 0;
-      vol->lpa    = 0;
-
-      vol->cache  = 0;
-
-      vol->vbm    = 0;
-      vol->cwd    = HFS_CNID_ROOTDIR;
-
-      vol->refs   = 0;
-      vol->files  = 0;
-      vol->dirs   = 0;
-
-      vol->prev   = 0;
-      vol->next   = 0;
-
-      vol->ext.map     = 0;
-      vol->ext.mapsz   = 0;
-      vol->ext.flags   = 0;
+      vol->pnum = pnum;
+      vol->cwd = HFS_CNID_ROOTDIR;
       vol->ext.compare = ClassicHfsCompareExtentKeys;
-
-      vol->cat.map     = 0;
-      vol->cat.mapsz   = 0;
-      vol->cat.flags   = 0;
       vol->cat.compare = ClassicHfsCompareCatalogKeys;
 
       /* open and lock the device */

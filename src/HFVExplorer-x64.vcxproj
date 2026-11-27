@@ -68,7 +68,7 @@
     <ClCompile Include="hfs\ClassicHfsForkStorage.c" />
     <ClCompile Include="hfs\hcopy.c" />
     <ClCompile Include="hfs\hcwd.c" />
-    <ClCompile Include="hfs\libhfs\hfs.c" />
+    <ClCompile Include="hfs\ClassicHfsMount.c" />
     <ClCompile Include="hfs\ClassicHfsNodeMutation.c" />
     <ClCompile Include="filehook.c" />
     <ClCompile Include="hfs\interface.c" />

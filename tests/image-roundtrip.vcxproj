@@ -22,7 +22,7 @@
 <ClCompile Include="..\src\hfs\ClassicHfsMetadata.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsTime.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsForkStorage.c" />
-<ClCompile Include="..\src\hfs\libhfs\hfs.c" />
+<ClCompile Include="..\src\hfs\ClassicHfsMount.c" />
 <ClCompile Include="..\src\hfs\ClassicHfsNodeMutation.c" />
 <ClCompile Include="..\src\Filehook.c" /><ClCompile Include="image-roundtrip.c" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
