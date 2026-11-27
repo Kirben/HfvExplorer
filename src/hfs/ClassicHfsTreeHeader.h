@@ -20,6 +20,18 @@ typedef struct {
 } ClassicHfsTreeHeader;
 #pragma pack(pop)
 
+// Returns zero for an empty tree, one for a searchable tree, and -1 when
+// the root cannot describe the advertised depth or set of leaf records.
+static inline int ClassicHfsCheckSearchRoot(const ClassicHfsTreeHeader *header)
+{
+    if (!header->bthRoot)
+        return header->bthDepth || header->bthNRecs || header->bthFNode || header->bthLNode ? -1 : 0;
+    if (!header->bthDepth || header->bthRoot >= header->bthNNodes ||
+        header->bthDepth >= header->bthNNodes)
+        return -1;
+    return 1;
+}
+
 static inline int ClassicHfsDecodeTreeHeader(const unsigned char *bytes, int size,
                                              ClassicHfsTreeHeader *header)
 {

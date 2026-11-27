@@ -897,7 +897,7 @@ hfsdir *hfs_opendir(hfsvol *vol, char *path)
 
       ClassicHfsWriteCatalogKey(pkey, dir->dirid, "");
 
-      if (bt_search(&vol->cat, pkey, &dir->n) <= 0)
+      if (ClassicHfsFindTreeKey(&vol->cat, pkey, &dir->n) <= 0)
 	{
 	  FREE(dir);
 	  return 0;

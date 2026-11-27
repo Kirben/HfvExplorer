@@ -77,7 +77,7 @@ static int ClassicHfsFindOverflow(hfsfile *file, unsigned first, ExtDataRec *dat
         found = ClassicHfsFindOwnOverflow(&file->vol->ext, key, leaf);
         file->flags &= ~HFS_EXT_BOOTSTRAP;
     } else {
-        found = bt_search(&file->vol->ext, key, leaf);
+        found = ClassicHfsFindTreeKey(&file->vol->ext, key, leaf);
     }
     memcpy(file->ext, saved, sizeof(saved));
     file->fabn = savedStart;

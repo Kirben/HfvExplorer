@@ -125,6 +125,18 @@ static void verify_formatted_tree_headers(const char *image)
 
 int main(int argc,char**argv){
     {
+        ClassicHfsTreeHeader header = {0};
+        must(ClassicHfsCheckSearchRoot(&header) == 0, "empty classic tree lookup");
+        header.bthNRecs = 1;
+        must(ClassicHfsCheckSearchRoot(&header) < 0, "missing root with live records");
+        header.bthRoot = 3; header.bthDepth = 2; header.bthNNodes = 3;
+        must(ClassicHfsCheckSearchRoot(&header) < 0, "root outside tree");
+        header.bthNNodes = 4;
+        must(ClassicHfsCheckSearchRoot(&header) == 1, "in-range lookup root");
+        header.bthDepth = 4;
+        must(ClassicHfsCheckSearchRoot(&header) < 0, "lookup depth exceeds available nonheader nodes");
+    }
+    {
         unsigned char sector[512] = {0}, before[512];
         uint16_t offsets[] = {14, 24};
         ClassicHfsCatalogRecord record = {0};

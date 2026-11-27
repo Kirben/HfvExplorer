@@ -59,7 +59,7 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
     return -1;
   }
 
-  found = bt_search(&vol->cat, pkey, np);
+  found = ClassicHfsFindTreeKey(&vol->cat, pkey, np);
   if (found <= 0)
     return found;
 

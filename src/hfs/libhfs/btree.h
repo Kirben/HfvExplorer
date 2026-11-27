@@ -29,4 +29,4 @@ int bt_insert(btree *, unsigned char *, int);
 
 int bt_delete(btree *, unsigned char *);
 
-int bt_search(btree *, unsigned char *, node *);
+#include "../ClassicHfsTreeLookup.h"
