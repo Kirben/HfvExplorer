@@ -28,7 +28,7 @@ int ClassicHfsFindCatalogThread(hfsvol *, long, CatDataRec *, node *, int);
 
 int ClassicHfsStoreCatalogEntry(CatDataRec *, node *);
 
-int v_resolve(hfsvol *, char *, CatDataRec *, long *, char *, node *);
+int ClassicHfsResolvePath(hfsvol *, char *, CatDataRec *, long *, char *, node *);
 
 void v_destruct(hfsvol *);
 int v_getvol(hfsvol **);

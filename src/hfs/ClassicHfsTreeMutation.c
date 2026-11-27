@@ -25,6 +25,7 @@
 #include "ClassicHfsBytes.h"
 #include "ClassicHfsNodeIO.h"
 #include "ClassicHfsCatalogLeaf.h"
+#include "ClassicHfsPath.h"
 #include "libhfs/volume.h"
 # include "libhfs/block.h"
 # include "libhfs/file.h"
@@ -359,4 +360,80 @@ int ClassicHfsStoreCatalogEntry(CatDataRec *record, node *cursor)
         return -1;
     *cursor = updated;
     return 0;
+}
+
+static HFV_THREAD_LOCAL int ignoreCdLabel;
+
+void set_invalid_cd_hack(int enabled)
+{
+    ignoreCdLabel = enabled;
+}
+
+int ClassicHfsResolvePath(hfsvol *volume, char *path, CatDataRec *record,
+                          long *parent, char *storedName, node *position)
+{
+    const char *cursor = path;
+    long directory = volume->cwd;
+    if (parent && *path)
+        *parent = 0;
+    switch (ClassicHfsBeginPath(&cursor, volume->mdb.drVN, ignoreCdLabel)) {
+    case ClassicHfsPathEmpty: ERROR(ENOENT, "empty path"); return -1;
+    case ClassicHfsPathWrongVolume: ERROR(ENOENT, "path does not name the selected HFS volume"); return -1;
+    case ClassicHfsPathTooLong: ERROR(ENAMETOOLONG, NULL); return -1;
+    case ClassicHfsPathAbsolute: directory = HFS_CNID_ROOTPAR; break;
+    }
+
+    for (;;) {
+        char name[HFS_MAX_FLEN + 1];
+        int part = ClassicHfsNextPathPart(&cursor, name);
+        if (part == ClassicHfsPathTooLong) {
+            ERROR(ENAMETOOLONG, NULL);
+            return -1;
+        }
+        if (part == ClassicHfsPathEnd || part == ClassicHfsPathParent) {
+            CatDataRec thread;
+            int found = ClassicHfsFindCatalogThread(volume, directory, &thread, NULL, cdrThdRec);
+            if (found <= 0)
+                return found;
+            long owner = thread.u.dthd.thdParID;
+            found = ClassicHfsFindCatalogEntry(volume, owner, thread.u.dthd.thdCName, record,
+                                               part == ClassicHfsPathEnd ? storedName : NULL,
+                                               part == ClassicHfsPathEnd ? position : NULL);
+            if (found < 0)
+                return -1;
+            if (!found || record->cdrType != cdrDirRec || record->u.dir.dirDirID != directory) {
+                ERROR(EIO, "classic HFS directory thread identifies another or missing entry");
+                return -1;
+            }
+            if (part == ClassicHfsPathEnd) {
+                if (parent)
+                    *parent = owner;
+                return 1;
+            }
+            directory = owner;
+            continue;
+        }
+
+        if (parent)
+            *parent = directory;
+        int found = ClassicHfsFindCatalogEntry(volume, directory, name, record, storedName, position);
+        if (found <= 0) {
+            if (!found && *cursor && parent)
+                *parent = 0;
+            if (!found && !*cursor && storedName)
+                strcpy(storedName, name);
+            return found;
+        }
+        if (record->cdrType != cdrDirRec && record->cdrType != cdrFilRec) {
+            ERROR(EIO, "unexpected classic HFS catalog record");
+            return -1;
+        }
+        if (!*cursor)
+            return 1;
+        if (record->cdrType != cdrDirRec) {
+            ERROR(ENOTDIR, "invalid pathname");
+            return -1;
+        }
+        directory = record->u.dir.dirDirID;
+    }
 }

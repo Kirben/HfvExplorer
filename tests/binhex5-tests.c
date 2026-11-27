@@ -1086,6 +1086,26 @@ int main(int argc,char**argv){
  host=CreateFileA(image,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL);must(host!=INVALID_HANDLE_VALUE,"create synthetic image");length.QuadPart=16*1024*1024;must(SetFilePointerEx(host,length,NULL,FILE_BEGIN)&&SetEndOfFile(host),"size image");CloseHandle(host);
  must(hfs_format(image,0,label)==0,"format image");verify_formatted_tree_headers(image);verify_repeated_tree_map(image);v=hfs_mount(image,0,O_RDWR);must(v!=NULL,"mount image");
  {
+  CatDataRec entry, thread, saved;
+  node slot;
+  long previous = v->cwd;
+  must(hfs_mkdir(v, ":PathSource") == 0 && hfs_mkdir(v, ":PathOther") == 0, "create directory thread fixtures");
+  must(ClassicHfsResolvePath(v, ":PathSource", &entry, NULL, NULL, NULL) == 1, "resolve source directory");
+  v->cwd = entry.u.dir.dirDirID;
+  must(ClassicHfsFindCatalogThread(v, v->cwd, &thread, &slot, cdrThdRec) == 1, "read source thread");
+  saved = thread;
+  strcpy(thread.u.dthd.thdCName, "PathOther");
+  must(ClassicHfsStoreCatalogEntry(&thread, &slot) == 0, "stage misdirected directory thread");
+  must(ClassicHfsResolvePath(v, ":", &entry, NULL, NULL, NULL) < 0 && errno == EIO &&
+       ClassicHfsResolvePath(v, "::PathOther", &entry, NULL, NULL, NULL) < 0 && errno == EIO,
+       "reject misdirected thread for current and parent-relative paths");
+  must(ClassicHfsStoreCatalogEntry(&saved, &slot) == 0 &&
+       ClassicHfsResolvePath(v, ":", &entry, NULL, NULL, NULL) == 1 && entry.u.dir.dirDirID == v->cwd,
+       "restored thread resolves the original directory");
+  v->cwd = previous;
+  must(hfs_rmdir(v, ":PathSource") == 0 && hfs_rmdir(v, ":PathOther") == 0, "remove thread fixtures");
+ }
+ {
   {
    hfsfile bounded = v->cat.f;
    block sector = {0};
