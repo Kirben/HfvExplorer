@@ -243,6 +243,21 @@ int main(int argc,char**argv){
              ClassicHfsCloseVolumeCache(&volume) == 0, "overlapping master directories reject before staging sectors");
         volume.flags = 0;
         volume.lpa = 1; volume.vlen = 8;
+        {
+            volume.pnum = 1;
+            must(ClassicHfsEnableVolumeCache(&volume) == 0, "allocate descriptor fixture cache");
+            ClassicHfsWrite16(sector, 0x4552);
+            ClassicHfsWrite16(sector + 2, 512);
+            must(ClassicHfsWriteSector(&volume, 0, &sector) == 0 &&
+                 ClassicHfsLocateVolume(&volume) < 0 && errno == EINVAL &&
+                 volume.vlen == 8 && volume.pnum == 1, "empty descriptor does not enable an unbounded map scan");
+            ClassicHfsWrite16(sector, 0x4c4b);
+            must(ClassicHfsWriteSector(&volume, 0, &sector) == 0 &&
+                 ClassicHfsLocateVolume(&volume) == 0 && !volume.pnum && volume.vlen == 8,
+                 "bootable floppy selects whole volume");
+            free(volume.cache); // Discard the synthetic sectors without device I/O.
+            volume.cache = NULL;
+        }
         volume.flags = HFS_READONLY;
         must(ClassicHfsStoreRawSector(&volume, 0, &sector) < 0 && errno == EROFS,
              "raw sector write rejects a read-only volume before accessing storage");

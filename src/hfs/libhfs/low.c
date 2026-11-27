@@ -65,63 +65,6 @@ int l_lockvol(hfsvol *vol)
 }
 
 /*
- * NAME:	low->readblock0()
- * DESCRIPTION:	read the first sector and get bearings
- */
-int l_readblock0(hfsvol *vol)
-{
-  block b;
-  unsigned char *ptr = b;
-  Block0 rec;
-
-  if (ClassicHfsReadSector(vol, 0, &b) < 0)
-    return -1;
-
-  rec.sbSig = ClassicHfsTake16(&ptr);
-  rec.sbBlkSize = ClassicHfsTake16(&ptr);
-  rec.sbBlkCount = ClassicHfsTake32(&ptr);
-  rec.sbDevType = ClassicHfsTake16(&ptr);
-  rec.sbDevId = ClassicHfsTake16(&ptr);
-  rec.sbData = ClassicHfsTake32(&ptr);
-  rec.sbDrvrCount = ClassicHfsTake16(&ptr);
-  rec.ddBlock = ClassicHfsTake32(&ptr);
-  rec.ddSize = ClassicHfsTake16(&ptr);
-  rec.ddType = ClassicHfsTake16(&ptr);
-
-  switch (rec.sbSig)
-    {
-    case 0x4552:  /* block device with a partition table */
-      {
-	if (rec.sbBlkSize != HFS_BLOCKSZ)
-	  {
-	    ERROR(EINVAL, "unsupported block size");
-	    return -1;
-	  }
-
-	vol->vlen = rec.sbBlkCount;
-
-	if (l_readpm(vol) < 0)
-	  return -1;
-      }
-      break;
-
-    case 0x4c4b:  /* bootable floppy */
-      vol->pnum = 0;
-      break;
-
-    default:  /* non-bootable floppy or something else */
-
-      /* some miscreant media may also be partitioned;
-	 we attempt to read a partition map, but ignore any failure */
-
-      if (l_readpm(vol) < 0)
-	vol->pnum = 0;
-    }
-
-  return 0;
-}
-
-/*
  * NAME:	low->readpm()
  * DESCRIPTION:	read the partition map and locate an HFS volume
  */

@@ -20,20 +20,6 @@
 /* Modified for emx by Marcus Better, July 1997 */
 
 typedef struct {
-  Integer	sbSig;		/* device signature (should be 0x4552) */
-  Integer	sbBlkSize;	/* block size of the device (in bytes) */
-  LongInt	sbBlkCount;	/* number of blocks on the device */
-  Integer	sbDevType;	/* reserved */
-  Integer	sbDevId;	/* reserved */
-  LongInt	sbData;		/* reserved */
-  Integer	sbDrvrCount;	/* number of driver descriptor entries */
-  LongInt	ddBlock;	/* first driver's starting block */
-  Integer	ddSize;		/* size of the driver, in 512-byte blocks */
-  Integer	ddType;		/* driver operating system type (MacOS = 1) */
-  Integer	ddPad[243];	/* additional drivers, if any */
-} Block0;
-
-typedef struct {
   Integer	bbID;		/* boot blocks signature */
   LongInt	bbEntry;	/* entry point to boot code */
   Integer	bbVersion;	/* boot blocks version number */
@@ -90,5 +76,4 @@ typedef struct {
 
 int l_lockvol(hfsvol *);
 
-int l_readblock0(hfsvol *);
 int l_readpm(hfsvol *);

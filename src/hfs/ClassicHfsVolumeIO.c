@@ -22,6 +22,8 @@
 #include "libhfs/internal.h"
 #include "libhfs/block.h"
 #include "libhfs/file.h"
+#include "libhfs/low.h"
+#include "ClassicHfsBytes.h"
 #include "ClassicHfsSystemFiles.h"
 #include "ClassicHfsGeometry.h"
 #include "ClassicHfsSectorIO.h"
@@ -29,6 +31,37 @@
 #ifdef WIN32
 #include "../ClassicHfsRecovery.h"
 #endif
+
+int ClassicHfsLocateVolume(hfsvol *volume)
+{
+    block bytes;
+    if (ClassicHfsReadSector(volume, 0, &bytes) < 0)
+        return -1;
+    const unsigned signature = ClassicHfsRead16(bytes);
+    if (signature == 0x4552) {
+        if (ClassicHfsRead16(bytes + 2) != HFS_BLOCKSZ) {
+            ERROR(EINVAL, "unsupported block size");
+            return -1;
+        }
+        const unsigned long sectors = ClassicHfsRead32(bytes + 4);
+        if (sectors < 2) {
+            ERROR(EINVAL, "classic HFS disk descriptor has no partition map sector");
+            return -1;
+        }
+        const unsigned long previousLength = volume->vlen;
+        volume->vlen = sectors;
+        if (l_readpm(volume) < 0) {
+            volume->vlen = previousLength;
+            return -1;
+        }
+        return 0;
+    }
+    // Bootable floppies start at sector zero. Other media may have a map
+    // without a driver descriptor, so retain the historical optional probe.
+    if (signature == 0x4c4b || l_readpm(volume) < 0)
+        volume->pnum = 0;
+    return 0;
+}
 
 int ClassicHfsLoadVolumeHeader(hfsvol *volume)
 {
