@@ -112,3 +112,28 @@ static inline int ClassicHfsFlushCache(ClassicHfsCacheEntry entries[ClassicHfsCa
             result = -1;
     return result;
 }
+
+static inline int ClassicHfsAcquireCache(ClassicHfsCache **slot)
+{
+    if (*slot)
+        return 0;
+    ClassicHfsCache *cache = (ClassicHfsCache *)malloc(sizeof(*cache));
+    if (!cache)
+        return -1;
+    ClassicHfsInitCache(cache);
+    *slot = cache;
+    return 0;
+}
+
+static inline int ClassicHfsDrainCache(ClassicHfsCache **slot, int closing,
+                                      ClassicHfsWriteCachedSector store, void *context)
+{
+    if (!*slot)
+        return 0;
+    int result = ClassicHfsFlushCache((*slot)->chain, closing, store, context);
+    if (closing) {
+        free(*slot);
+        *slot = NULL;
+    }
+    return result;
+}

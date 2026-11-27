@@ -120,12 +120,12 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  checkRecovery(path,seed,report);
  originalWrite=fhook_write;
  for(int cache=0;cache<2;++cache)for(unsigned operation=0;operation<9;++operation) {
-  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount measured operation");if(!cache)require(b_finish(volume)==0,"disable measured block cache");
+  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount measured operation");if(!cache)require(ClassicHfsCloseVolumeCache(volume)==0,"disable measured block cache");
   calls=0;failAt=~0u;fired=false;fhook_write=failingWrite;
   int result=mutate(volume,operation);if(!result)result=hfs_flush(volume);
   unsigned writes=calls;fhook_write=originalWrite;require(result==0&&writes>0&&hfs_umount(volume)==0,"measure successful metadata writes");
   for(int failure=0;failure<2;++failure)for(unsigned at=0;at<writes;++at) {
-   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount injected metadata failure");if(!cache)require(b_finish(volume)==0,"disable injected block cache");
+   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount injected metadata failure");if(!cache)require(ClassicHfsCloseVolumeCache(volume)==0,"disable injected block cache");
    calls=0;failAt=at;mode=failure;fired=false;fhook_write=failingWrite;
    hfs_take_rollback();
    result=mutate(volume,operation);if(!result)result=hfs_flush(volume);
@@ -151,7 +151,7 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  originalSync=fhook_sync;
  for(int cache=0;cache<2;++cache) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount commit-flush fixture");
-  if(!cache)require(b_finish(volume)==0,"disable commit-flush cache");
+  if(!cache)require(ClassicHfsCloseVolumeCache(volume)==0,"disable commit-flush cache");
   syncCalls=0;syncFailures=1;fhook_sync=failingSync;
   int synced=hfs_mkdir(volume,unrelated);fhook_sync=originalSync;
   require(synced<0&&syncCalls==2&&!(volume->flags&HFS_WRITE_FAILED),"commit flush failure did not roll back and flush restoration");
@@ -161,7 +161,7 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  // Final clean-unmount marker must also roll back a failed storage flush.
  for(int cache=0;cache<2;++cache) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount clean-marker fixture");
-  if(!cache)require(b_finish(volume)==0,"disable clean-marker cache");
+  if(!cache)require(ClassicHfsCloseVolumeCache(volume)==0,"disable clean-marker cache");
   require(hfs_mkdir(volume,unrelated)==0,"dirty clean-marker fixture");
   auto dirty=load(path);syncCalls=0;syncFailures=1;syncFailAt=1;fhook_sync=failingSync;
   int unmounted=hfs_umount(volume);fhook_sync=originalSync;
@@ -173,7 +173,7 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  // Failed close preserves its pending file view for explicit retry or unmount.
  for(int cache=0;cache<2;++cache)for(int retry=0;retry<2;++retry) {
   save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount close-retry fixture");
-  if(!cache)require(b_finish(volume)==0,"disable close-retry cache");
+  if(!cache)require(ClassicHfsCloseVolumeCache(volume)==0,"disable close-retry cache");
   file=hfs_open(volume,name);require(file&&hfs_lseek(file,0,SEEK_END)>=0&&hfs_write(file,const_cast<char*>("APPEND"),6)==6,"prepare close-retry update");
   auto pos=file->pos;calls=0;failAt=0;mode=retry;fired=false;fhook_write=failingWrite;
   int closed=hfs_close(file);fhook_write=originalWrite;
@@ -187,7 +187,7 @@ void RunClassicWriteFailureTests(const char* directory,FILE* report) {
  fprintf(report,"PASS: failed/short close writes retain file views; explicit close and unmount retries preserve pending data.\n");
  // Persistent preimage read errors must not loop forever while closing.
  save(path,seed);volume=hfs_mount(path.GetBuffer(),0,O_RDWR);path.ReleaseBuffer();require(volume!=nullptr,"mount persistent-read fixture");
- require(b_finish(volume)==0,"disable persistent-read cache");file=hfs_open(volume,name);
+ require(ClassicHfsCloseVolumeCache(volume)==0,"disable persistent-read cache");file=hfs_open(volume,name);
  require(file&&hfs_lseek(file,0,SEEK_END)>=0&&hfs_write(file,const_cast<char*>("APPEND"),6)==6,"prepare persistent-read update");
  originalRead=fhook_read;fhook_read=failingRead;calls=0;failAt=~0u;mode=0;fired=false;fhook_write=failingWrite;
  require(hfs_umount(volume)<0&&calls==0,"persistent close read failure hung or wrote without undo");

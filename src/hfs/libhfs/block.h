@@ -17,9 +17,9 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-int b_init(hfsvol *);
-int b_flush(hfsvol *);
-int b_finish(hfsvol *);
+int ClassicHfsEnableVolumeCache(hfsvol *);
+int ClassicHfsFlushVolumeCache(hfsvol *);
+int ClassicHfsCloseVolumeCache(hfsvol *);
 
 int ClassicHfsReadSector(hfsvol *, unsigned long, block *);
 int ClassicHfsWriteSector(hfsvol *, unsigned long, block *);

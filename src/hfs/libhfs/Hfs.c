@@ -335,7 +335,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
 
       /* initialize volume block cache (OK to fail) */
 
-      b_init(vol);
+      ClassicHfsEnableVolumeCache(vol);
 
       /* read the volume bitmap and extents/catalog B*-tree headers */
 
@@ -453,7 +453,7 @@ int hfs_flush_raw(hfsvol *vol)
     }
 
   if (v_flush(vol, 0) < 0 ||
-      b_flush(vol) < 0)
+      ClassicHfsFlushVolumeCache(vol) < 0)
     return -1;
 
   return 0;
@@ -514,11 +514,11 @@ int hfs_umount(hfsvol *vol)
       }
     }
   }
-  /* A failed finalization must not be retried outside undo by b_finish.
+  /* A failed finalization must not be retried outside undo by ClassicHfsCloseVolumeCache.
      Successful rollback has already restored and flushed the old sectors. */
   if(result!=0){FREE(vol->cache);vol->cache=0;}
   /* Always release the block cache, even after a metadata flush error. */
-  if (b_finish(vol) < 0 && result == 0) {
+  if (ClassicHfsCloseVolumeCache(vol) < 0 && result == 0) {
     result = -1; saved_errno = errno; saved_error = hfs_error;
   }
   if (close(vol->fd) < 0 && result == 0) {
@@ -710,7 +710,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   /* initialize volume block cache (OK to fail) */
 
-  b_init(&vol);
+  ClassicHfsEnableVolumeCache(&vol);
 
   /* initialize volume geometry */
 
@@ -754,7 +754,7 @@ int hfs_format(char *path, int pnum, char *vname)
   if (result == 0)
     {
       vol.flags |= HFS_UPDATE_MDB | HFS_UPDATE_ALTMDB | HFS_UPDATE_VBM;
-      if (v_flush(&vol, 1) < 0 || b_finish(&vol) < 0)
+      if (v_flush(&vol, 1) < 0 || ClassicHfsCloseVolumeCache(&vol) < 0)
 	result = -1;
     }
   FREE(vol.cache);

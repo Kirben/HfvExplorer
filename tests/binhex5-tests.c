@@ -168,17 +168,29 @@ static void verify_repeated_tree_map(char *image)
 
 int main(int argc,char**argv){
     {
+        ClassicHfsCache *cache = NULL;
+        CacheWriteLog log = {0};
+        must(ClassicHfsAcquireCache(&cache) == 0, "allocate cache");
+        cache->chain[0].bnum = 3;
+        cache->chain[0].flags = ClassicHfsCacheValid | ClassicHfsCacheDirty;
+        must(ClassicHfsAcquireCache(&cache) == 0 &&
+             ClassicHfsDrainCache(&cache, 0, record_cache_write, &log) < 0 &&
+             (cache->chain[0].flags & ClassicHfsCacheDirty), "flush failure retains pending sector");
+        must(ClassicHfsDrainCache(&cache, 1, record_cache_write, &log) < 0 && !cache &&
+             log.count == 2 && log.seen[1] == 3, "close reports final failure and releases cache");
+    }
+    {
         hfsvol volume = {0};
         block sector = {0}, bitmap = {0x80};
         volume.lpa = 1; volume.vlen = 8;
         {
             bcache before;
-            must(b_init(&volume) == 0, "initialize logical sector cache");
+            must(ClassicHfsEnableVolumeCache(&volume) == 0, "initialize logical sector cache");
             memcpy(&before, volume.cache, sizeof(before));
             must(ClassicHfsWriteSector(&volume, 8, &sector) < 0 && errno == EIO &&
                  ClassicHfsReadSector(&volume, 8, &sector) < 0 && errno == EIO &&
                  !memcmp(&before, volume.cache, sizeof(before)), "reject outside sector before cache lookup");
-            must(b_finish(&volume) == 0, "rejected sector leaves nothing to flush");
+            must(ClassicHfsCloseVolumeCache(&volume) == 0, "rejected sector leaves nothing to flush");
         }
         volume.mdb.drAlBlSt = 4; volume.mdb.drNmAlBlks = 1;
         volume.mdb.drAtrb = HFS_ATRB_UMOUNTED;

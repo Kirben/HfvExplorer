@@ -58,29 +58,13 @@ int hfs_take_rollback(void) {
  return status;
 }
 
-/*
- * NAME:	block->init()
- * DESCRIPTION:	initialize a volume's block cache
- */
-int b_init(hfsvol *vol)
+int ClassicHfsEnableVolumeCache(hfsvol *volume)
 {
-  bcache *cache;
-
-# ifdef DEBUG
-  if (vol->cache)
-    abort();
-# endif
-
-  cache = ALLOC(bcache, 1);
-  if (cache == 0)
-    {
-      ERROR(ENOMEM, 0);
-      return -1;
+    if (ClassicHfsAcquireCache(&volume->cache) < 0) {
+        ERROR(ENOMEM, "cannot allocate classic HFS sector cache");
+        return -1;
     }
-
-  vol->cache = cache;
-  ClassicHfsInitCache(cache);
-  return 0;
+    return 0;
 }
 
 # ifdef DEBUG
@@ -371,32 +355,18 @@ static int store_cached_sector(void *volume, unsigned long sector, block *data)
   return putblock((hfsvol *)volume, sector, data);
 }
 
-int b_flush(hfsvol *vol)
+int ClassicHfsFlushVolumeCache(hfsvol *volume)
 {
-  return vol->cache ? ClassicHfsFlushCache(vol->cache->chain, 0, store_cached_sector, vol) : 0;
+    return ClassicHfsDrainCache(&volume->cache, 0, store_cached_sector, volume);
 }
 
-/*
- * NAME:	block->finish()
- * DESCRIPTION:	commit and free a volume's block cache
- */
-int b_finish(hfsvol *vol)
+int ClassicHfsCloseVolumeCache(hfsvol *volume)
 {
-  int result;
-
-  if (vol->cache == 0)
-    return 0;
-
 # ifdef DEBUG
-  b_debugcache(vol);
+    if (volume->cache)
+        b_debugcache(volume);
 # endif
-
-  result = ClassicHfsFlushCache(vol->cache->chain, 1, store_cached_sector, vol);
-
-  FREE(vol->cache);
-  vol->cache = 0;
-
-  return result;
+    return ClassicHfsDrainCache(&volume->cache, 1, store_cached_sector, volume);
 }
 
 static int transfer_logical_sector(hfsvol *volume, unsigned long sector, block *bytes, int writing)
