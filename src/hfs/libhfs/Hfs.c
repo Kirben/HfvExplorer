@@ -62,6 +62,7 @@
 # include "low.h"
 #include "../ClassicHfsVolumeBitmap.h"
 # include "file.h"
+#include "../ClassicHfsSystemFiles.h"
 # include "btree.h"
 # include "node.h"
 #include "../ClassicHfsEntry.h"
@@ -744,45 +745,7 @@ int hfs_format(char *path, int pnum, char *vname)
 
   memset(vol.vbm, 0, sizeof(vbm));
 
-  /* create extents overflow file */
-
-  ext->f.vol   = &vol;
-  ext->f.parid = 0;
-  strcpy(ext->f.name, "extents overflow");
-
-  ext->f.cat.cdrType          = cdrFilRec;
-  /* ext->f.cat.cdrResrv2 */
-  ext->f.cat.u.fil.filFlags   = 0;
-  ext->f.cat.u.fil.filTyp     = 0;
-  /* ext->f.cat.u.fil.filUsrWds */
-  ext->f.cat.u.fil.filFlNum   = HFS_CNID_EXT;
-  ext->f.cat.u.fil.filStBlk   = 0;
-  ext->f.cat.u.fil.filLgLen   = 0;
-  ext->f.cat.u.fil.filPyLen   = 0;
-  ext->f.cat.u.fil.filRStBlk  = 0;
-  ext->f.cat.u.fil.filRLgLen  = 0;
-  ext->f.cat.u.fil.filRPyLen  = 0;
-  ext->f.cat.u.fil.filCrDat   = vol.mdb.drCrDate;
-  ext->f.cat.u.fil.filMdDat   = vol.mdb.drLsMod;
-  ext->f.cat.u.fil.filBkDat   = 0;
-  /* ext->f.cat.u.fil.filFndrInfo */
-  ext->f.cat.u.fil.filClpSize = 0;
-
-  for (i = 0; i < 3; ++i)
-    {
-      ext->f.cat.u.fil.filExtRec[i].xdrStABN     = 0;
-      ext->f.cat.u.fil.filExtRec[i].xdrNumABlks  = 0;
-
-      ext->f.cat.u.fil.filRExtRec[i].xdrStABN    = 0;
-      ext->f.cat.u.fil.filRExtRec[i].xdrNumABlks = 0;
-    }
-  /* ext->f.cat.u.fil.filResrv */
-  f_selectfork(&ext->f, 0);
-
-  ext->f.clump = vol.mdb.drXTClpSiz;
-  ext->f.flags = 0;
-
-  ext->f.prev = ext->f.next = 0;
+  ClassicHfsInitSystemFiles(&vol);
 
   n_init(&ext->hdrnd, ext, ndHdrNode, 0);
 
@@ -828,46 +791,6 @@ int hfs_format(char *path, int pnum, char *vname)
 
   if (result == 0 && bt_space(ext, 1) < 0)
     result = -1;
-
-  /* create catalog file */
-
-  cat->f.vol   = &vol;
-  cat->f.parid = 0;
-  strcpy(cat->f.name, "catalog");
-
-  cat->f.cat.cdrType          = cdrFilRec;
-  /* cat->f.cat.cdrResrv2 */
-  cat->f.cat.u.fil.filFlags   = 0;
-  cat->f.cat.u.fil.filTyp     = 0;
-  /* cat->f.cat.u.fil.filUsrWds */
-  cat->f.cat.u.fil.filFlNum   = HFS_CNID_CAT;
-  cat->f.cat.u.fil.filStBlk   = 0;
-  cat->f.cat.u.fil.filLgLen   = 0;
-  cat->f.cat.u.fil.filPyLen   = 0;
-  cat->f.cat.u.fil.filRStBlk  = 0;
-  cat->f.cat.u.fil.filRLgLen  = 0;
-  cat->f.cat.u.fil.filRPyLen  = 0;
-  cat->f.cat.u.fil.filCrDat   = vol.mdb.drCrDate;
-  cat->f.cat.u.fil.filMdDat   = vol.mdb.drLsMod;
-  cat->f.cat.u.fil.filBkDat   = 0;
-  /* cat->f.cat.u.fil.filFndrInfo */
-  cat->f.cat.u.fil.filClpSize = 0;
-
-  for (i = 0; i < 3; ++i)
-    {
-      cat->f.cat.u.fil.filExtRec[i].xdrStABN     = 0;
-      cat->f.cat.u.fil.filExtRec[i].xdrNumABlks  = 0;
-
-      cat->f.cat.u.fil.filRExtRec[i].xdrStABN    = 0;
-      cat->f.cat.u.fil.filRExtRec[i].xdrNumABlks = 0;
-    }
-  /* cat->f.cat.u.fil.filResrv */
-  f_selectfork(&cat->f, 0);
-
-  cat->f.clump = vol.mdb.drCTClpSiz;
-  cat->f.flags = 0;
-
-  cat->f.prev = cat->f.next = 0;
 
   n_init(&cat->hdrnd, cat, ndHdrNode, 0);
 

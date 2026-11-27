@@ -38,6 +38,7 @@
 # include "block.h"
 # include "low.h"
 # include "file.h"
+#include "../ClassicHfsSystemFiles.h"
 
 /*
  * NAME:	low->lockvol()
@@ -219,10 +220,6 @@ int l_readmdb(hfsvol *vol)
 {
   block b;
   MDB *mdb = &vol->mdb;
-  hfsfile *ext = &vol->ext.f;
-  hfsfile *cat = &vol->cat.f;
-  int i;
-
   if (b_readlb(vol, 2, &b) < 0)
     return -1;
 
@@ -230,79 +227,7 @@ int l_readmdb(hfsvol *vol)
 
   vol->lpa = mdb->drAlBlkSiz >> HFS_BLOCKSZ_BITS;
 
-  /* extents pseudo-file structs */
-
-  ext->vol   = vol;
-  ext->parid = 0;
-  strcpy(ext->name, "extents overflow");
-
-  ext->cat.cdrType          = cdrFilRec;
-  /* ext->cat.cdrResrv2 */
-  ext->cat.u.fil.filFlags   = 0;
-  ext->cat.u.fil.filTyp     = 0;
-  /* ext->cat.u.fil.filUsrWds */
-  ext->cat.u.fil.filFlNum   = HFS_CNID_EXT;
-  ext->cat.u.fil.filStBlk   = mdb->drXTExtRec[0].xdrStABN;
-  ext->cat.u.fil.filLgLen   = mdb->drXTFlSize;
-  ext->cat.u.fil.filPyLen   = mdb->drXTFlSize;
-  ext->cat.u.fil.filRStBlk  = 0;
-  ext->cat.u.fil.filRLgLen  = 0;
-  ext->cat.u.fil.filRPyLen  = 0;
-  ext->cat.u.fil.filCrDat   = mdb->drCrDate;
-  ext->cat.u.fil.filMdDat   = mdb->drLsMod;
-  ext->cat.u.fil.filBkDat   = 0;
-  /* ext->cat.u.fil.filFndrInfo */
-  ext->cat.u.fil.filClpSize = 0;
-
-  memcpy(ext->cat.u.fil.filExtRec, mdb->drXTExtRec, sizeof(ExtDataRec));
-  for (i = 0; i < 3; ++i)
-    {
-      ext->cat.u.fil.filRExtRec[i].xdrStABN    = 0;
-      ext->cat.u.fil.filRExtRec[i].xdrNumABlks = 0;
-    }
-  f_selectfork(ext, 0);
-
-  ext->clump = mdb->drXTClpSiz;
-  ext->flags = 0;
-
-  ext->prev = ext->next = 0;
-
-  /* catalog pseudo-file structs */
-
-  cat->vol   = vol;
-  cat->parid = 0;
-  strcpy(cat->name, "catalog");
-
-  cat->cat.cdrType          = cdrFilRec;
-  /* cat->cat.cdrResrv2 */
-  cat->cat.u.fil.filFlags   = 0;
-  cat->cat.u.fil.filTyp     = 0;
-  /* cat->cat.u.fil.filUsrWds */
-  cat->cat.u.fil.filFlNum   = HFS_CNID_CAT;
-  cat->cat.u.fil.filStBlk   = mdb->drCTExtRec[0].xdrStABN;
-  cat->cat.u.fil.filLgLen   = mdb->drCTFlSize;
-  cat->cat.u.fil.filPyLen   = mdb->drCTFlSize;
-  cat->cat.u.fil.filRStBlk  = 0;
-  cat->cat.u.fil.filRLgLen  = 0;
-  cat->cat.u.fil.filRPyLen  = 0;
-  cat->cat.u.fil.filCrDat   = mdb->drCrDate;
-  cat->cat.u.fil.filMdDat   = mdb->drLsMod;
-  cat->cat.u.fil.filBkDat   = 0;
-  /* cat->cat.u.fil.filFndrInfo */
-  cat->cat.u.fil.filClpSize = 0;
-
-  memcpy(cat->cat.u.fil.filExtRec, mdb->drCTExtRec, sizeof(ExtDataRec));
-  for (i = 0; i < 3; ++i)
-    {
-      cat->cat.u.fil.filRExtRec[i].xdrStABN    = 0;
-      cat->cat.u.fil.filRExtRec[i].xdrNumABlks = 0;
-    }
-  f_selectfork(cat, 0);
-
-  cat->clump = mdb->drCTClpSiz;
-  cat->flags = 0;
-
-  cat->prev = cat->next = 0;
+  ClassicHfsInitSystemFiles(vol);
 
   return 0;
 }
