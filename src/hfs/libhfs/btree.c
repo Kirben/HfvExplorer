@@ -336,7 +336,7 @@ int bt_delete(btree *bt, unsigned char *key)
 
       rec = HFS_NODEREC(root, 0);
 
-      if (n_free(&root) < 0)
+      if (ClassicHfsFreeTreeNode(&root) < 0)
         return -1;
       --bt->hdr.bthDepth;
       bt->hdr.bthRoot = ClassicHfsRead32(HFS_RECDATA(rec));
@@ -345,7 +345,7 @@ int bt_delete(btree *bt, unsigned char *key)
     {
       /* delete the root node */
 
-      if (n_free(&root) < 0)
+      if (ClassicHfsFreeTreeNode(&root) < 0)
         return -1;
       bt->hdr.bthDepth = 0;
       bt->hdr.bthRoot  = 0;

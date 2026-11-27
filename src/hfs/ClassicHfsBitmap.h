@@ -50,11 +50,17 @@ static inline uint32_t ClassicHfsClaimTreeNode(void *map, uint32_t mapBytes,
     return 0;
 }
 
+static inline int ClassicHfsCanReleaseTreeNode(const void *map, uint32_t mapBytes, uint32_t nodes,
+                                               uint32_t freeNodes, uint32_t index)
+{
+    return map && index && index < nodes && index / 8 < mapBytes && freeNodes < nodes - 1 &&
+           ClassicHfsBitIsSet(map, 0) && ClassicHfsBitIsSet(map, index);
+}
+
 static inline int ClassicHfsReleaseTreeNode(void *map, uint32_t mapBytes, uint32_t nodes,
                                             uint32_t freeNodes, uint32_t index)
 {
-    if (!map || !index || index >= nodes || index / 8 >= mapBytes || freeNodes >= nodes - 1 ||
-        !ClassicHfsBitIsSet(map, 0) || !ClassicHfsBitIsSet(map, index))
+    if (!ClassicHfsCanReleaseTreeNode(map, mapBytes, nodes, freeNodes, index))
         return 0;
     ClassicHfsClearBit(map, index);
     return 1;

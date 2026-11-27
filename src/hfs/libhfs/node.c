@@ -73,23 +73,6 @@ int n_new(node *np)
 }
 
 /*
- * NAME:	node->free()
- * DESCRIPTION:	deallocate a b*-tree node
- */
-int n_free(node *np)
-{
-  btree *bt = np->bt;
-  if (!ClassicHfsReleaseTreeNode(bt->map, bt->mapsz, bt->hdr.bthNNodes,
-                                 bt->hdr.bthFree, np->nnum)) {
-    ERROR(EIO, "invalid classic HFS B-tree node release");
-    return -1;
-  }
-  ++bt->hdr.bthFree;
-  bt->flags |= HFS_UPDATE_BTHDR;
-  return 0;
-}
-
-/*
  * NAME:	node->compact()
  * DESCRIPTION:	clean up a node, removing deleted records
  */
@@ -233,38 +216,30 @@ int n_insert(node *np, unsigned char *record, int *reclen)
   return bt_putnode(np);
 }
 
-/*
- * NAME:	node->merge()
- * DESCRIPTION:	combine two nodes into a single node
- */
-static int finish_merge(node *right, node *left, unsigned char *record, int *flag)
+// Both adjacent records have been combined in the local left node. Check the
+// unlink and the bitmap release before publishing the first sibling write.
+static int ClassicHfsFinishNodeMerge(node *right, node *left, unsigned char *record, int *flag)
 {
-  /* update link pointers */
-
-  node next;
-  if (prepare_successor(&next, right, left->nnum) < 0)
-    return -1;
-  left->nd.ndFLink = right->nd.ndFLink;
-
-  if (bt_putnode(left) < 0)
-    return -1;
-
-  if (right->bt->hdr.bthLNode == right->nnum)
-    {
-      right->bt->hdr.bthLNode = left->nnum;
-      right->bt->flags |= HFS_UPDATE_BTHDR;
+    btree *tree = right->bt;
+    if (right->nnum == tree->hdr.bthRoot || right->nnum == tree->hdr.bthFNode ||
+        !ClassicHfsCanReleaseTreeNode(tree->map, tree->mapsz, tree->hdr.bthNNodes,
+                                      tree->hdr.bthFree, right->nnum)) {
+        ERROR(EIO, "inconsistent classic HFS merged node allocation or tree endpoint");
+        return -1;
     }
-
-  if (next.nnum && bt_putnode(&next) < 0)
-    return -1;
-
-  if (n_free(right) < 0)
-    return -1;
-
-  HFS_RECKEYLEN(record) = 0;
-  *flag = 1;
-
-  return 0;
+    node successor;
+    if (prepare_successor(&successor, right, left->nnum) < 0)
+        return -1;
+    left->nd.ndFLink = right->nd.ndFLink;
+    if (bt_putnode(left) < 0 || (successor.nnum && bt_putnode(&successor) < 0))
+        return -1;
+    if (ClassicHfsFreeTreeNode(right) < 0)
+        return -1;
+    if (tree->hdr.bthLNode == right->nnum)
+        tree->hdr.bthLNode = left->nnum;
+    record[0] = 0;
+    *flag = 1;
+    return 0;
 }
 
 /*
@@ -299,7 +274,7 @@ int n_delete(node *np, unsigned char *record, int *flag)
       }
       if (ClassicHfsMergeNodeRecords(left.data, left.roff, &left.nd.ndNRecs,
                                      np->data, np->roff, np->nd.ndNRecs))
-        return finish_merge(np, &left, record, flag);
+        return ClassicHfsFinishNodeMerge(np, &left, record, flag);
     }
 
   if (np->rnum == 0 && np->nd.ndNRecs)

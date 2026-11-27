@@ -20,7 +20,7 @@
 void n_init(node *, btree *, int, int);
 
 int n_new(node *);
-int n_free(node *);
+#include "../ClassicHfsFreeTreeNode.h"
 
 int n_search(node *, unsigned char *);
 

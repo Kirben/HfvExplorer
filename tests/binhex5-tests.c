@@ -384,6 +384,9 @@ int main(int argc,char**argv){
        "tree allocation stays within installed map");
   must(ClassicHfsClaimTreeNode(map, 2, 10, 1) == 8 && map[1] == 0xc0,
        "tree allocation reaches next map byte");
+  must(!ClassicHfsCanReleaseTreeNode(map, 2, 10, 9, 8) &&
+       ClassicHfsCanReleaseTreeNode(map, 2, 10, 0, 8) && ClassicHfsBitIsSet(map, 8),
+       "merge preflight validates free count without releasing its right sibling");
   must(!ClassicHfsReleaseTreeNode(map, 2, 10, 0, 0) &&
        ClassicHfsReleaseTreeNode(map, 2, 10, 0, 8) &&
        !ClassicHfsReleaseTreeNode(map, 2, 10, 1, 8) && map[1] == 0x40,
