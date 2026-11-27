@@ -144,8 +144,6 @@ int getblock(hfsvol *vol, unsigned long bnum, block *bp)
 
 /* Runtime undo for serialized classic-HFS metadata operations. This is not
  * a persistent journal: it handles reported errors, not process/power loss. */
-#define UNDO_BUCKETS 2048
-#define UNDO_MAX_BLOCKS 65536
 #include "../ClassicHfsSectorUndo.h"
 struct file_view { hfsfile *file; hfsfile saved; };
 struct mutation {
@@ -154,14 +152,14 @@ struct mutation {
  block *bitmap;
  char *extmap,*catmap;
  bcache *cache;
- ClassicHfsUndoRecord *blocks;
+ ClassicHfsSectorUndo undo;
  struct file_view *files;
- unsigned file_count,used,capacity,buckets[UNDO_BUCKETS];
+ unsigned file_count;
 };
 #define active_mutation (hfs_context_get()->mutation)
 static int putblock(hfsvol *, unsigned long, block *);
 static void free_mutation(struct mutation *m) {
- FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->files);FREE(m->blocks);FREE(m);
+ FREE(m->bitmap);FREE(m->extmap);FREE(m->catmap);FREE(m->cache);FREE(m->files);FREE(m->undo.records);FREE(m);
 }
 static void *save_memory(const void *p,size_t size) {
  void *copy;if(!p||!size)return 0;
@@ -196,22 +194,19 @@ int b_begin_mutation(hfsvol *vol) {
  if(hfs_flush_raw(vol)<0){b_end_mutation(vol,-1);return -1;}
  return 0;
 }
-static int remember_block(hfsvol *vol,unsigned long sector) {
- struct mutation *m=active_mutation;unsigned bucket,index;
- if(!m||m->volume!=vol)return 0;
- bucket=(sector^(sector>>11))&(UNDO_BUCKETS-1);
- for(index=m->buckets[bucket];index;index=m->blocks[index-1].next)
-  if(m->blocks[index-1].sector==sector)return 0;
- if(m->used==UNDO_MAX_BLOCKS){ERROR(ENOMEM,"HFS metadata undo limit exceeded");return -1;}
- if(m->used==m->capacity) {
-  unsigned capacity=m->capacity?m->capacity*2:128;
-  ClassicHfsUndoRecord *blocks=(ClassicHfsUndoRecord*)realloc(m->blocks,SIZE(ClassicHfsUndoRecord,capacity));
-  if(!blocks){ERROR(ENOMEM,"Cannot grow HFS undo records");return -1;}
-  m->blocks=blocks;m->capacity=capacity;
- }
- if(getblock(vol,sector,&m->blocks[m->used].before)<0)return -1;
- m->blocks[m->used].sector=sector;m->blocks[m->used].next=m->buckets[bucket];
- m->buckets[bucket]=++m->used;return 0;
+static int read_undo_sector(void *volume, unsigned long sector, block *bytes);
+static int remember_block(hfsvol *volume, unsigned long sector)
+{
+    struct mutation *m = active_mutation;
+    if (!m || m->volume != volume)
+        return 0;
+    ClassicHfsCaptureResult result = ClassicHfsCaptureSector(&m->undo, sector, volume, read_undo_sector);
+    if (result == ClassicHfsCaptureLimit) {
+        ERROR(ENOMEM, "HFS metadata undo limit exceeded");
+    } else if (result == ClassicHfsCaptureNoMemory) {
+        ERROR(ENOMEM, "Cannot grow HFS undo records");
+    }
+    return result == ClassicHfsCaptured ? 0 : -1;
 }
 /* Failed rollback evidence, not a write-ahead/crash journal. The 512-byte
  * HFSUNDO1 header records source identity and volume range. Each 528-byte
@@ -232,7 +227,7 @@ static int save_failed_undo(struct mutation *m,char *path) {
  file=CreateFileA(path,GENERIC_WRITE|DELETE,FILE_SHARE_READ,0,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,0);
  if(file==INVALID_HANDLE_VALUE)return 0;
  memcpy(header,"HFSUNDO1",8);undo_u32(header+8,1);undo_u32(header+12,512);
- undo_u64(header+16,m->saved.vstart);undo_u64(header+24,m->saved.vlen);undo_u32(header+32,m->used);
+ undo_u64(header+16,m->saved.vstart);undo_u64(header+24,m->saved.vlen);undo_u32(header+32,m->undo.count);
  undo_u64(header+56,((hfv_size_t)m->saved.vstart+m->saved.vlen)*512);
  memcpy(header+344,m->saved.mdb.drVN,sizeof(m->saved.mdb.drVN));undo_u32(header+376,m->saved.mdb.drCrDate);
  /* The native media adapter reserves large descriptor values, not CRT fds. */
@@ -247,8 +242,8 @@ static int save_failed_undo(struct mutation *m,char *path) {
  }
  undo_u32(header+36,undo_crc(header,sizeof(header)));
  if(!WriteFile(file,header,sizeof(header),&written,0)||written!=sizeof(header))ok=0;
- for(i=0;ok&&i<m->used;++i) {
-  ClassicHfsUndoRecord *b=&m->blocks[i];undo_u64(record,((hfv_size_t)m->saved.vstart+b->sector)*512);
+ for(i=0;ok&&i<m->undo.count;++i) {
+  ClassicHfsUndoRecord *b=&m->undo.records[i];undo_u64(record,((hfv_size_t)m->saved.vstart+b->sector)*512);
   undo_u32(record+8,undo_crc(b->before,512));undo_u32(record+12,512);memcpy(record+16,b->before,512);
   if(!WriteFile(file,record,sizeof(record),&written,0)||written!=sizeof(record))ok=0;
  }
@@ -285,10 +280,10 @@ int b_end_mutation(hfsvol *vol,int result) {
  struct mutation *m=active_mutation;unsigned i;int rollback=0,saved_errno;char *saved_error;
  if(!m||m->volume!=vol){ERROR(EIO,"Missing HFS undo state");return -1;}
  if(result==0&&hfs_flush_raw(vol)<0)result=-1;
- if(result==0&&m->used&&fhook_sync(vol->fd)<0){ERROR(errno,"Error flushing HFS device");result=-1;}
+ if(result==0&&m->undo.count&&fhook_sync(vol->fd)<0){ERROR(errno,"Error flushing HFS device");result=-1;}
  saved_errno=errno;saved_error=hfs_error;active_mutation=0;
  if(result<0) {
-  rollback=ClassicHfsRestoreSectors(m->blocks,m->used,vol,store_cached_sector,read_undo_sector,sync_undo_volume);
+  rollback=ClassicHfsRestoreSectors(m->undo.records,m->undo.count,vol,store_cached_sector,read_undo_sector,sync_undo_volume);
   /* Restore deep-owned maps as well as the B-tree headers, bitmap and cache.
      The copied cache links still refer to this same original cache allocation. */
   FREE(vol->ext.map);FREE(vol->cat.map);
@@ -296,7 +291,7 @@ int b_end_mutation(hfsvol *vol,int result) {
   if(m->bitmap)memcpy(vol->vbm,m->bitmap,SIZE(block,ClassicHfsBitmapSectors(vol->mdb.drNmAlBlks)));
   if(m->cache)memcpy(vol->cache,m->cache,sizeof(bcache));
   for(i=0;i<m->file_count;++i)*m->files[i].file=m->files[i].saved;
-  if(m->used)hfs_note_rollback(rollback?3:1);
+  if(m->undo.count)hfs_note_rollback(rollback?3:1);
   if(rollback)quarantine_mutation(m,vol);
  }
  free_mutation(m);

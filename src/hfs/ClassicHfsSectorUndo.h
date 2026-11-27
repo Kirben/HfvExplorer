@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <string.h>
+#include <stdlib.h>
 
 typedef struct {
     unsigned long sector;
@@ -10,6 +11,44 @@ typedef struct {
 
 typedef int (*ClassicHfsUndoSectorIO)(void *, unsigned long, unsigned char (*)[512]);
 typedef int (*ClassicHfsUndoSync)(void *);
+
+enum { ClassicHfsUndoBuckets = 2048, ClassicHfsUndoLimit = 65536 };
+typedef struct {
+    ClassicHfsUndoRecord *records;
+    unsigned count, capacity, buckets[ClassicHfsUndoBuckets];
+} ClassicHfsSectorUndo;
+
+typedef enum {
+    ClassicHfsCaptured, ClassicHfsCaptureReadFailed,
+    ClassicHfsCaptureLimit, ClassicHfsCaptureNoMemory
+} ClassicHfsCaptureResult;
+
+static inline ClassicHfsCaptureResult ClassicHfsCaptureSector(ClassicHfsSectorUndo *undo,
+    unsigned long sector, void *context, ClassicHfsUndoSectorIO readSector)
+{
+    unsigned bucket = (sector ^ (sector >> 11)) % ClassicHfsUndoBuckets;
+    for (unsigned i = undo->buckets[bucket]; i; i = undo->records[i - 1].next)
+        if (undo->records[i - 1].sector == sector)
+            return ClassicHfsCaptured;
+    if (undo->count == ClassicHfsUndoLimit)
+        return ClassicHfsCaptureLimit;
+    if (undo->count == undo->capacity) {
+        unsigned capacity = undo->capacity ? undo->capacity * 2 : 128;
+        ClassicHfsUndoRecord *records = (ClassicHfsUndoRecord *)
+            realloc(undo->records, capacity * sizeof(*records));
+        if (!records)
+            return ClassicHfsCaptureNoMemory;
+        undo->records = records;
+        undo->capacity = capacity;
+    }
+    ClassicHfsUndoRecord *record = &undo->records[undo->count];
+    if (readSector(context, sector, &record->before) < 0)
+        return ClassicHfsCaptureReadFailed;
+    record->sector = sector;
+    record->next = undo->buckets[bucket];
+    undo->buckets[bucket] = ++undo->count;
+    return ClassicHfsCaptured;
+}
 
 // Attempt every original sector even if one restoration fails. The caller
 // retains all records as recovery evidence until verification and sync finish.

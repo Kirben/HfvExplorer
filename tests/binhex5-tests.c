@@ -188,7 +188,27 @@ static int undo_test_sync(void *context)
     return 0;
 }
 
+static int capture_test_read(void *context, unsigned long sector, unsigned char (*bytes)[512])
+{
+    unsigned *reads = context;
+    ++*reads;
+    memset(*bytes, (unsigned char)*reads, 512);
+    return *reads == 1 ? -1 : 0;
+}
+
 int main(int argc,char**argv){
+    {
+        ClassicHfsSectorUndo undo = {0};
+        unsigned reads = 0;
+        must(ClassicHfsCaptureSector(&undo, 0, &reads, capture_test_read) == ClassicHfsCaptureReadFailed &&
+             undo.count == 0, "failed capture never publishes partial bytes");
+        must(ClassicHfsCaptureSector(&undo, 0, &reads, capture_test_read) == ClassicHfsCaptured &&
+             ClassicHfsCaptureSector(&undo, 2049, &reads, capture_test_read) == ClassicHfsCaptured &&
+             ClassicHfsCaptureSector(&undo, 0, &reads, capture_test_read) == ClassicHfsCaptured &&
+             undo.count == 2 && reads == 3 && undo.records[0].before[511] == 2 &&
+             undo.records[1].before[511] == 3, "repeated sector keeps original bytes across hash collision");
+        free(undo.records);
+    }
     {
         ClassicHfsUndoRecord records[3] = {0};
         UndoTrace trace = {0};
