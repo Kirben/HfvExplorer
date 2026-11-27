@@ -137,42 +137,17 @@ int n_index(node *child, unsigned char *record, int *reclen)
 int n_split(node *left, unsigned char *record, int *reclen)
 {
   node right;
-  int nrecs, i;
-  unsigned char *rec;
-
   right = *left;
+  if (!ClassicHfsSplitNodeRecords(left->data, left->roff, &left->nd.ndNRecs,
+                                  right.data, right.roff, &right.nd.ndNRecs,
+                                  left->rnum + 1, record, *reclen)) {
+    ERROR(EIO, "classic HFS records cannot fit in split nodes");
+    return -1;
+  }
   right.nd.ndBLink = left->nnum;
-
   if (n_new(&right) < 0)
     return -1;
-
   left->nd.ndFLink = right.nnum;
-  nrecs = left->nd.ndNRecs;
-
-  for (i = 0; i < nrecs; ++i)
-    {
-      if (i < nrecs / 2)
-	rec = HFS_NODEREC(right, i);
-      else
-	rec = HFS_NODEREC(*left, i);
-
-      HFS_RECKEYLEN(rec) = 0;
-    }
-
-  if (compact_node(left) < 0 || compact_node(&right) < 0)
-    return -1;
-
-  n_search(&right, record);
-  if (right.rnum >= 0) {
-    if (n_insertx(&right, record, *reclen) < 0)
-      return -1;
-  }
-  else
-    {
-      n_search(left, record);
-      if (n_insertx(left, record, *reclen) < 0)
-        return -1;
-    }
 
   /* store the new/modified nodes */
 

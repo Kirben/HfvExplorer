@@ -70,6 +70,54 @@ static inline int ClassicHfsInsertNodeRecord(unsigned char *bytes, uint16_t *off
     return 1;
 }
 
+// Plan the split over the sorted sequence including the incoming record.
+static inline int ClassicHfsSplitNodeRecords(unsigned char *left, uint16_t *offsets, uint16_t *count,
+                                             unsigned char *right, uint16_t *rightOffsets,
+                                             uint16_t *rightCount, unsigned slot,
+                                             const unsigned char *record, unsigned length)
+{
+    if (!ClassicHfsValidOffsets(*count, offsets) || slot > *count || !length ||
+        (length & 1) || length > ClassicHfsNodeSize - ClassicHfsNodeHeaderSize - 4)
+        return 0;
+    unsigned total = *count + 1;
+    unsigned ends[ClassicHfsMaxRecords + 2] = {0};
+    for (unsigned i = 0; i < total; ++i) {
+        unsigned size = length;
+        if (i != slot) {
+            unsigned old = i < slot ? i : i - 1;
+            size = offsets[old + 1] - offsets[old];
+        }
+        ends[i + 1] = ends[i] + size;
+    }
+    unsigned split = 0, best = ClassicHfsNodeSize + 1;
+    for (unsigned i = 1; i < total; ++i) {
+        unsigned leftUsed = ClassicHfsNodeHeaderSize + ends[i] + 2 * (i + 1);
+        unsigned rightUsed = ClassicHfsNodeHeaderSize + ends[total] - ends[i] + 2 * (total - i + 1);
+        unsigned larger = leftUsed > rightUsed ? leftUsed : rightUsed;
+        if (larger < best) {
+            best = larger;
+            split = i;
+        }
+    }
+    if (!split)
+        return 0;
+
+    unsigned char payload[2 * ClassicHfsNodeSize];
+    unsigned prefix = offsets[slot] - offsets[0];
+    memcpy(payload, left + offsets[0], prefix);
+    memcpy(payload + prefix, record, length);
+    memcpy(payload + prefix + length, left + offsets[slot], offsets[*count] - offsets[slot]);
+    memcpy(left + ClassicHfsNodeHeaderSize, payload, ends[split]);
+    memcpy(right + ClassicHfsNodeHeaderSize, payload + ends[split], ends[total] - ends[split]);
+    for (unsigned i = 0; i <= split; ++i)
+        offsets[i] = (uint16_t)(ClassicHfsNodeHeaderSize + ends[i]);
+    for (unsigned i = split; i <= total; ++i)
+        rightOffsets[i - split] = (uint16_t)(ClassicHfsNodeHeaderSize + ends[i] - ends[split]);
+    *count = (uint16_t)split;
+    *rightCount = (uint16_t)(total - split);
+    return 1;
+}
+
 // Append a sibling's records, retaining the left node's descriptor and the
 // original record order. Both offset tables refer to their own node buffer.
 static inline int ClassicHfsMergeNodeRecords(unsigned char *left, uint16_t *offsets,

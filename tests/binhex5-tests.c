@@ -252,6 +252,14 @@ int main(int argc,char**argv){
        ClassicHfsRead32(buffer + 8) == 8, "encode extent separator in place");
  }
  {
+  unsigned char left[512] = {0}, right[512] = {0}, record[200] = {1};
+  uint16_t offsets[36] = {14, 214, 414, 416, 418}, other[36], count = 4, sibling = 0;
+  left[14] = 2; left[214] = 3; left[414] = 4; left[416] = 5;
+  must(ClassicHfsSplitNodeRecords(left, offsets, &count, right, other, &sibling, 0, record, 200) &&
+       count == 2 && sibling == 3 && left[offsets[0]] == 1 && left[offsets[1]] == 2 &&
+       right[other[0]] == 3 && right[other[2]] == 5, "split uneven records by occupied bytes");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;
@@ -385,6 +393,11 @@ int main(int argc,char**argv){
   for(i=0;i<2;i++){memset(b,0,128);b[1]=1;b[2]='X';b[83+4*i]=0x80;save(badpath,b,128);{char absent[]="BH5:TooLarge";must(cpi_macb(badpath,v,absent)==-1&&strstr(cpi_error,"bad file length")&&hfs_stat(v,absent,&e)==-1,"legacy fork limit preflight");}}
   free(b);
  }
- must(hfs_umount(v)==0,"persist image");v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen image");verify(v,target,4097,3073);verify(v,"bh5:\x8a",0,0);must(hfs_umount(v)==0,"close image");
+ for(int i=79;i>=0;--i){char name[32];sprintf(name,"BH5:Descending%03d",i);
+  must(hfs_create(v,name,"TEXT","TEST")==0,"descending catalog split insertion");}
+ must(hfs_umount(v)==0,"persist image");v=hfs_mount(image,0,O_RDONLY);must(v!=NULL,"reopen image");verify(v,target,4097,3073);verify(v,"bh5:\x8a",0,0);
+ for(int i=0;i<80;++i){char name[32];hfsdirent entry;sprintf(name,"BH5:Descending%03d",i);
+  must(hfs_stat(v,name,&entry)==0,"reopen and locate every split catalog record");}
+ must(hfs_umount(v)==0,"close image");
  puts("PASS: BinHex 5/MacBinary I import/export, empty and aligned/unaligned forks, metadata/protected flag, Pascal names, unpadded final fork, preflight preservation, II CRC downgrade protection, secondary headers and Apple fork limits; synthetic files only");return 0;
 }
