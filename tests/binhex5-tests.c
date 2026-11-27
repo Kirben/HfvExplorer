@@ -498,6 +498,20 @@ int main(int argc,char**argv){
        ClassicHfsNextPathPart(&path,name)==ClassicHfsPathParent, "legacy CD label tolerance");
  }
  {
+  unsigned char record[160] = {0};
+  int keyBytes = ClassicHfsWriteCatalogKey(record, 2, "StoredCase");
+  ClassicHfsCatalogKey key;
+  const int sizes[] = {70, 102, 46, 46};
+  for (unsigned type = 1; type <= 4; ++type) {
+   record[keyBytes] = (unsigned char)type;
+   must(!ClassicHfsCatalogPayload(record, keyBytes + sizes[type-1] - 1, NULL) &&
+        ClassicHfsCatalogPayload(record, keyBytes + sizes[type-1], &key) == keyBytes &&
+        !strcmp(key.ckrCName,"StoredCase"), "catalog payload bounds and stored spelling");
+  }
+  record[keyBytes] = 9;
+  must(!ClassicHfsCatalogPayload(record, sizeof(record), NULL), "reject unknown catalog type");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

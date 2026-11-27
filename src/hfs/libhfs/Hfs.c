@@ -1171,7 +1171,8 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 
       ptr = HFS_NODEREC(dir->n, dir->n.rnum);
 
-      if (!ClassicHfsReadCatalogKey(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], &key)) {
+      int payload = ClassicHfsCatalogPayload(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], &key);
+      if (!payload) {
         ERROR(EIO, "invalid catalog key");
         return -1;
       }
@@ -1183,7 +1184,7 @@ int hfs_readdir(hfsdir *dir, hfsdirent *ent)
 	  return -1;
 	}
 
-      r_unpackcatdata(HFS_RECDATA(ptr), &data);
+      r_unpackcatdata(ptr + payload, &data);
 
       switch (data.cdrType)
 	{
@@ -1256,7 +1257,8 @@ int hfs_readdir2(
 		  dir->n.rnum = 0;
 		}
     ptr = HFS_NODEREC(dir->n, dir->n.rnum);
-    if (!ClassicHfsReadCatalogKey(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], pkey)) {
+    int payload = ClassicHfsCatalogPayload(ptr, dir->n.roff[dir->n.rnum + 1] - dir->n.roff[dir->n.rnum], pkey);
+      if (!payload) {
       ERROR(EIO, "invalid catalog key");
       return -1;
     }
@@ -1265,7 +1267,7 @@ int hfs_readdir2(
 		  ERROR(ENOENT, "no more entries");
 			return -1;
 		}
-    r_unpackcatdata(HFS_RECDATA(ptr), pdata);
+    r_unpackcatdata(ptr + payload, pdata);
     switch (pdata->cdrType) {
 			case cdrDirRec:
 			case cdrFilRec:

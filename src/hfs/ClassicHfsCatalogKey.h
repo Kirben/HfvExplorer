@@ -47,6 +47,31 @@ static inline int ClassicHfsReadCatalogKey(const unsigned char *bytes, int avail
     return 1;
 }
 
+// Return the payload offset only when the complete on-disk record fits
+// between this leaf entry and the following one.
+static inline int ClassicHfsCatalogPayload(const unsigned char *bytes, int available,
+                                          ClassicHfsCatalogKey *key)
+{
+    ClassicHfsCatalogKey decoded;
+    if (!ClassicHfsReadCatalogKey(bytes, available, &decoded))
+        return 0;
+    int offset = (decoded.ckrKeyLen + 2) & ~1;
+    if (offset >= available)
+        return 0;
+    int size;
+    switch (bytes[offset]) {
+    case 1: size = 70; break;  // directory
+    case 2: size = 102; break; // file
+    case 3: case 4: size = 46; break; // directory and file threads
+    default: return 0;
+    }
+    if (available - offset < size)
+        return 0;
+    if (key)
+        *key = decoded;
+    return offset;
+}
+
 // Compare names in place. A leaf key may end immediately after its name;
 // the corresponding index key may have padding out to the maximum width.
 static inline unsigned ClassicHfsCatalogNameLength(const unsigned char *key)

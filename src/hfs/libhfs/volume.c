@@ -65,17 +65,15 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
 
   ptr = HFS_NODEREC(*np, np->rnum);
 
+  int payload = ClassicHfsCatalogPayload(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum], &key);
+  if (!payload) {
+    ERROR(EIO, "invalid classic HFS catalog record");
+    return -1;
+  }
   if (cname)
-    {
-      if (!ClassicHfsReadCatalogKey(ptr, np->roff[np->rnum + 1] - np->roff[np->rnum], &key)) {
-        ERROR(EIO, "invalid catalog key");
-        return -1;
-      }
-      strcpy(cname, key.ckrCName);
-    }
-
+    strcpy(cname, key.ckrCName);
   if (data)
-    r_unpackcatdata(HFS_RECDATA(ptr), data);
+    r_unpackcatdata(ptr + payload, data);
 
   return 1;
 }
@@ -199,7 +197,13 @@ int v_putcatrec(CatDataRec *data, node *np)
   r_packcatdata(data, pdata, &len);
 
   ptr = HFS_NODEREC(*np, np->rnum);
-  memcpy(HFS_RECDATA(ptr), pdata, len);
+  int available = np->roff[np->rnum + 1] - np->roff[np->rnum];
+  int payload = ClassicHfsCatalogPayload(ptr, available, 0);
+  if (!payload || len <= 0 || len > available - payload || pdata[0] != ptr[payload]) {
+    ERROR(EIO, "catalog update exceeds existing record");
+    return -1;
+  }
+  memcpy(ptr + payload, pdata, len);
 
   return bt_putnode(np);
 }
