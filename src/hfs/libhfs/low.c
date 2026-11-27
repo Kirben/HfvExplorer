@@ -218,7 +218,6 @@ int l_readpm(hfsvol *vol)
 int l_readmdb(hfsvol *vol)
 {
   block b;
-  unsigned char *ptr = b;
   MDB *mdb = &vol->mdb;
   hfsfile *ext = &vol->ext.f;
   hfsfile *cat = &vol->cat.f;
@@ -227,65 +226,7 @@ int l_readmdb(hfsvol *vol)
   if (b_readlb(vol, 2, &b) < 0)
     return -1;
 
-  mdb->drSigWord = ClassicHfsTake16(&ptr);
-  mdb->drCrDate = ClassicHfsTake32(&ptr);
-  mdb->drLsMod = ClassicHfsTake32(&ptr);
-  mdb->drAtrb = ClassicHfsTake16(&ptr);
-  mdb->drNmFls = ClassicHfsTake16(&ptr);
-  mdb->drVBMSt = ClassicHfsTake16(&ptr);
-  mdb->drAllocPtr = ClassicHfsTake16(&ptr);
-  mdb->drNmAlBlks = ClassicHfsTake16(&ptr);
-  mdb->drAlBlkSiz = ClassicHfsTake32(&ptr);
-  mdb->drClpSiz = ClassicHfsTake32(&ptr);
-  mdb->drAlBlSt = ClassicHfsTake16(&ptr);
-  mdb->drNxtCNID = ClassicHfsTake32(&ptr);
-  mdb->drFreeBks = ClassicHfsTake16(&ptr);
-
-  ClassicHfsTakeName(&ptr, mdb->drVN, sizeof(mdb->drVN));
-
-# ifdef DEBUG
-  if (ptr - b != 64)
-    abort();
-# endif
-
-  mdb->drVolBkUp = ClassicHfsTake32(&ptr);
-  mdb->drVSeqNum = ClassicHfsTake16(&ptr);
-  mdb->drWrCnt = ClassicHfsTake32(&ptr);
-  mdb->drXTClpSiz = ClassicHfsTake32(&ptr);
-  mdb->drCTClpSiz = ClassicHfsTake32(&ptr);
-  mdb->drNmRtDirs = ClassicHfsTake16(&ptr);
-  mdb->drFilCnt = ClassicHfsTake32(&ptr);
-  mdb->drDirCnt = ClassicHfsTake32(&ptr);
-
-  for (i = 0; i < 8; ++i)
-    mdb->drFndrInfo[i] = ClassicHfsTake32(&ptr);
-
-# ifdef DEBUG
-  if (ptr - b != 124)
-    abort();
-# endif
-
-  mdb->drVCSize = ClassicHfsTake16(&ptr);
-  mdb->drVBMCSize = ClassicHfsTake16(&ptr);
-  mdb->drCtlCSize = ClassicHfsTake16(&ptr);
-
-  mdb->drXTFlSize = ClassicHfsTake32(&ptr);
-
-  ptr += ClassicHfsDecodeExtents(ptr, mdb->drXTExtRec);
-
-# ifdef DEBUG
-  if (ptr - b != 146)
-    abort();
-# endif
-
-  mdb->drCTFlSize = ClassicHfsTake32(&ptr);
-
-  ptr += ClassicHfsDecodeExtents(ptr, mdb->drCTExtRec);
-
-# ifdef DEBUG
-  if (ptr - b != 162)
-    abort();
-# endif
+  ClassicHfsDecodeMasterDirectory(b, mdb);
 
   vol->lpa = mdb->drAlBlkSiz >> HFS_BLOCKSZ_BITS;
 
@@ -373,11 +314,9 @@ int l_readmdb(hfsvol *vol)
 int l_writemdb(hfsvol *vol)
 {
   block b;
-  unsigned char *ptr = b;
   MDB *mdb = &vol->mdb;
   hfsfile *ext = &vol->ext.f;
   hfsfile *cat = &vol->cat.f;
-  int i;
 
   memset(&b, 0, sizeof(b));
 
@@ -389,63 +328,7 @@ int l_writemdb(hfsvol *vol)
   mdb->drCTClpSiz = cat->clump;
   memcpy(mdb->drCTExtRec, cat->cat.u.fil.filExtRec, sizeof(ExtDataRec));
 
-  ClassicHfsAppend16(&ptr, mdb->drSigWord);
-  ClassicHfsAppend32(&ptr, mdb->drCrDate);
-  ClassicHfsAppend32(&ptr, mdb->drLsMod);
-  ClassicHfsAppend16(&ptr, mdb->drAtrb);
-  ClassicHfsAppend16(&ptr, mdb->drNmFls);
-  ClassicHfsAppend16(&ptr, mdb->drVBMSt);
-  ClassicHfsAppend16(&ptr, mdb->drAllocPtr);
-  ClassicHfsAppend16(&ptr, mdb->drNmAlBlks);
-  ClassicHfsAppend32(&ptr, mdb->drAlBlkSiz);
-  ClassicHfsAppend32(&ptr, mdb->drClpSiz);
-  ClassicHfsAppend16(&ptr, mdb->drAlBlSt);
-  ClassicHfsAppend32(&ptr, mdb->drNxtCNID);
-  ClassicHfsAppend16(&ptr, mdb->drFreeBks);
-  ClassicHfsAppendName(&ptr, mdb->drVN, sizeof(mdb->drVN));
-
-# ifdef DEBUG
-  if (ptr - b != 64)
-    abort();
-# endif
-
-  ClassicHfsAppend32(&ptr, mdb->drVolBkUp);
-  ClassicHfsAppend16(&ptr, mdb->drVSeqNum);
-  ClassicHfsAppend32(&ptr, mdb->drWrCnt);
-  ClassicHfsAppend32(&ptr, mdb->drXTClpSiz);
-  ClassicHfsAppend32(&ptr, mdb->drCTClpSiz);
-  ClassicHfsAppend16(&ptr, mdb->drNmRtDirs);
-  ClassicHfsAppend32(&ptr, mdb->drFilCnt);
-  ClassicHfsAppend32(&ptr, mdb->drDirCnt);
-
-  for (i = 0; i < 8; ++i)
-    ClassicHfsAppend32(&ptr, mdb->drFndrInfo[i]);
-
-# ifdef DEBUG
-  if (ptr - b != 124)
-    abort();
-# endif
-
-  ClassicHfsAppend16(&ptr, mdb->drVCSize);
-  ClassicHfsAppend16(&ptr, mdb->drVBMCSize);
-  ClassicHfsAppend16(&ptr, mdb->drCtlCSize);
-  ClassicHfsAppend32(&ptr, mdb->drXTFlSize);
-
-  ptr += ClassicHfsEncodeExtents(ptr, mdb->drXTExtRec);
-
-# ifdef DEBUG
-  if (ptr - b != 146)
-    abort();
-# endif
-
-  ClassicHfsAppend32(&ptr, mdb->drCTFlSize);
-
-  ptr += ClassicHfsEncodeExtents(ptr, mdb->drCTExtRec);
-
-# ifdef DEBUG
-  if (ptr - b != 162)
-    abort();
-# endif
+  ClassicHfsEncodeMasterDirectory(b, mdb);
 
   if (b_writelb(vol, 2, &b) < 0)
     return -1;
