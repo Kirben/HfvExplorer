@@ -90,12 +90,7 @@ typedef struct {
 
 typedef ExtDescriptor ExtDataRec[3];
 
-typedef struct {
-  SignedByte	xkrKeyLen;	/* key length */
-  SignedByte	xkrFkType;	/* fork type (0x00/0xff == data/resource */
-  ULongInt	xkrFNum;	/* file number */
-  UInteger	xkrFABN;	/* starting file allocation block */
-} ExtKeyRec;
+#include "../ClassicHfsExtentKey.h"
 
 #pragma pack(1)
 typedef struct {
@@ -119,7 +114,7 @@ typedef struct {
 # define HFS_EXTDATALEN		sizeof(ExtDataRec)
 
 # define HFS_CATKEYLEN		sizeof(CatKeyRec)
-# define HFS_EXTKEYLEN		sizeof(ExtKeyRec)
+# define HFS_EXTKEYLEN		ClassicHfsExtentKeySize
 
 # define HFS_CATRECMAXLEN	(HFS_CATKEYLEN + HFS_CATDATALEN)
 # define HFS_EXTRECMAXLEN	(HFS_EXTKEYLEN + HFS_EXTDATALEN)

@@ -193,7 +193,7 @@ static hfsvol *mount_impl(char *path, int pnum, int flags, int session, int supp
       vol->ext.map     = 0;
       vol->ext.mapsz   = 0;
       vol->ext.flags   = 0;
-      vol->ext.compare = r_compareextkeys;
+      vol->ext.compare = ClassicHfsCompareExtentKeys;
 
       vol->cat.map     = 0;
       vol->cat.mapsz   = 0;
@@ -813,7 +813,7 @@ int hfs_format(char *path, int pnum, char *vname)
   ext->map     = map;
   ext->mapsz   = HFS_MAP1SZ;
   ext->flags   = HFS_UPDATE_BTHDR;
-  ext->compare = r_compareextkeys;
+  ext->compare = ClassicHfsCompareExtentKeys;
 
   if (result == 0 && bt_space(ext, 1) < 0)
     result = -1;

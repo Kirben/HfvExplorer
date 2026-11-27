@@ -220,7 +220,6 @@ int f_alloc(hfsfile *file)
 	file->ext[i] = blocks;
       else
 	{
-	  ExtKeyRec key;
 	  unsigned char record[HFS_EXTRECMAXLEN];
 	  int reclen;
 
@@ -236,8 +235,7 @@ int f_alloc(hfsfile *file)
 
 	  file->fabn = start;
 
-	  r_makeextkey(&key, file->fork, file->cat.u.fil.filFlNum, end);
-	  r_packextkey(&key, record, &reclen);
+	  reclen = ClassicHfsWriteExtentKey(record, file->fork, file->cat.u.fil.filFlNum, end);
 	  r_packextdata(&file->ext, HFS_RECDATA(record), &reclen);
 
 	  if (bt_insert(&vol->ext, record, reclen) < 0)

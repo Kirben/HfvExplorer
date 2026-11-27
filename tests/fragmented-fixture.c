@@ -31,9 +31,9 @@ static void FragmentOverflowTree(const char* source,const char* directory) {
   must(v_allocblocks(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate overflow-tree extent");
  }
  for(i=3;i<10;i+=3) {
-  ExtKeyRec key; ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int reclen;
+  ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int reclen;
   for(j=0;j<3 && i+j<10;++j) data[j]=pieces[i+j];
-  r_makeextkey(&key,0,3,i); r_packextkey(&key,rec,&reclen); r_packextdata(&data,HFS_RECDATA(rec),&reclen);
+  reclen = ClassicHfsWriteExtentKey(rec,0,3,i); r_packextdata(&data,HFS_RECDATA(rec),&reclen);
   must(bt_insert(&v->ext,rec,reclen)==0,"insert self-mapping overflow record");
  }
  must(v_flush(v,0)==0 && v->mdb.drXTFlSize==length,"flush self-records without growing allocation");
@@ -110,9 +110,9 @@ void CreateFragmentedFixture(const char* directory) {
   must(v_allocblocks(v,&pieces[i])==0 && pieces[i].xdrNumABlks==(i==9?blocks-9:1),"allocate catalog extent");
  }
  for(i=3;i<10;i+=3) {
-  ExtKeyRec key; ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int length;
+  ExtDataRec data={{0}}; unsigned char rec[HFS_EXTRECMAXLEN]; int length;
   for(j=0;j<3 && i+j<10;++j) data[j]=pieces[i+j];
-  r_makeextkey(&key,0,4,i); r_packextkey(&key,rec,&length); r_packextdata(&data,HFS_RECDATA(rec),&length);
+  length = ClassicHfsWriteExtentKey(rec,0,4,i); r_packextdata(&data,HFS_RECDATA(rec),&length);
   must(bt_insert(&v->ext,rec,length)==0,"insert catalog overflow record");
  }
  k=0;

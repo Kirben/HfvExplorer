@@ -9,6 +9,7 @@
 #include "hfs/libhfs/hfs.h"
 #include "hfs/ClassicHfsRecordBytes.h"
 #include "hfs/ClassicHfsNames.h"
+#include "hfs/ClassicHfsExtentKey.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
 #include "hfs/copyout.h"
@@ -60,6 +61,19 @@ int main(int argc,char**argv){
        "classic local epoch compatibility");
   must(ClassicHfsFromUnixSeconds(ClassicHfsToUnixSeconds(UINT32_MAX)) == UINT32_MAX &&
        ClassicHfsFromUnixSeconds(ClassicHfsToUnixSeconds(0)) == 0, "classic date limits");
+ }
+ {
+  unsigned char first[8], last[8];
+  ClassicHfsWriteExtentKey(first, 0xff, 1, 0xffff);
+  ClassicHfsWriteExtentKey(last, 0, UINT32_MAX, 0);
+  must(!memcmp(first, "\x07\xff\0\0\0\x01\xff\xff", 8), "extent key disk layout");
+  must(ClassicHfsCompareExtentKeys(first, last) < 0 && ClassicHfsCompareExtentKeys(last, first) > 0,
+       "unsigned file IDs take precedence over fork and block");
+  ClassicHfsWriteExtentKey(last, 0, 1, 0xffff);
+  must(ClassicHfsCompareExtentKeys(last, first) < 0, "data fork precedes resource fork");
+  ClassicHfsWriteExtentKey(last, 0xff, 1, 0x8000);
+  must(ClassicHfsCompareExtentKeys(last, first) < 0 && ClassicHfsCompareExtentKeys(first, first) == 0,
+       "extent block order and equality");
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

@@ -57,35 +57,6 @@ void r_unpackcatkey(unsigned char *pkey, CatKeyRec *key)
 }
 
 /*
- * NAME:	record->packextkey()
- * DESCRIPTION:	pack an extents record key
- */
-void r_packextkey(ExtKeyRec *key, unsigned char *pkey, int *len)
-{
-  unsigned char *start = pkey;
-
-  ClassicHfsAppend8(&pkey, key->xkrKeyLen);
-  ClassicHfsAppend8(&pkey, key->xkrFkType);
-  ClassicHfsAppend32(&pkey, key->xkrFNum);
-  ClassicHfsAppend16(&pkey, key->xkrFABN);
-
-  if (len)
-    *len = HFS_RECKEYSKIP(start);
-}
-
-/*
- * NAME:	record->unpackextkey()
- * DESCRIPTION:	unpack an extents record key
- */
-void r_unpackextkey(unsigned char *pkey, ExtKeyRec *key)
-{
-  key->xkrKeyLen = ClassicHfsTake8(&pkey);
-  key->xkrFkType = ClassicHfsTake8(&pkey);
-  key->xkrFNum = ClassicHfsTake32(&pkey);
-  key->xkrFABN = ClassicHfsTake16(&pkey);
-}
-
-/*
  * NAME:	record->comparecatkeys()
  * DESCRIPTION:	compare two (packed) catalog record keys
  */
@@ -103,31 +74,6 @@ int r_comparecatkeys(unsigned char *pkey1, unsigned char *pkey2)
     return diff;
 
   return ClassicHfsCompareNames(key1.ckrCName, key2.ckrCName);
-}
-
-/*
- * NAME:	record->compareextkeys()
- * DESCRIPTION:	compare two (packed) extents record keys
- */
-int r_compareextkeys(unsigned char *pkey1, unsigned char *pkey2)
-{
-  ExtKeyRec key1;
-  ExtKeyRec key2;
-  int diff;
-
-  r_unpackextkey(pkey1, &key1);
-  r_unpackextkey(pkey2, &key2);
-
-  diff = key1.xkrFNum - key2.xkrFNum;
-  if (diff)
-    return diff;
-
-  diff = (unsigned char) key1.xkrFkType -
-         (unsigned char) key2.xkrFkType;
-  if (diff)
-    return diff;
-
-  return key1.xkrFABN - key2.xkrFABN;
 }
 
 /*
@@ -409,18 +355,6 @@ void r_makecatkey(CatKeyRec *key, long parid, char *name)
   key->ckrParID  = parid;
 
   strcpy(key->ckrCName, name);
-}
-
-/*
- * NAME:	record->makeextkey()
- * DESCRIPTION:	construct an extents record key
- */
-void r_makeextkey(ExtKeyRec *key, int fork, long fnum, unsigned int fabn)
-{
-  key->xkrKeyLen = 0x07;
-  key->xkrFkType = fork;
-  key->xkrFNum   = fnum;
-  key->xkrFABN   = fabn;
 }
 
 /*

@@ -80,7 +80,6 @@ int v_catsearch(hfsvol *vol, long parid, char *name,
  */
 int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
 {
-  ExtKeyRec key;
   ExtDataRec extsave;
   unsigned int fabnsave;
   unsigned char pkey[HFS_EXTKEYLEN];
@@ -91,8 +90,7 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
   if (np == 0)
     np = &n;
 
-  r_makeextkey(&key, file->fork, file->cat.u.fil.filFlNum, fabn);
-  r_packextkey(&key, pkey, 0);
+  ClassicHfsWriteExtentKey(pkey, file->fork, file->cat.u.fil.filFlNum, fabn);
 
   /* in case bt_search() clobbers these */
 
@@ -120,7 +118,7 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
           int comparison;
           if (start < 14 || end < start + 20 || end > (unsigned)(HFS_BLOCKSZ-2*(np->nd.ndNRecs+1)) ||
               np->data[start] != 7) { found = -1; break; }
-          comparison = r_compareextkeys(np->data+start,pkey);
+          comparison = ClassicHfsCompareExtentKeys(np->data+start,pkey);
           if (comparison == 0) { np->rnum = r; found = 1; break; }
           if (comparison > 0) { found = -1; break; }
         }
