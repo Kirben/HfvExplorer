@@ -827,8 +827,6 @@ int hfs_format(char *path, int pnum, char *vname)
   if (result == 0 && bt_space(ext, 1) < 0)
     result = -1;
 
-  --ext->hdr.bthFree;
-
   /* create catalog file */
 
   cat->f.vol   = &vol;
@@ -913,8 +911,6 @@ int hfs_format(char *path, int pnum, char *vname)
 
   if (result == 0 && bt_space(cat, 1) < 0)
     result = -1;
-
-  --cat->hdr.bthFree;
 
   /* create root folder */
 

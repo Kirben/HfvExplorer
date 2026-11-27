@@ -313,6 +313,18 @@ int main(int argc,char**argv){
        "backward seek restores inline extent cache");
  }
  {
+  unsigned char leaf[512] = {0}, key[8];
+  uint16_t offsets[] = {14,34,54}; int slot = -1;
+  ClassicHfsWriteExtentKey(leaf + 14, 0, 3, 3);
+  ClassicHfsWriteExtentKey(leaf + 34, 0, 3, 9);
+  ClassicHfsWriteExtentKey(key, 0, 3, 6);
+  must(ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsExtentMissing &&
+       slot == -1, "extent bootstrap stops in sorted gap");
+  offsets[2] = 52;
+  must(ClassicHfsScanExtentLeaf(leaf, offsets, 2, key, &slot) == ClassicHfsBadExtentLeaf,
+       "extent bootstrap rejects truncated extent payload");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

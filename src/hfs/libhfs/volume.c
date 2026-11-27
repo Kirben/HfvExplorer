@@ -106,7 +106,7 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
     {
       /* The root can itself be beyond the inline extents. Bootstrap the
          overflow file from readable leaves instead of recursing via its root. */
-      unsigned long visits = 0;
+      unsigned long previous = 0, visits = 0;
       if (file->flags & HFS_EXT_BOOTSTRAP) {
         ERROR(EIO, "recursive extents-file bootstrap");
         return -1;
@@ -115,22 +115,27 @@ int v_extsearch(hfsfile *file, unsigned int fabn, ExtDataRec *data, node *np)
       np->bt = &file->vol->ext;
       np->nnum = np->bt->hdr.bthFNode;
       found = 0;
-      while (np->nnum && visits++ < np->bt->hdr.bthNNodes) {
-        unsigned r;
-        if (bt_getnode(np) < 0 || (unsigned char)np->nd.ndType != ndLeafNode) { found = -1; break; }
-        for (r = 0; r < np->nd.ndNRecs; ++r) {
-          unsigned start = np->roff[r], end = np->roff[r+1];
-          int comparison;
-          if (start < 14 || end < start + 20 || end > (unsigned)(HFS_BLOCKSZ-2*(np->nd.ndNRecs+1)) ||
-              np->data[start] != 7) { found = -1; break; }
-          comparison = ClassicHfsCompareExtentKeys(np->data+start,pkey);
-          if (comparison == 0) { np->rnum = r; found = 1; break; }
-          if (comparison > 0) { found = -1; break; }
+      while (np->nnum) {
+        if (++visits > np->bt->hdr.bthNNodes) {
+          ERROR(EIO, "cycle in classic HFS overflow leaf chain");
+          found = -1;
+          break;
         }
-        if (found) break;
+        if (bt_getnode(np) < 0) { found = -1; break; }
+        if (np->nd.ndType != -1 || np->nd.ndNHeight != 1 || np->nd.ndBLink != previous) {
+          ERROR(EIO, "invalid classic HFS overflow leaf link");
+          found = -1;
+          break;
+        }
+        found = ClassicHfsScanExtentLeaf(np->data, np->roff, np->nd.ndNRecs, pkey, &np->rnum);
+        if (found == ClassicHfsBadExtentLeaf)
+          { ERROR(EIO, "invalid classic HFS overflow leaf record"); }
+        if (found != ClassicHfsContinueExtentScan)
+          break;
+        previous = np->nnum;
         np->nnum = np->nd.ndFLink;
+        found = 0;
       }
-      if (np->nnum && !found) found = -1;
       file->flags &= ~HFS_EXT_BOOTSTRAP;
     }
   else

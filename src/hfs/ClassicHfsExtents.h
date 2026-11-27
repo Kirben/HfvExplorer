@@ -100,3 +100,26 @@ static inline int ClassicHfsValidExtentRecord(const unsigned char *record, int s
     return size >= ClassicHfsExtentKeySize + ClassicHfsExtentBytes &&
            record[0] == ClassicHfsExtentKeySize - 1;
 }
+
+enum { ClassicHfsBadExtentLeaf = -1, ClassicHfsExtentMissing, ClassicHfsExtentFound,
+       ClassicHfsContinueExtentScan };
+
+// The extents file may need to find its own overflow records before its
+// index nodes can be read. Inspect one decoded leaf in forward-link order.
+static inline int ClassicHfsScanExtentLeaf(const unsigned char *bytes, const uint16_t *offsets,
+                                           unsigned count, const unsigned char *key, int *slot)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned char *record = bytes + offsets[i];
+        if (!ClassicHfsValidExtentRecord(record, offsets[i + 1] - offsets[i]))
+            return ClassicHfsBadExtentLeaf;
+        int order = ClassicHfsCompareExtentKeyBytes(record, key);
+        if (!order) {
+            *slot = (int)i;
+            return ClassicHfsExtentFound;
+        }
+        if (order > 0)
+            return ClassicHfsExtentMissing;
+    }
+    return ClassicHfsContinueExtentScan;
+}

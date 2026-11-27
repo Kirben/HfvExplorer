@@ -271,8 +271,13 @@ int bt_space(btree *bt, unsigned int nrecs)
 
   nnodes = space * (bt->f.vol->mdb.drAlBlkSiz / bt->hdr.bthNodeSize);
 
+  if (!nnodes) {
+    ERROR(EIO, "classic HFS tree growth supplied no nodes");
+    return -1;
+  }
+  /* The formatter already marked node zero in the initial bitmap. */
+  bt->hdr.bthFree += nnodes - (bt->hdr.bthNNodes == 0);
   bt->hdr.bthNNodes += nnodes;
-  bt->hdr.bthFree   += nnodes;
 
   bt->flags |= HFS_UPDATE_BTHDR;
 
