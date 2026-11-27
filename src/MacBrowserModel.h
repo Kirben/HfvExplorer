@@ -10,7 +10,7 @@ namespace MacBrowser { struct WorkerOrigin; }
 #include <map>
 #include "StorageWorker.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 
 class MediaImageSource;

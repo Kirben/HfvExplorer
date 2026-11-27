@@ -22,7 +22,7 @@
 #include "mactypes.h"
 #include "floppy.h"
 #include "ReadOnlyCdBackend.h"
-#include "hfs\libhfs\hfs.h"
+#include "hfs\ClassicHfs.h"
 #include "hfs\interface.h"
 #define _FHOOK_INTERNAL_
 #include "filehook.h"

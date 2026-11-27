@@ -22,7 +22,7 @@
 #include <atomic>
 #include <fcntl.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 void Check(bool ok,const char* message){if(!ok)throw HfsPlus::Error(message);}

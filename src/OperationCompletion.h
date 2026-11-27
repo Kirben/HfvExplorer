@@ -5,7 +5,7 @@
 #include "VolumeCoordinator.h"
 
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "hfs/interface.h"
 }
 

@@ -5,7 +5,7 @@
 #include "CopyProgress.h"
 #include "ftypes.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace ClassicHfsRecovery { class MoveDecision; }
 namespace FileOperations {

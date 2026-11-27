@@ -48,12 +48,12 @@ $(TARGET): $(OBJS)
 
 ### DEPENDENCIES FOLLOW #######################################################
 
-../ClassicHfsVolumeIO.o: ../ClassicHfsVolumeIO.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h
-../ClassicHfsMetadata.o: ../ClassicHfsMetadata.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsCatalog.h ../ClassicHfsVolumeIO.h ../ClassicHfsEntry.h
-../ClassicHfsTreeMutation.o: ../ClassicHfsTreeMutation.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h
+../ClassicHfsVolumeIO.o: ../ClassicHfsVolumeIO.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h
+../ClassicHfsMetadata.o: ../ClassicHfsMetadata.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsCatalog.h ../ClassicHfsVolumeIO.h ../ClassicHfsEntry.h
+../ClassicHfsTreeMutation.o: ../ClassicHfsTreeMutation.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h
 ../ClassicHfsTime.o: ../ClassicHfsTime.c ../ClassicHfsTime.h
-../ClassicHfsForkStorage.o: ../ClassicHfsForkStorage.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
+../ClassicHfsForkStorage.o: ../ClassicHfsForkStorage.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
  ../ClassicHfsCatalog.h
-../ClassicHfsMount.o: ../ClassicHfsMount.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
+../ClassicHfsMount.o: ../ClassicHfsMount.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsVolumeIO.h ../ClassicHfsForkState.h ../ClassicHfsTreeLookup.h \
  ../ClassicHfsTreeNodes.h
-../ClassicHfsNodeMutation.o: ../ClassicHfsNodeMutation.c ../ClassicHfsEngine.h hfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h
+../ClassicHfsNodeMutation.o: ../ClassicHfsNodeMutation.c ../ClassicHfsEngine.h ../ClassicHfs.h ../ClassicHfsTime.h ../ClassicHfsBytes.h ../ClassicHfsTreeLookup.h ../ClassicHfsTreeNodes.h

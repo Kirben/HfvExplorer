@@ -31,7 +31,7 @@
 
 FloppyWriteApi& NativeFloppyWriteApiForTest();
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #define _FHOOK_INTERNAL_
 #include "filehook.h"
 }

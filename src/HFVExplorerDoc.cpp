@@ -40,7 +40,7 @@
 #include "HFVExplorerListView.h"
 #include "CFATVolume.h"
 #include "utils.h"
-#include "hfs\libhfs\hfs.h"
+#include "hfs\ClassicHfs.h"
 #include "hfs\interface.h"
 #include "AskNewVolume.h"
 #include "MainFrm.h"

@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "floppy.h"
 }
 static void check(bool ok,const char* action) {

@@ -13,7 +13,7 @@
 #include <algorithm>
 #include <cerrno>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 std::vector<char> pathBuffer(const std::string& path){if(path.empty()||path.size()>=MAX_PATH)throw std::runtime_error("A search path is empty or exceeds the supported length");return std::vector<char>(path.c_str(),path.c_str()+path.size()+1);}

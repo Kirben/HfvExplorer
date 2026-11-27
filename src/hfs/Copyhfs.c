@@ -39,7 +39,7 @@
 #include "ClassicHfsEngine.h"
 #include "ClassicHfsForkState.h"
 
-// # include "libhfs\hfs.h"
+// # include "ClassicHfs.h"
 # include "ClassicHfsBytes.h"
 # include "copyhfs.h"
 # include "copyout.h"

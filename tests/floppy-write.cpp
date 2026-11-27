@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <fcntl.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 // The standalone transport test formats disposable images. The application
 // recovery implementation is exercised by --verify-removable-recovery.

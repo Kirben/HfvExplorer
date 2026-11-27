@@ -15,7 +15,7 @@
 #include <cstdio>
 #include <set>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 using namespace MacBrowser;

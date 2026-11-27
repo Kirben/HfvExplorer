@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <atomic>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 using namespace MacBrowser;

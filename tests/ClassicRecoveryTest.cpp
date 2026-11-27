@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <vector>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 
 namespace {

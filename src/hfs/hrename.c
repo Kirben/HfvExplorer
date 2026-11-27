@@ -22,7 +22,7 @@
 # include <fcntl.h>
 # include <errno.h>
 
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "glob.h"

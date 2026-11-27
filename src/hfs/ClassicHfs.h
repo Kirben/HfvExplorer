@@ -1,5 +1,5 @@
-#ifndef HFV_LIBHFS_PUBLIC_H
-#define HFV_LIBHFS_PUBLIC_H
+#ifndef HFV_CLASSIC_HFS_H
+#define HFV_CLASSIC_HFS_H
 /*
  * hfsutils - tools for reading and writing Macintosh HFS volumes
  * Copyright (C) 1996, 1997 Robert Leslie
@@ -20,7 +20,7 @@
  */
 
 # include <time.h>
-# include "../../HostOffsets.h"
+# include "../HostOffsets.h"
 
 # define HFS_BLOCKSZ		512
 # define HFS_BLOCKSZ_BITS	9
@@ -114,7 +114,7 @@ typedef struct {
 # define HFS_FNDR_ISINVISIBLE		(1 << 14)
 # define HFS_FNDR_ISALIAS		(1 << 15)
 
-#include "../EngineContext.h"
+#include "EngineContext.h"
 #define hfs_error (hfs_context_get()->error)
 
 hfsvol *hfs_mount(char *, int, int);
@@ -179,4 +179,4 @@ int hfs_delete(hfsvol *, char *);
 
 int hfs_rename(hfsvol *, char *, char *);
 
-#endif /* HFV_LIBHFS_PUBLIC_H */
+#endif /* HFV_CLASSIC_HFS_H */

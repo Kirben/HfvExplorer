@@ -30,7 +30,7 @@
 # include <sys/ioctl.h>
 # include <errno.h>
 
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "darray.h"

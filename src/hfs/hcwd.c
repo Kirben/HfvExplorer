@@ -37,7 +37,7 @@
 # include <io.h>
 #endif
 
-# include "libhfs\hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 
 #ifdef __EMX__

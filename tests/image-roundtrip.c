@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "Filehook.h"
 
 static void require(int ok, const char *operation) {

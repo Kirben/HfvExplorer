@@ -172,7 +172,7 @@ endif
 
 LIBHFS_SRC = ClassicHfsEntry.h ClassicHfsCatalogRecord.h ClassicHfsCatalogFile.h ClassicHfsDirectory.h ClassicHfsCatalogThread.h ClassicHfsPath.h ClassicHfsForkIO.h ClassicHfsCache.h ClassicHfsSectorIO.h ClassicHfsNodeIO.h ClassicHfsGeometry.h ClassicHfsBitmap.h ClassicHfsTreeHeader.h ClassicHfsNode.h ClassicHfsExtents.h ClassicHfsCatalogKey.h ClassicHfsExtentKey.h ClassicHfsBytes.h ClassicHfsRecordBytes.h ClassicHfsNames.h ClassicHfsTime.c ClassicHfsTime.h $(addprefix $(LIBHFS_DIR)/, \
 	../ClassicHfsVolumeIO.c ../ClassicHfsVolumeIO.h ../ClassicHfsMetadata.c ../ClassicHfsTreeMutation.c ../ClassicHfsTreeLookup.h \
-	../ClassicHfsForkStorage.c ../ClassicHfsForkState.h ../ClassicHfsMount.c hfs.h ../ClassicHfsEngine.h \
+	../ClassicHfsForkStorage.c ../ClassicHfsForkState.h ../ClassicHfsMount.c ../ClassicHfs.h ../ClassicHfsEngine.h \
 	../ClassicHfsNodeMutation.c ../ClassicHfsTreeNodes.h ../ClassicHfsCatalog.h \
 	Makefile)
 
@@ -220,31 +220,31 @@ $(DIST_ARCHIVE): $(DIST_FILES)
 ### DEPENDENCIES FOLLOW #######################################################
 
 $(BINDIR)/binhex.o: binhex.c binhex.h crc.h
-$(BINDIR)/copyin.o: copyin.c libhfs/hfs.h ClassicHfsBytes.h ClassicHfsTime.h copyin.h binhex.h crc.h
-$(BINDIR)/copyout.o: copyout.c libhfs/hfs.h ClassicHfsBytes.h ClassicHfsTime.h copyout.h binhex.h \
+$(BINDIR)/copyin.o: copyin.c ClassicHfs.h ClassicHfsBytes.h ClassicHfsTime.h copyin.h binhex.h crc.h
+$(BINDIR)/copyout.o: copyout.c ClassicHfs.h ClassicHfsBytes.h ClassicHfsTime.h copyout.h binhex.h \
  crc.h
 $(BINDIR)/crc.o: crc.c crc.h
 $(BINDIR)/darray.o: darray.c darray.h
 $(BINDIR)/dlist.o: dlist.c dlist.h
 $(BINDIR)/dstring.o: dstring.c dstring.h
-$(BINDIR)/glob.o: glob.c dlist.h dstring.h libhfs/hfs.h glob.h
-$(BINDIR)/hattrib.o: hattrib.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hattrib.h
-$(BINDIR)/hcd.o: hcd.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hcd.h
-$(BINDIR)/hcopy.o: hcopy.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hcopy.h copyin.h \
+$(BINDIR)/glob.o: glob.c dlist.h dstring.h ClassicHfs.h glob.h
+$(BINDIR)/hattrib.o: hattrib.c ClassicHfs.h hcwd.h hfsutil.h glob.h hattrib.h
+$(BINDIR)/hcd.o: hcd.c ClassicHfs.h hcwd.h hfsutil.h glob.h hcd.h
+$(BINDIR)/hcopy.o: hcopy.c ClassicHfs.h hcwd.h hfsutil.h glob.h hcopy.h copyin.h \
  copyout.h
-$(BINDIR)/hcwd.o: hcwd.c libhfs/hfs.h hcwd.h
-$(BINDIR)/hdel.o: hdel.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hdel.h
-$(BINDIR)/hformat.o: hformat.c libhfs/hfs.h hcwd.h hfsutil.h suid.h hformat.h
-$(BINDIR)/hfsutil.o: hfsutil.c libhfs/hfs.h hcwd.h hfsutil.h suid.h version.h \
+$(BINDIR)/hcwd.o: hcwd.c ClassicHfs.h hcwd.h
+$(BINDIR)/hdel.o: hdel.c ClassicHfs.h hcwd.h hfsutil.h glob.h hdel.h
+$(BINDIR)/hformat.o: hformat.c ClassicHfs.h hcwd.h hfsutil.h suid.h hformat.h
+$(BINDIR)/hfsutil.o: hfsutil.c ClassicHfs.h hcwd.h hfsutil.h suid.h version.h \
  hattrib.h hcd.h hcopy.h hdel.h hformat.h hls.h hmkdir.h hmount.h \
  hpwd.h hrename.h hrmdir.h humount.h hvol.h
-$(BINDIR)/hls.o: hls.c libhfs/hfs.h hcwd.h hfsutil.h darray.h dlist.h dstring.h \
+$(BINDIR)/hls.o: hls.c ClassicHfs.h hcwd.h hfsutil.h darray.h dlist.h dstring.h \
  glob.h hls.h
-$(BINDIR)/hmkdir.o: hmkdir.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hmkdir.h
-$(BINDIR)/hmount.o: hmount.c libhfs/hfs.h hcwd.h hfsutil.h suid.h hmount.h
-$(BINDIR)/hpwd.o: hpwd.c libhfs/hfs.h hcwd.h hfsutil.h hpwd.h
-$(BINDIR)/hrename.o: hrename.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hrename.h
-$(BINDIR)/hrmdir.o: hrmdir.c libhfs/hfs.h hcwd.h hfsutil.h glob.h hrmdir.h
-$(BINDIR)/humount.o: humount.c libhfs/hfs.h hcwd.h hfsutil.h humount.h
-$(BINDIR)/hvol.o: hvol.c libhfs/hfs.h hcwd.h hfsutil.h hvol.h
+$(BINDIR)/hmkdir.o: hmkdir.c ClassicHfs.h hcwd.h hfsutil.h glob.h hmkdir.h
+$(BINDIR)/hmount.o: hmount.c ClassicHfs.h hcwd.h hfsutil.h suid.h hmount.h
+$(BINDIR)/hpwd.o: hpwd.c ClassicHfs.h hcwd.h hfsutil.h hpwd.h
+$(BINDIR)/hrename.o: hrename.c ClassicHfs.h hcwd.h hfsutil.h glob.h hrename.h
+$(BINDIR)/hrmdir.o: hrmdir.c ClassicHfs.h hcwd.h hfsutil.h glob.h hrmdir.h
+$(BINDIR)/humount.o: humount.c ClassicHfs.h hcwd.h hfsutil.h humount.h
+$(BINDIR)/hvol.o: hvol.c ClassicHfs.h hcwd.h hfsutil.h hvol.h
 $(BINDIR)/suid.o: suid.c suid.h

@@ -40,7 +40,7 @@
 #include "own_ids.h"
 #include "utils.h"
 #include <direct.h>
-#include "hfs\libhfs\hfs.h"
+#include "hfs\ClassicHfs.h"
 #include "hfs\interface.h"
 #include "AskDir.h"
 #include "HfsPlusDialogs.h"

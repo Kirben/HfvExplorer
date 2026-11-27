@@ -11,7 +11,7 @@
 #include "ReadOnlyCdBackend.h"
 #include "Filehook.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "floppy.h"
 }
 static void check(bool ok,const char* label) { if(!ok) { fprintf(stderr,"FAIL: %s (HFS: %s; errno %d)\n",label,hfs_error,errno); exit(1); } }

@@ -39,7 +39,7 @@
 # include <fcntl.h>
 # include <string.h>
 
-# include "libhfs\hfs.h"
+# include "ClassicHfs.h"
 #include "ClassicHfsTime.h"
 #include "ClassicHfsBytes.h"
 # include "copyout.h"

@@ -22,7 +22,7 @@
 # include <string.h>
 # include <fcntl.h>
 
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "glob.h"

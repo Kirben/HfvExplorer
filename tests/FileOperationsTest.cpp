@@ -20,7 +20,7 @@
 #include <atomic>
 #include <fcntl.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "hfs/interface.h"
 int do_delete_directory(hfsvol*,char*);
 }

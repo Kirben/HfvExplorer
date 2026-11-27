@@ -34,7 +34,7 @@
 #include "HFVExplorerView.h"
 #include "HFVCommandLineInfo.h"
 #include "floppy.h"
-#include "hfs\libhfs\hfs.h"
+#include "hfs\ClassicHfs.h"
 #include "hfs\interface.h"
 #include "special.h"
 #include "tmap.h"

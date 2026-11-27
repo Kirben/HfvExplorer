@@ -31,7 +31,7 @@
 # include <fcntl.h>
 # include <string.h>
 
-# include "libhfs\hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "suid.h"

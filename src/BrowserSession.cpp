@@ -12,7 +12,7 @@
 #include "charset.h"
 #include "FindFiles.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 #include <stdexcept>
 #include <algorithm>

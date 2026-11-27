@@ -2,7 +2,7 @@
 #pragma once
 #include "ClassicHfsCatalogRecord.h"
 #include "ClassicHfsTime.h"
-#include "libhfs/hfs.h"
+#include "ClassicHfs.h"
 
 static inline void ClassicHfsDescribeEntry(long parent, const char *name,
                                            const ClassicHfsCatalogRecord *record, hfsdirent *entry)

@@ -19,7 +19,7 @@
 
 # include <stdio.h>
 
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "hpwd.h"

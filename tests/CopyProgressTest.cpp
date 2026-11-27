@@ -24,7 +24,7 @@
 #include <winioctl.h>
 #include <stdexcept>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "hfs/interface.h"
 extern int hfv_replacement_fault;
 }

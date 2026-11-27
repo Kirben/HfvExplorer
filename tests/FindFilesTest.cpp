@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <stdexcept>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 extern bool ProbeFindOptionsDialog(CWnd*);
 extern bool ProbeFindResultsDialog(CWnd*,const FindResults&,bool);

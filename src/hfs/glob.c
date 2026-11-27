@@ -22,7 +22,7 @@
 
 # include "dlist.h"
 # include "dstring.h"
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "glob.h"
 # include "ClassicHfsNames.h"
 

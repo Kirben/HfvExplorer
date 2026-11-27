@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <fcntl.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "Filehook.h"
 }
 namespace {

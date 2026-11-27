@@ -9,7 +9,7 @@
 #include "ReadOnlyCdBackend.h"
 #include "floppy.h"
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 static void error(const char* action,DWORD code) {
  char* message=NULL;FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,NULL,code,0,(char*)&message,0,NULL);

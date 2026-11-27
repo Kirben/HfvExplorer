@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 // #ifndef HFS_CNID_ROOTPAR
-// #include "libhfs\hfs.h"
+// #include "ClassicHfs.h"
 // #endif
 
 typedef int (*HfvDirectoryCopyHook)(int action,hfsvol*,hfsvol*,const char*,const char*,void**,void*);

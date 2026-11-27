@@ -41,7 +41,7 @@ int getopt( int argc, char *argv[], char *str ) {return(0);}
 # include <fcntl.h>
 # include <errno.h>
 
-# include "libhfs\hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "glob.h"

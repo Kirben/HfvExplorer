@@ -8,7 +8,7 @@
 #include <string.h>
 #include <fcntl.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 const DWORD kImage=1474560,kTrack=18*512;

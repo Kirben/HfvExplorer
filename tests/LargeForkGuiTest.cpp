@@ -8,7 +8,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "hfs/copyin.h"
 }
 

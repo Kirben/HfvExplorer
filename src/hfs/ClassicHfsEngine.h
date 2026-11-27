@@ -21,7 +21,7 @@
 #include <stdlib.h>
 # include <time.h>
 
-# include "libhfs/hfs.h"
+# include "ClassicHfs.h"
 
 # define ERROR(code, str)	(hfs_error = (str), errno = (code))
 

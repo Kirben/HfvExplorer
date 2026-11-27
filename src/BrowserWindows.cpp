@@ -12,7 +12,7 @@
 #include "VolumeCoordinator.h"
 #include <algorithm>
 extern "C" {
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 #include "hfs/interface.h"
 }
 

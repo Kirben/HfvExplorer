@@ -18,7 +18,7 @@
 #include <cstdio>
 extern "C" {
 #include "hfs/macbinary.h"
-#include "hfs/libhfs/hfs.h"
+#include "hfs/ClassicHfs.h"
 }
 namespace {
 using namespace HfsPlus;

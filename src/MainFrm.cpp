@@ -56,7 +56,7 @@
 #include "HFVExplorer.h"
 #include "OptionsSheet.h"
 #include "utils.h"
-#include "hfs\libhfs\hfs.h"
+#include "hfs\ClassicHfs.h"
 #include "hfs\interface.h"
 #include "AskNewVolume.h"
 #include "AskVolumeToFloppy.h"

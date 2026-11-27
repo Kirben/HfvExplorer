@@ -22,7 +22,7 @@
 # include <stdio.h>
 # include <string.h>
 
-# include "hfs.h"
+# include "ClassicHfs.h"
 # include "hcwd.h"
 # include "hfsutil.h"
 # include "humount.h"
