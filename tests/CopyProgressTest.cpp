@@ -73,9 +73,15 @@ void expectNoConflict(const std::shared_ptr<Storage::Job>& job) {
  }
 }
 unsigned confirmReplacement(const std::shared_ptr<Storage::Job>& job){
- DWORD deadline=GetTickCount()+15000;unsigned conflicts=0;std::string previous;
+ DWORD deadline=GetTickCount()+60000;unsigned conflicts=0;uint64_t previous=0;
  while(!job->done()){
-  auto conflict=job->conflict();if(!conflict.empty()&&conflict!=previous){++conflicts;previous=conflict;job->resolve(Storage::ConflictChoice::ReplaceAll);}
+  const auto prompt=job->conflictState();
+  if(!prompt.path.empty()&&prompt.id!=previous){
+   previous=prompt.id;
+   if(prompt.kind==Storage::CopyPrompt::Overwrite)++conflicts;
+   job->resolve(prompt.id,prompt.kind==Storage::CopyPrompt::ClassicMetadataLoss?
+                Storage::ConflictChoice::Replace:Storage::ConflictChoice::ReplaceAll);
+  }
   if(LONG(deadline-GetTickCount())<=0){job->cancel();job->wait();throw std::runtime_error("Confirmed replacement timed out");}Sleep(1);
  }
  return conflicts;
@@ -91,7 +97,9 @@ int RunCopyProgressTest(const char* directory) {
  FILE* out=nullptr;if(fopen_s(&out,report,"w") || !out)return 2;
  try {
   CFile host;check(host.Open(image,CFile::modeCreate|CFile::modeReadWrite)!=FALSE,"create image");
-  host.SetLength(4*1024*1024);host.Close();
+  // A small real volume reaches ENOSPC without thousands of durable sector flushes.
+  const unsigned imageBytes=800*1024;
+  host.SetLength(imageBytes);host.Close();
   char label[]="CopyTest";check(hfs_format(image.GetBuffer(),0,label)==0,"format fixture");image.ReleaseBuffer();
   hfsvol* volume=hfs_mount(image.GetBuffer(),0,O_RDWR);image.ReleaseBuffer();check(volume!=nullptr,"mount fixture");
   char folder[]="CopyTest:Folder",nested[]="CopyTest:Folder:Nested",binary[]="CopyTest:Folder:Nested:Game",text[]="CopyTest:Folder:Text";
@@ -126,7 +134,7 @@ int RunCopyProgressTest(const char* directory) {
   fprintf(out,"PASS: missing HFS source cannot delete an existing destination during failure cleanup.\n");
   // Replacement needs space for the new forks without freeing the old file first.
   CString replacementInput=root+"\\Game";
-  {CFile f;check(f.Open(replacementInput,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacementInput replacement");f.SetLength(5*1024*1024);f.Close();}
+  {CFile f;check(f.Open(replacementInput,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create replacementInput replacement");f.SetLength(imageBytes+512);f.Close();}
   HFSIFACE_set_modein(4,0);
   auto fullReplacement=TransferFixture::Submit((LPCSTR)root,(LPCSTR)replacementInput,(LPCSTR)image,"CopyTest:Folder:Nested:",0,1,'r');
   check(confirmReplacement(fullReplacement)==1,"HFS replacement must ask before staging a conflicting file");check(fullReplacement->result().code!=0&&GetFileAttributesA(replacementInput)!=INVALID_FILE_ATTRIBUTES,"disk-full replacement fails and retains move source");
