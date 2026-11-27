@@ -67,6 +67,52 @@ static inline int ClassicHfsAppendExtent(const ClassicHfsExtent *current, unsign
     return ClassicHfsNewOverflowRecord;
 }
 
+// Plan a complete extent record before releasing any of its blocks.
+typedef struct {
+    ClassicHfsExtent kept[ClassicHfsExtentCount], released[ClassicHfsExtentCount];
+    unsigned next;
+} ClassicHfsTruncation;
+
+static inline int ClassicHfsPlanTruncation(const ClassicHfsExtent *record, unsigned start,
+                                          unsigned keep, unsigned oldEnd, unsigned volumeBlocks,
+                                          ClassicHfsTruncation *plan)
+{
+    ClassicHfsTruncation result = {0};
+    if (keep > oldEnd || oldEnd > volumeBlocks || start >= oldEnd)
+        return 0;
+    unsigned pos = start;
+    for (unsigned i = 0; i < ClassicHfsExtentCount; ++i) {
+        unsigned first = record[i].xdrStABN, length = record[i].xdrNumABlks;
+        if (!length) {
+            if (pos != oldEnd)
+                return 0;
+            continue;
+        }
+        if (first >= volumeBlocks || length > volumeBlocks - first || length > oldEnd - pos)
+            return 0;
+        for (unsigned j = 0; j < i; ++j) {
+            unsigned other = record[j].xdrStABN;
+            if (first < other + record[j].xdrNumABlks && other < first + length)
+                return 0;
+        }
+        unsigned retained = pos < keep ? keep - pos : 0;
+        if (retained > length)
+            retained = length;
+        if (retained) {
+            result.kept[i].xdrStABN = (uint16_t)first;
+            result.kept[i].xdrNumABlks = (uint16_t)retained;
+        }
+        if (retained < length) {
+            result.released[i].xdrStABN = (uint16_t)(first + retained);
+            result.released[i].xdrNumABlks = (uint16_t)(length - retained);
+        }
+        pos += length;
+    }
+    result.next = pos;
+    *plan = result;
+    return 1;
+}
+
 enum ClassicHfsExtentLocation {
     ClassicHfsInvalidExtent,
     ClassicHfsMappedBlock,

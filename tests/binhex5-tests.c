@@ -399,6 +399,17 @@ int main(int argc,char**argv){
        out[0].xdrStABN == 21, "reject allocation overlapping tail before publication");
  }
  {
+  ClassicHfsExtent record[3] = {{20,4},{7,3},{2,2}};
+  ClassicHfsTruncation plan;
+  must(ClassicHfsPlanTruncation(record, 5, 10, 14, 32, &plan) &&
+       plan.next == 14 && plan.kept[0].xdrNumABlks == 4 && plan.kept[1].xdrNumABlks == 1 &&
+       plan.released[1].xdrStABN == 8 && plan.released[1].xdrNumABlks == 2 &&
+       plan.released[2].xdrStABN == 2, "truncate within fragmented overflow extent");
+  record[2].xdrStABN = 9;
+  must(!ClassicHfsPlanTruncation(record, 5, 10, 14, 32, &plan) &&
+       plan.released[2].xdrStABN == 2, "reject overlap before publishing releases");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

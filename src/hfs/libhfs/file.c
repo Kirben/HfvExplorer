@@ -227,151 +227,60 @@ int f_trunc(hfsfile *file)
 {
   ExtDataRec *extrec;
   unsigned long *lglen, *pylen, alblksz, newpylen;
-  unsigned int dlen, start, end;
-  node n;
-  int i;
-
   f_getptrs(file, &lglen, &pylen, &extrec);
-
-  alblksz  = file->vol->mdb.drAlBlkSiz;
-  {
-    hfv_size_t rounded = ((hfv_size_t)*lglen + alblksz - 1) / alblksz * alblksz;
-    if (rounded > 0xffffffffULL) { ERROR(EFBIG, "classic HFS physical fork size limit"); return -1; }
-    newpylen = (unsigned long)rounded;
+  alblksz = file->vol->mdb.drAlBlkSiz;
+  if (!alblksz || *pylen % alblksz) {
+    ERROR(EIO, "invalid physical fork length");
+    return -1;
   }
-
-  if (newpylen > *pylen)
-    {
-      ERROR(EIO, "file size exceeds physical length");
-      return -1;
-    }
-  else if (newpylen == *pylen)
+  hfv_size_t rounded = ((hfv_size_t)*lglen + alblksz - 1) / alblksz * alblksz;
+  if (rounded > UINT32_MAX) {
+    ERROR(EFBIG, "classic HFS physical fork size limit");
+    return -1;
+  }
+  newpylen = (unsigned long)rounded;
+  if (newpylen > *pylen) {
+    ERROR(EIO, "file size exceeds physical length");
+    return -1;
+  }
+  if (newpylen == *pylen)
     return 0;
 
-  dlen  = (*pylen - newpylen) / alblksz;
+  unsigned oldEnd = *pylen / alblksz, keep = newpylen / alblksz;
+  unsigned start = file->fabn <= keep ? file->fabn : 0;
+  while (start < oldEnd) {
+    ExtDataRec current;
+    node n;
+    if (start) {
+      if (v_extsearch(file, start, &current, &n) <= 0)
+        return -1;
+    } else
+      memcpy(current, *extrec, sizeof(current));
 
-  start = file->fabn;
-  end   = newpylen / alblksz;
-
-  if (start >= end)
-    {
-      start = file->fabn = 0;
-      memcpy(file->ext, extrec, sizeof(ExtDataRec));
+    ClassicHfsTruncation plan;
+    if (!ClassicHfsPlanTruncation(current, start, keep, oldEnd,
+                                  file->vol->mdb.drNmAlBlks, &plan)) {
+      ERROR(EIO, "invalid classic HFS fork truncation extent");
+      return -1;
     }
-
-  n.nnum = 0;
-  i      = -1;
-
-  while (start < end)
-    {
-      for (i = 0; i < 3; ++i)
-	{
-	  unsigned int num;
-
-	  num    = file->ext[i].xdrNumABlks;
-	  start += num;
-
-	  if (start >= end)
-	    break;
-	  else if (num == 0)
-	    {
-	      ERROR(EIO, "empty file extent");
-	      return -1;
-	    }
-	}
-
-      if (start >= end)
-	break;
-
-      if (v_extsearch(file, start, &file->ext, &n) <= 0)
-	return -1;
-
-      file->fabn = start;
-    }
-
-  if (start > end)
-    {
-      ExtDescriptor blocks;
-
-      unsigned int release = start - end;
-      unsigned int kept = file->ext[i].xdrNumABlks - release;
-      unsigned int first = file->ext[i].xdrStABN + kept;
-      if (release > dlen || first > UINT16_MAX) {
-          ERROR(EIO, "invalid classic HFS fork tail");
+    if (plan.next > keep) {
+      for (unsigned i = 0; i < ClassicHfsExtentCount; ++i)
+        if (plan.released[i].xdrNumABlks && v_freeblocks(file->vol, &plan.released[i]) < 0)
           return -1;
-      }
-      blocks.xdrStABN = (uint16_t)first;
-      blocks.xdrNumABlks = (uint16_t)release;
-      if (v_freeblocks(file->vol, &blocks) < 0)
+      if (!start)
+        memcpy(*extrec, plan.kept, sizeof(plan.kept));
+      else if (plan.kept[0].xdrNumABlks) {
+        if (v_putextrec(&plan.kept, &n) < 0)
           return -1;
-      file->ext[i].xdrNumABlks = (uint16_t)kept;
-      dlen -= release;
+      } else if (bt_delete(&file->vol->ext, HFS_NODEREC(n, n.rnum)) < 0)
+        return -1;
     }
-
+    start = plan.next;
+  }
+  memcpy(file->ext, *extrec, sizeof(file->ext));
+  file->fabn = 0;
   *pylen = newpylen;
-
   file->flags |= HFS_UPDATE_CATREC;
-
-  do
-    {
-      while (dlen && ++i < 3)
-	{
-	  unsigned int num;
-
-	  num    = file->ext[i].xdrNumABlks;
-	  start += num;
-
-	  if (num == 0)
-	    {
-	      ERROR(EIO, "empty file extent");
-	      return -1;
-	    }
-	  else if (num > dlen)
-	    {
-	      ERROR(EIO, "file extents exceed physical size");
-	      return -1;
-	    }
-
-	  if (v_freeblocks(file->vol, &file->ext[i]) < 0)
-	    return -1;
-	  dlen -= num;
-
-	  file->ext[i].xdrStABN    = 0;
-	  file->ext[i].xdrNumABlks = 0;
-	}
-
-      if (file->fabn)
-	{
-	  if (n.nnum == 0 &&
-	      v_extsearch(file, file->fabn, 0, &n) <= 0)
-	    return -1;
-
-	  if (file->ext[0].xdrNumABlks)
-	    {
-	      if (v_putextrec(&file->ext, &n) < 0)
-		return -1;
-	    }
-	  else
-	    {
-	      if (bt_delete(&file->vol->ext, HFS_NODEREC(n, n.rnum)) < 0)
-		return -1;
-
-	      n.nnum = 0;
-	    }
-	}
-      else
-	memcpy(extrec, file->ext, sizeof(ExtDataRec));
-
-      if (dlen)
-	{
-	  if (v_extsearch(file, start, &file->ext, &n) <= 0)
-	    return -1;
-
-	  file->fabn = start;
-	  i = -1;
-	}
-    }
-  while (dlen);
 
   return 0;
 }
