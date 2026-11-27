@@ -166,7 +166,39 @@ static void verify_repeated_tree_map(char *image)
          && fclose(f) == 0, "restore disposable test image");
 }
 
+#include "hfs/ClassicHfsSectorUndo.h"
+typedef struct { unsigned writes, reads, syncs; } UndoTrace;
+static int undo_test_write(void *context, unsigned long sector, unsigned char (*bytes)[512])
+{
+    UndoTrace *trace = context;
+    must(sector == 3 - trace->writes && (*bytes)[0] == sector, "reverse undo order and original bytes");
+    ++trace->writes;
+    return sector == 2 ? -1 : 0;
+}
+static int undo_test_read(void *context, unsigned long sector, unsigned char (*bytes)[512])
+{
+    ++((UndoTrace *)context)->reads;
+    memset(*bytes, 0, 512);
+    (*bytes)[0] = (unsigned char)sector;
+    return 0;
+}
+static int undo_test_sync(void *context)
+{
+    ++((UndoTrace *)context)->syncs;
+    return 0;
+}
+
 int main(int argc,char**argv){
+    {
+        ClassicHfsUndoRecord records[3] = {0};
+        UndoTrace trace = {0};
+        for (unsigned i = 0; i < 3; ++i)
+            records[i].before[0] = (unsigned char)(records[i].sector = i + 1);
+        must(ClassicHfsRestoreSectors(records, 0, &trace, undo_test_write, undo_test_read, undo_test_sync) == 0 &&
+             !trace.syncs, "empty rollback leaves storage untouched");
+        must(ClassicHfsRestoreSectors(records, 3, &trace, undo_test_write, undo_test_read, undo_test_sync) < 0 &&
+             trace.writes == 3 && trace.reads == 2 && trace.syncs == 1, "undo continues and syncs after failed restoration");
+    }
     {
         ClassicHfsCache *cache = NULL;
         CacheWriteLog log = {0};
