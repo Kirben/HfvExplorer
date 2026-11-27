@@ -17,10 +17,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-void n_init(node *, btree *, int, int);
-
-int n_new(node *);
-#include "../ClassicHfsFreeTreeNode.h"
+#include "../ClassicHfsTreeNodes.h"
 
 
 int n_index(node *, unsigned char *, int *);

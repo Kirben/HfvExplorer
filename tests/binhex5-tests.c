@@ -160,6 +160,23 @@ static void verify_repeated_tree_map(char *image)
 
 int main(int argc,char**argv){
     {
+        char map = (char)0xc0;
+        btree tree = {0};
+        node cursor;
+        tree.map = &map;
+        tree.mapsz = 1;
+        tree.hdr.bthNNodes = 2;
+        tree.hdr.bthFree = 1;
+        ClassicHfsInitTreeNode(&cursor, &tree, ndLeafNode, 1);
+        must(ClassicHfsAllocateTreeNode(&cursor) < 0 && cursor.nnum == UINT32_MAX &&
+             tree.hdr.bthFree == 1 && !tree.flags && (unsigned char)map == 0xc0,
+             "failed allocation preserves tree bitmap, counters and unassigned cursor");
+        map = (char)0x80;
+        must(ClassicHfsAllocateTreeNode(&cursor) == 0 && cursor.nnum == 1 &&
+             ClassicHfsAllocateTreeNode(&cursor) < 0 && !tree.hdr.bthFree &&
+             (unsigned char)map == 0xc0, "claim a tree node only once per cursor");
+    }
+    {
         node cursor = {0};
         unsigned char record[] = {1, 2};
         int length = sizeof(record);

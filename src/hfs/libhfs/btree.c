@@ -192,12 +192,12 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
     }
     node root;
     if (!state) {
-        n_init(&root, tree, ndLeafNode, 1);
+        ClassicHfsInitTreeNode(&root, tree, ndLeafNode, 1);
         if (!ClassicHfsInsertNodeRecord(root.data, root.roff, &root.nd.ndNRecs, 0, input, length)) {
             ERROR(EIO, "classic HFS record exceeds leaf capacity");
             return -1;
         }
-        if (n_new(&root) < 0 || bt_putnode(&root) < 0)
+        if (ClassicHfsAllocateTreeNode(&root) < 0 || bt_putnode(&root) < 0)
             return -1;
         tree->hdr.bthDepth = 1;
         tree->hdr.bthRoot = tree->hdr.bthFNode = tree->hdr.bthLNode = root.nnum;
@@ -218,13 +218,13 @@ int ClassicHfsInsertTreeRecord(btree *tree, const unsigned char *input, int leng
                 return -1;
             }
             node parent;
-            n_init(&parent, tree, ndIndxNode, tree->hdr.bthDepth + 1);
+            ClassicHfsInitTreeNode(&parent, tree, ndIndxNode, tree->hdr.bthDepth + 1);
             if (!ClassicHfsInsertNodeRecord(parent.data, parent.roff, &parent.nd.ndNRecs, 0, left, leftLength) ||
                 !ClassicHfsInsertNodeRecord(parent.data, parent.roff, &parent.nd.ndNRecs, 1, record, length)) {
                 ERROR(EIO, "classic HFS root separators exceed node capacity");
                 return -1;
             }
-            if (n_new(&parent) < 0 || bt_putnode(&parent) < 0)
+            if (ClassicHfsAllocateTreeNode(&parent) < 0 || bt_putnode(&parent) < 0)
                 return -1;
             tree->hdr.bthRoot = parent.nnum;
             ++tree->hdr.bthDepth;

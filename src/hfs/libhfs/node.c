@@ -27,49 +27,6 @@
 # include "node.h"
 
 /*
- * NAME:	node->init()
- * DESCRIPTION:	construct an empty node
- */
-void n_init(node *np, btree *bt, int type, int height)
-{
-  np->bt   = bt;
-  np->nnum = -1;
-
-  np->nd.ndFLink   = 0;
-  np->nd.ndBLink   = 0;
-  np->nd.ndType    = type;
-  np->nd.ndNHeight = height;
-  np->nd.ndNRecs   = 0;
-  np->nd.ndResv2   = 0;
-
-  np->rnum    = -1;
-  np->roff[0] = 0x00e;
-
-  memset(np->data, 0, sizeof(np->data));
-}
-
-/*
- * NAME:	node->new()
- * DESCRIPTION:	allocate a new b*-tree node
- */
-int n_new(node *np)
-{
-  btree *bt = np->bt;
-  uint32_t num = ClassicHfsClaimTreeNode(bt->map, bt->mapsz, bt->hdr.bthNNodes,
-                                         bt->hdr.bthFree);
-  if (!num) {
-    ERROR(EIO, "no usable free node in classic HFS B-tree bitmap");
-    return -1;
-  }
-  np->nnum = num;
-  --bt->hdr.bthFree;
-
-  bt->flags |= HFS_UPDATE_BTHDR;
-
-  return 0;
-}
-
-/*
  * NAME:	node->index()
  * DESCRIPTION:	create an index record from a key and node pointer
  */
@@ -126,7 +83,8 @@ int ClassicHfsInsertAtCursor(node *cursor, unsigned char *record, int *length)
         ERROR(EIO, "invalid classic HFS insertion slot or split layout");
         return -1;
     }
-    if (n_new(&right) < 0)
+    right.nnum = UINT32_MAX;
+    if (ClassicHfsAllocateTreeNode(&right) < 0)
         return -1;
     node next;
     unsigned char separator[HFS_MAXRECLEN];

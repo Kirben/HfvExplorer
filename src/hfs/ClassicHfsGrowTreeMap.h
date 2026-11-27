@@ -47,8 +47,8 @@ static inline int ClassicHfsGrowTreeMap(btree *tree)
         tree->map = expanded;
         tree->mapsz += HFS_MAPXSZ;
         node added;
-        n_init(&added, tree, ndMapNode, 0);
-        if (n_new(&added) < 0)
+        ClassicHfsInitTreeNode(&added, tree, ndMapNode, 0);
+        if (ClassicHfsAllocateTreeNode(&added) < 0)
             return -1;
         added.nd.ndNRecs = 1;
         added.roff[1] = 14 + HFS_MAPXSZ;
