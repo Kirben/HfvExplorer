@@ -29,6 +29,14 @@ static void save(const char* path,const unsigned char* bytes,unsigned size){HAND
 static unsigned char* load(const char* path,unsigned* size){FILE*f=fopen(path,"rb");unsigned char*b;must(f!=NULL,"open export");fseek(f,0,SEEK_END);*size=(unsigned)ftell(f);rewind(f);b=malloc(*size);must(b!=NULL&&fread(b,1,*size,f)==*size,"read export");fclose(f);return b;}
 static unsigned char value(unsigned i,unsigned fork){return (unsigned char)((i*37)^(i>>3)^(fork*91));}
 static void verify(hfsvol*v,char*name,unsigned d,unsigned r){hfsfile*f=hfs_open(v,name);unsigned fork;unsigned char b[5000];must(f!=NULL,"open imported forks");for(fork=0;fork<2;fork++){unsigned n=fork?r:d,i;must(hfs_setfork(f,fork)==0,"choose fork");must(hfs_read(f,b,n)==n,"read imported fork");for(i=0;i<n;i++)must(b[i]==value(i,fork),"fork byte fidelity");must(hfs_read(f,b,1)==0,"fork EOF");}must(hfs_close(f)==0,"close imported forks");}
+static int load_test_fork_record(void *context, unsigned first, ClassicHfsExtent (*record)[3])
+{
+ unsigned *calls = context;
+ ++*calls;
+ ClassicHfsExtent next[3] = {{20,1},{22,1},{24,1}};
+ memcpy(*record, next, sizeof(next));
+ return first == 3;
+}
 static int count_node_transfers(void *context, uint32_t number, unsigned char (*bytes)[512])
 {
  ++*(int *)context;
@@ -289,6 +297,20 @@ int main(int argc,char**argv){
   must(ClassicHfsTransferNode(0, 0, NULL, 0, &bytes, &descriptor, offsets, 0,
        count_node_transfers, &calls) == ClassicHfsNodeOk && calls == 1,
        "read header before installing bitmap");
+ }
+ {
+  ClassicHfsExtent initial[3] = {{10,1},{12,1},{14,1}}, cached[3];
+  unsigned start = 0, calls = 0, physical = 0, sector = 0;
+  memcpy(cached, initial, sizeof(initial));
+  must(ClassicHfsResolveForkSector(9, 2, 32, initial, cached, &start, load_test_fork_record,
+       &calls, &physical, &sector) == 1 && physical == 22 && sector == 1 && start == 3 &&
+       calls == 1, "map through overflow to sector within allocation block");
+  must(ClassicHfsResolveForkSector(12, 2, 32, initial, cached, &start, load_test_fork_record,
+       &calls, &physical, &sector) == 0 && start == 3 && physical == 22 && sector == 1,
+       "failed overflow lookup leaves address unpublished");
+  must(ClassicHfsResolveForkSector(0, 2, 32, initial, cached, &start, load_test_fork_record,
+       &calls, &physical, &sector) == 1 && physical == 10 && start == 0 && calls == 2,
+       "backward seek restores inline extent cache");
  }
  {
   unsigned char source[106], output[107];

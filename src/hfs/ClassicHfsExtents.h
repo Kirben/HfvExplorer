@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ClassicHfsExtentKey.h"
+#include <string.h>
 
 typedef struct {
     uint16_t xdrStABN;
@@ -56,6 +57,42 @@ static inline enum ClassicHfsExtentLocation ClassicHfsLocateBlock(
     }
     *location = base;
     return ClassicHfsNextExtentRecord;
+}
+
+typedef int (*ClassicHfsLoadExtentRecord)(void *, unsigned, ClassicHfsExtent (*)[ClassicHfsExtentCount]);
+
+// Keep each successfully resolved overflow record available to nested reads
+// of the extents tree itself. A failed lookup must never publish its output.
+static inline int ClassicHfsResolveForkSector(uint32_t number, unsigned sectorsPerBlock,
+                                             unsigned volumeBlocks, const ClassicHfsExtent *initial,
+                                             ClassicHfsExtent *cached, unsigned *cacheStart,
+                                             ClassicHfsLoadExtentRecord load, void *context,
+                                             unsigned *physical, unsigned *sector)
+{
+    if (!sectorsPerBlock || number / sectorsPerBlock >= volumeBlocks)
+        return -1;
+    unsigned logical = number / sectorsPerBlock;
+    if (logical < *cacheStart) {
+        memcpy(cached, initial, ClassicHfsExtentCount * sizeof(*cached));
+        *cacheStart = 0;
+    }
+    for (;;) {
+        unsigned location;
+        enum ClassicHfsExtentLocation result =
+            ClassicHfsLocateBlock(cached, volumeBlocks, *cacheStart, logical, &location);
+        if (result == ClassicHfsMappedBlock) {
+            *physical = location;
+            *sector = number % sectorsPerBlock;
+            return 1;
+        }
+        if (result != ClassicHfsNextExtentRecord)
+            return -1;
+        ClassicHfsExtent next[ClassicHfsExtentCount];
+        if (load(context, location, &next) <= 0)
+            return 0;
+        memcpy(cached, next, sizeof(next));
+        *cacheStart = location;
+    }
 }
 
 static inline int ClassicHfsValidExtentRecord(const unsigned char *record, int size)

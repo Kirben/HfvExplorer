@@ -79,37 +79,22 @@ void f_getptrs(hfsfile *file, unsigned long **lglen,
  * NAME:	file->doblock()
  * DESCRIPTION:	read or write a numbered block from a file
  */
+static int load_fork_extents(void *context, unsigned first, ExtDataRec *record)
+{
+  return v_extsearch((hfsfile *)context, first, record, 0);
+}
+
 int f_doblock(hfsfile *file, unsigned long num, block *bp,
 	       int (*func)(hfsvol *, unsigned int, unsigned int, block *))
 {
-  if (file->vol->lpa == 0) {
-      ERROR(EIO, "invalid classic HFS allocation block size");
-      return -1;
-  }
-  unsigned logical = num / file->vol->lpa;
-  unsigned sector = num % file->vol->lpa;
-  if (logical < file->fabn) {
-      ExtDataRec *inlineExtents;
-      f_getptrs(file, 0, 0, &inlineExtents);
-      memcpy(file->ext, inlineExtents, sizeof(file->ext));
-      file->fabn = 0;
-  }
-  for (;;) {
-      unsigned location;
-      switch (ClassicHfsLocateBlock(file->ext, file->vol->mdb.drNmAlBlks,
-                                    file->fabn, logical, &location)) {
-      case ClassicHfsMappedBlock:
-          return func(file->vol, location, sector, bp);
-      case ClassicHfsNextExtentRecord:
-          if (v_extsearch(file, location, &file->ext, 0) <= 0)
-              return -1;
-          file->fabn = location;
-          break;
-      default:
-          ERROR(EIO, "invalid classic HFS fork extent");
-          return -1;
-      }
-  }
+  ExtDataRec *initial;
+  unsigned physical, sector;
+  f_getptrs(file, 0, 0, &initial);
+  int mapped = ClassicHfsResolveForkSector(num, file->vol->lpa, file->vol->mdb.drNmAlBlks,
+      *initial, file->ext, &file->fabn, load_fork_extents, file, &physical, &sector);
+  if (mapped < 0)
+    { ERROR(EIO, "invalid classic HFS fork extent or sector"); }
+  return mapped > 0 ? func(file->vol, physical, sector, bp) : -1;
 }
 
 /*
