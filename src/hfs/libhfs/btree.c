@@ -416,7 +416,8 @@ static int bt_insertx(node *np, unsigned height, unsigned char *record, int *rec
 
       if (np->rnum < 0)
 	{
-	  n_index(np->bt, HFS_NODEREC(child, 0), child.nnum, rec, 0);
+	  if (n_index(&child, rec, 0) < 0)
+	    return -1;
 	  np->rnum = 0; /* the split separator follows the updated first child */
 	  if (*reclen == 0)
 	    return bt_putnode(np);
@@ -476,7 +477,8 @@ int bt_insert(btree *bt, unsigned char *record, int reclen)
 
       /* root node was split; create a new root */
 
-      n_index(bt, HFS_NODEREC(root, 0), root.nnum, oroot, &orootlen);
+      if (n_index(&root, oroot, &orootlen) < 0)
+        return -1;
 
       n_init(&root, bt, ndIndxNode, root.nd.ndNHeight + 1);
       if (n_new(&root) < 0)
@@ -551,7 +553,8 @@ static int bt_deletex(node *np, unsigned height, unsigned char *key, unsigned ch
 
 	  if (np->rnum == 0)
 	    {
-	      n_index(np->bt, HFS_NODEREC(*np, 0), np->nnum, record, 0);
+	      if (n_index(np, record, 0) < 0)
+	        return -1;
 	      *flag = 1;
 	    }
 

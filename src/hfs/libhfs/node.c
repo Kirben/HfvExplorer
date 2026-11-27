@@ -116,24 +116,18 @@ int n_search(node *np, unsigned char *key)
  * NAME:	node->index()
  * DESCRIPTION:	create an index record from a key and node pointer
  */
-void n_index(btree *bt, unsigned char *key, unsigned long nnum,
-	     unsigned char *record, int *reclen)
+int n_index(node *child, unsigned char *record, int *reclen)
 {
-  if (bt == &bt->f.vol->cat)
-    {
-      /* force the key length to be 0x25 */
-
-      HFS_RECKEYLEN(record) = 0x25;
-      memset(record + 1, 0, 0x25);
-      memcpy(record + 1, key + 1, HFS_RECKEYLEN(key));
-    }
-  else
-    memcpy(record, key, HFS_RECKEYSKIP(key));
-
-  ClassicHfsWrite32(HFS_RECDATA(record), nnum);
-
+  int catalog = child->bt == &child->bt->f.vol->cat;
+  int size = child->nd.ndNRecs ? ClassicHfsWriteIndexRecord(record, catalog ? 42 : 12,
+      HFS_NODEREC(*child, 0), child->roff[1] - child->roff[0], catalog, child->nnum) : 0;
+  if (!size) {
+    ERROR(EIO, "invalid classic HFS separator key");
+    return -1;
+  }
   if (reclen)
-    *reclen = HFS_RECKEYSKIP(record) + 4;
+    *reclen = size;
+  return 0;
 }
 
 /*
@@ -188,7 +182,8 @@ int n_split(node *left, unsigned char *record, int *reclen)
 
   /* create an index record for the new node in the parent */
 
-  n_index(right.bt, HFS_NODEREC(right, 0), right.nnum, record, reclen);
+  if (n_index(&right, record, reclen) < 0)
+    return -1;
 
   /* update link pointers */
 
@@ -332,11 +327,12 @@ int n_delete(node *np, unsigned char *record, int *flag)
         return finish_merge(np, &left, record, flag);
     }
 
-  if (np->rnum == 0)
+  if (np->rnum == 0 && np->nd.ndNRecs)
     {
       /* special case: first record changed; update parent record key */
 
-      n_index(np->bt, HFS_NODEREC(*np, 0), np->nnum, record, 0);
+      if (n_index(np, record, 0) < 0)
+        return -1;
       *flag = 1;
     }
 

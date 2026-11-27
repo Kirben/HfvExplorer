@@ -24,7 +24,7 @@ int n_free(node *);
 
 int n_search(node *, unsigned char *);
 
-void n_index(btree *, unsigned char *, unsigned long, unsigned char *, int *);
+int n_index(node *, unsigned char *, int *);
 int n_split(node *, unsigned char *, int *);
 
 int n_insertx(node *, unsigned char *, int);

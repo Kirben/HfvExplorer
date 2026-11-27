@@ -237,6 +237,21 @@ int main(int argc,char**argv){
        "delete below first separator stops without selecting a child");
  }
  {
+  unsigned char buffer[48] = {0};
+  unsigned char *key = buffer + 2;
+  key[0] = 7; key[5] = 9; key[6] = 1; key[7] = 'Z';
+  must(!ClassicHfsWriteIndexRecord(buffer, 41, key, 8, 1, 4) &&
+       !ClassicHfsWriteIndexRecord(buffer, 42, key, 7, 1, 4) && key[7] == 'Z',
+       "reject short separator source and destination before encoding");
+  must(ClassicHfsWriteIndexRecord(buffer, 42, key, 8, 1, 4) == 42 &&
+       buffer[0] == 37 && buffer[5] == 9 && buffer[7] == 'Z' &&
+       buffer[8] == 0 && ClassicHfsRead32(buffer + 38) == 4,
+       "encode overlapping catalog separator with fixed padding");
+  buffer[0] = 7;
+  must(ClassicHfsWriteIndexRecord(buffer, 12, buffer, 8, 0, 8) == 12 &&
+       ClassicHfsRead32(buffer + 8) == 8, "encode extent separator in place");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

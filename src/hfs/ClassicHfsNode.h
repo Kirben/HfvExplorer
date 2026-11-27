@@ -126,6 +126,26 @@ static inline int ClassicHfsSearchNode(unsigned char *bytes, const uint16_t *off
 
 typedef enum { ClassicHfsLookup, ClassicHfsInsert, ClassicHfsDelete } ClassicHfsSearchPurpose;
 
+// Index keys occupy fixed-width slots. Validate the source record before
+// publishing the padded separator and its big-endian child pointer.
+static inline int ClassicHfsWriteIndexRecord(unsigned char *out, unsigned capacity,
+                                            const unsigned char *key, unsigned available,
+                                            int catalog, uint32_t child)
+{
+    unsigned width = catalog ? 38 : 8;
+    if (!available || !child || capacity < width + 4)
+        return 0;
+    unsigned length = key[0];
+    if (length >= available ||
+        (catalog ? (length < 6 || length > 37 || key[6] > length - 6) : length != 7))
+        return 0;
+    memmove(out + 1, key + 1, length);
+    out[0] = (unsigned char)(width - 1);
+    memset(out + 1 + length, 0, width - 1 - length);
+    ClassicHfsWrite32(out + width, child);
+    return (int)(width + 4);
+}
+
 enum { ClassicHfsInvalidSearch = -1, ClassicHfsMissingKey, ClassicHfsFoundKey, ClassicHfsVisitChild };
 
 // Decide one level of a root-to-leaf lookup on a decoded node. The caller
@@ -154,7 +174,7 @@ static inline int ClassicHfsLookupLevel(unsigned char *bytes, const ClassicHfsNo
             return ClassicHfsInvalidSearch;
     }
     int exact = ClassicHfsSearchNode(bytes, offsets, node->ndNRecs, key, compare, slot);
-    if (height == 1 || (exact && purpose == ClassicHfsInsert) ||
+    if (height == 1 ||
         (*slot < 0 && purpose != ClassicHfsInsert))
         return exact ? ClassicHfsFoundKey : ClassicHfsMissingKey;
     if (!node->ndNRecs)
