@@ -11,6 +11,7 @@
 #include "hfs/ClassicHfsCatalogKey.h"
 #include "hfs/ClassicHfsExtents.h"
 #include "hfs/ClassicHfsNode.h"
+#include "hfs/ClassicHfsBitmap.h"
 #include "hfs/ClassicHfsTreeHeader.h"
 #include "hfs/ClassicHfsTime.h"
 #include "hfs/copyin.h"
@@ -144,6 +145,25 @@ int main(int argc,char**argv){
   must(!ClassicHfsEncodeTreeHeader(output, 105, &header) && output[0] == 0x55 &&
        ClassicHfsEncodeTreeHeader(output, 106, &header) && !memcmp(output, source, 106) &&
        output[106] == 0x55, "preserve tree header reserved bytes and following record");
+ }
+ {
+  unsigned char bytes[2] = {0};
+  ClassicHfsSetBit(bytes, 0); ClassicHfsSetBit(bytes, 7); ClassicHfsSetBit(bytes, 8);
+  ClassicHfsClearBit(bytes, 7);
+  must(bytes[0] == 0x80 && bytes[1] == 0x80, "most significant allocation bit first");
+  for (unsigned mask = 0; mask < 256; ++mask) {
+   bytes[0] = (unsigned char)mask;
+   for (unsigned hint = 0; hint <= 8; ++hint) for (unsigned request = 1; request <= 9; ++request) {
+    unsigned best = 0, expected = 99, actual = 99;
+    for (unsigned step = 0; step < 8; ++step) {
+     unsigned start = (hint + step) % 8, run = 0;
+     while (start + run < 8 && run < request && !(mask & (128u >> (start + run)))) ++run;
+     if (run > best) { best = run; expected = start; }
+    }
+    must(ClassicHfsFindFreeRun(bytes, 8, hint, request, &actual) == best && actual == expected,
+         "allocation hint, partial extent and wraparound");
+   }
+  }
  }
  must(argc==2&&strlen(argv[1])<900,"test directory argument");must(CreateDirectoryA(argv[1],NULL),"exclusive test directory");
  sprintf(image,"%s\\binhex5.dsk",argv[1]);sprintf(path,"%s\\roundtrip.bin",argv[1]);sprintf(badpath,"%s\\bad.bin",argv[1]);

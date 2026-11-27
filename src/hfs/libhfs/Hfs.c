@@ -807,7 +807,7 @@ int hfs_format(char *path, int pnum, char *vname)
   else
     {
       memset(map, 0, HFS_MAP1SZ);
-      BMSET(map, 0);
+      ClassicHfsSetBit(map, 0);
     }
 
   ext->map     = map;
@@ -894,7 +894,7 @@ int hfs_format(char *path, int pnum, char *vname)
   else
     {
       memset(map, 0, HFS_MAP1SZ);
-      BMSET(map, 0);
+      ClassicHfsSetBit(map, 0);
     }
 
   cat->map     = map;

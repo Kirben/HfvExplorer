@@ -33,12 +33,7 @@
 # define REALLOCX(ptr, type, n)  \
     ((n) ? REALLOC(type, n) : (FREE(ptr), (type *) 0))
 
-# define BMTST(bm, num)  \
-  (((char *) (bm))[(num) >> 3] & (0x80 >> ((num) & 0x07)))
-# define BMSET(bm, num)  \
-  (((char *) (bm))[(num) >> 3] |= (0x80 >> ((num) & 0x07)))
-# define BMCLR(bm, num)  \
-  (((char *) (bm))[(num) >> 3] &= ~(0x80 >> ((num) & 0x07)))
+#include "../ClassicHfsBitmap.h"
 
 typedef unsigned char block[HFS_BLOCKSZ];
 

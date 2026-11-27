@@ -220,9 +220,8 @@ int v_putextrec(ExtDataRec *data, node *np)
  */
 int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
 {
-  unsigned int request, found, foundat, start, end, pt;
+  unsigned int found, foundat, pt;
   block *vbm;
-  int wrap = 0;
 
   if (vol->mdb.drFreeBks == 0)
     {
@@ -230,50 +229,9 @@ int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
       return -1;
     }
 
-  request = blocks->xdrNumABlks;
-  found   = 0;
-  foundat = 0;
-  start   = vol->mdb.drAllocPtr;
-  end     = vol->mdb.drNmAlBlks;
-  pt      = start;
-  vbm     = vol->vbm;
-
-# ifdef DEBUG
-  if (request == 0)
-    abort();
-# endif
-
-  while (1)
-    {
-      unsigned int mark;
-
-      /* skip blocks in use */
-
-      while (pt < end && BMTST(vbm, pt))
-	++pt;
-
-      if (wrap && pt >= start)
-	break;
-
-      /* count blocks not in use */
-
-      mark = pt;
-      while (pt < end && pt - mark < request && ! BMTST(vbm, pt))
-	++pt;
-
-      if (pt - mark > found)
-	{
-	  found   = pt - mark;
-	  foundat = mark;
-	}
-
-      if (pt == end)
-	pt = 0, wrap = 1;
-
-      if (found == request)
-	break;
-    }
-
+  vbm = vol->vbm;
+  found = ClassicHfsFindFreeRun(vbm, vol->mdb.drNmAlBlks, vol->mdb.drAllocPtr,
+                                blocks->xdrNumABlks, &foundat);
   if (found == 0 || found > vol->mdb.drFreeBks)
     {
       ERROR(EIO, "bad volume bitmap or free block count");
@@ -283,11 +241,11 @@ int v_allocblocks(hfsvol *vol, ExtDescriptor *blocks)
   blocks->xdrStABN    = foundat;
   blocks->xdrNumABlks = found;
 
-  vol->mdb.drAllocPtr = pt;
+  vol->mdb.drAllocPtr = foundat + found == vol->mdb.drNmAlBlks ? 0 : foundat + found;
   vol->mdb.drFreeBks -= found;
 
   for (pt = foundat; pt < foundat + found; ++pt)
-    BMSET(vbm, pt);
+    ClassicHfsSetBit(vbm, pt);
 
   vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
 
@@ -310,7 +268,7 @@ void v_freeblocks(hfsvol *vol, ExtDescriptor *blocks)
   vol->mdb.drFreeBks += len;
 
   for (pt = start; pt < start + len; ++pt)
-    BMCLR(vbm, pt);
+    ClassicHfsClearBit(vbm, pt);
 
   vol->flags |= HFS_UPDATE_MDB | HFS_UPDATE_VBM;
 }
@@ -678,7 +636,7 @@ static int markexts(hfsvol *vol, const ExtDataRec *extents)
       unsigned int count = (*extents)[i].xdrNumABlks;
       unsigned int index;
       for (index = start; index < start + count; ++index)
-        BMSET(vol->vbm, index);
+        ClassicHfsSetBit(vol->vbm, index);
     }
   return 0;
 }
@@ -778,7 +736,7 @@ int v_scavenge(hfsvol *vol)
 
   vol->flags |= HFS_UPDATE_VBM;
   for (blks = 0, pt = vol->mdb.drNmAlBlks; pt--; )
-    if (! BMTST(vol->vbm, pt))
+    if (! ClassicHfsBitIsSet(vol->vbm, pt))
       ++blks;
 
   if (vol->mdb.drFreeBks != blks)

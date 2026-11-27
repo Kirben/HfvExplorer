@@ -67,7 +67,7 @@ int n_new(node *np)
     }
 
   num = 0;
-  while (num < bt->hdr.bthNNodes && BMTST(bt->map, num))
+  while (num < bt->hdr.bthNNodes && ClassicHfsBitIsSet(bt->map, num))
     ++num;
 
   if (num == bt->hdr.bthNNodes)
@@ -78,7 +78,7 @@ int n_new(node *np)
 
   np->nnum = num;
 
-  BMSET(bt->map, num);
+  ClassicHfsSetBit(bt->map, num);
   --bt->hdr.bthFree;
 
   bt->flags |= HFS_UPDATE_BTHDR;
@@ -94,7 +94,7 @@ void n_free(node *np)
 {
   btree *bt = np->bt;
 
-  BMCLR(bt->map, np->nnum);
+  ClassicHfsClearBit(bt->map, np->nnum);
   ++bt->hdr.bthFree;
 
   bt->flags |= HFS_UPDATE_BTHDR;

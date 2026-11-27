@@ -45,7 +45,7 @@ int bt_getnode(node *np)
       return -1;
     }
 
-  if (bt->map && ! BMTST(bt->map, np->nnum))
+  if (bt->map && ! ClassicHfsBitIsSet(bt->map, np->nnum))
     {
       ERROR(EIO, "read unallocated b*-tree node");
       return -1;
@@ -78,7 +78,7 @@ int bt_putnode(node *np)
       ERROR(EIO, "write nonexistent b*-tree node");
       return -1;
     }
-  else if (bt->map && ! BMTST(bt->map, np->nnum))
+  else if (bt->map && ! ClassicHfsBitIsSet(bt->map, np->nnum))
     {
       ERROR(EIO, "write unallocated b*-tree node");
       return -1;

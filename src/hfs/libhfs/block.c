@@ -678,7 +678,7 @@ int b_readab(hfsvol *vol,
       ERROR(EIO, "read nonexistent block");
       return -1;
     }
-  else if (vol->vbm && ! BMTST(vol->vbm, anum))
+  else if (vol->vbm && ! ClassicHfsBitIsSet(vol->vbm, anum))
     {
       ERROR(EIO, "read unallocated block");
       return -1;
@@ -701,7 +701,7 @@ int b_writeab(hfsvol *vol,
       ERROR(EIO, "write nonexistent block");
       return -1;
     }
-  else if (vol->vbm && ! BMTST(vol->vbm, anum))
+  else if (vol->vbm && ! ClassicHfsBitIsSet(vol->vbm, anum))
     {
       ERROR(EIO, "write unallocated block");
       return -1;
