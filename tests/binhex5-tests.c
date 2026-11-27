@@ -135,6 +135,20 @@ int main(int argc,char**argv){
        "reject overlap with offset table before modifying node");
  }
  {
+  unsigned char bytes[512] = {0};
+  uint16_t offsets[] = {14, 16, 18, 24}, count = 3;
+  memcpy(bytes + 18, "abcdef", 6);
+  offsets[2] = 17;
+  must(!ClassicHfsCompactNode(bytes, offsets, &count) && count == 3 &&
+       offsets[1] == 16 && !memcmp(bytes + 18, "abcdef", 6), "reject malformed compaction");
+  offsets[2] = 18;
+  must(ClassicHfsCompactNode(bytes, offsets, &count) && count == 1 && offsets[0] == 14 &&
+       offsets[1] == 20 && !memcmp(bytes + 14, "abcdef", 6), "compact overlapping live record");
+  bytes[14] = 0;
+  must(ClassicHfsCompactNode(bytes, offsets, &count) && !count && offsets[0] == 14,
+       "compact fully deleted node");
+ }
+ {
   unsigned char source[106], output[107];
   ClassicHfsTreeHeader header;
   size_t i;

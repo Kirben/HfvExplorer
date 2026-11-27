@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "ClassicHfsBytes.h"
+#include <string.h>
 
 enum { ClassicHfsNodeSize = 512, ClassicHfsNodeHeaderSize = 14, ClassicHfsMaxRecords = 35 };
 
@@ -22,6 +23,29 @@ static inline int ClassicHfsValidOffsets(unsigned count, const uint16_t *offsets
         if ((offsets[i] & 1) || offsets[i] > limit || (i && offsets[i] <= offsets[i - 1]))
             return 0;
     }
+    return 1;
+}
+
+// Remove zero-key records in place. Validate the original table before
+// touching either the payload or the caller's offsets.
+static inline int ClassicHfsCompactNode(unsigned char *bytes, uint16_t *offsets, uint16_t *count)
+{
+    if (!ClassicHfsValidOffsets(*count, offsets))
+        return 0;
+    uint16_t writeOffset = ClassicHfsNodeHeaderSize;
+    unsigned kept = 0;
+    for (unsigned i = 0; i < *count; ++i) {
+        uint16_t start = offsets[i];
+        uint16_t length = offsets[i + 1] - start;
+        if (!bytes[start])
+            continue;
+        if (start != writeOffset)
+            memmove(bytes + writeOffset, bytes + start, length);
+        offsets[kept++] = writeOffset;
+        writeOffset += length;
+    }
+    offsets[kept] = writeOffset;
+    *count = (uint16_t)kept;
     return 1;
 }
 

@@ -104,40 +104,13 @@ void n_free(node *np)
  * NAME:	node->compact()
  * DESCRIPTION:	clean up a node, removing deleted records
  */
-void n_compact(node *np)
+static int compact_node(node *np)
 {
-  unsigned char *ptr;
-  int offset, nrecs, i;
-
-  offset = 0x00e;
-  ptr    = np->data + offset;
-  nrecs  = 0;
-
-  for (i = 0; i < np->nd.ndNRecs; ++i)
-    {
-      unsigned char *rec;
-      int reclen;
-
-      rec    = HFS_NODEREC(*np, i);
-      reclen = np->roff[i + 1] - np->roff[i];
-
-      if (HFS_RECKEYLEN(rec) > 0)
-	{
-	  np->roff[nrecs++] = offset;
-	  offset += reclen;
-
-	  if (ptr == rec)
-	    ptr += reclen;
-	  else
-	    {
-	      while (reclen--)
-		*ptr++ = *rec++;
-	    }
-	}
-    }
-
-  np->roff[nrecs] = offset;
-  np->nd.ndNRecs  = nrecs;
+  if (!ClassicHfsCompactNode(np->data, np->roff, &np->nd.ndNRecs)) {
+    ERROR(EIO, "invalid classic HFS node offsets during compaction");
+    return -1;
+  }
+  return 0;
 }
 
 /*
@@ -222,8 +195,8 @@ int n_split(node *left, unsigned char *record, int *reclen)
       HFS_RECKEYLEN(rec) = 0;
     }
 
-  n_compact(left);
-  n_compact(&right);
+  if (compact_node(left) < 0 || compact_node(&right) < 0)
+    return -1;
 
   n_search(&right, record);
   if (right.rnum >= 0)
@@ -304,7 +277,8 @@ void n_insertx(node *np, unsigned char *record, int reclen)
  */
 int n_insert(node *np, unsigned char *record, int *reclen)
 {
-  n_compact(np);
+  if (compact_node(np) < 0)
+    return -1;
 
   /* check for free space */
 
@@ -385,7 +359,8 @@ int n_delete(node *np, unsigned char *record, int *flag)
   rec = HFS_NODEREC(*np, np->rnum);
 
   HFS_RECKEYLEN(rec) = 0;
-  n_compact(np);
+  if (compact_node(np) < 0)
+    return -1;
 
   /* see if we can merge with our left sibling */
 

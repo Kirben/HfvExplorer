@@ -22,7 +22,6 @@ void n_init(node *, btree *, int, int);
 int n_new(node *);
 void n_free(node *);
 
-void n_compact(node *);
 int n_search(node *, unsigned char *);
 
 void n_index(btree *, unsigned char *, unsigned long, unsigned char *, int *);
