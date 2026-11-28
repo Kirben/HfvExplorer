@@ -22,7 +22,7 @@ int ClassicHfsRecoveryExtentsValid(const ExtDataRec *extents, unsigned int block
   return 1;
 }
 
-static int markexts(hfsvol *vol, const ExtDataRec *extents)
+static int markexts(hfsvol *vol, block *claimed, const ExtDataRec *extents)
 {
   unsigned int i;
   if (!ClassicHfsRecoveryExtentsValid(extents, vol->mdb.drNmAlBlks))
@@ -37,7 +37,15 @@ static int markexts(hfsvol *vol, const ExtDataRec *extents)
       unsigned int count = (*extents)[i].xdrNumABlks;
       unsigned int index;
       for (index = start; index < start + count; ++index)
-        ClassicHfsSetBit(vol->vbm, index);
+        {
+          if (ClassicHfsBitIsSet(claimed, index))
+            {
+              ERROR(EIO, "overlapping allocation blocks during HFS recovery");
+              return -1;
+            }
+          ClassicHfsSetBit(claimed, index);
+          ClassicHfsSetBit(vol->vbm, index);
+        }
     }
   return 0;
 }
@@ -50,7 +58,7 @@ int ClassicHfsRecoveryLeafValid(const node *leaf, unsigned long previous)
          leaf->nd.ndNHeight == 1 && leaf->nd.ndBLink == previous;
 }
 
-static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
+static int scavenge_tree(hfsvol *vol, block *claimed, btree *tree, int catalog)
 {
   unsigned long previous = 0;
   node leaf;
@@ -90,8 +98,8 @@ static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
                   if (end - start - key_size < HFS_CATDATALEN)
                     goto invalid_record;
                   ClassicHfsDecodeCatalogRecord(record, end - start - key_size, &data);
-                  if (markexts(vol, &data.u.fil.filExtRec) < 0 ||
-                      markexts(vol, &data.u.fil.filRExtRec) < 0)
+                  if (markexts(vol, claimed, &data.u.fil.filExtRec) < 0 ||
+                      markexts(vol, claimed, &data.u.fil.filRExtRec) < 0)
                     return -1;
                 }
             }
@@ -101,7 +109,7 @@ static int scavenge_tree(hfsvol *vol, btree *tree, int catalog)
               if (end - start - key_size < HFS_EXTDATALEN)
                 goto invalid_record;
               ClassicHfsDecodeExtents(record, data);
-              if (markexts(vol, &data) < 0)
+              if (markexts(vol, claimed, &data) < 0)
                 return -1;
             }
         }
@@ -132,16 +140,21 @@ int ClassicHfsRecoverAllocationBitmap(hfsvol *vol)
     }
     block *original = vol->vbm;
     block *working = (block *)malloc(bytes);
-    if (!working) {
+    block *claimed = (block *)calloc(1, bytes);
+    if (!working || !claimed) {
+        free(working);
+        free(claimed);
         ERROR(ENOMEM, "cannot stage classic HFS allocation recovery");
         return -1;
     }
     memcpy(working, original, bytes);
     vol->vbm = working;
-    int valid = markexts(vol, &vol->mdb.drXTExtRec) == 0 &&
-                markexts(vol, &vol->mdb.drCTExtRec) == 0 &&
-                scavenge_tree(vol, &vol->ext, 0) == 0 && scavenge_tree(vol, &vol->cat, 1) == 0;
+    int valid = markexts(vol, claimed, &vol->mdb.drXTExtRec) == 0 &&
+                markexts(vol, claimed, &vol->mdb.drCTExtRec) == 0 &&
+                scavenge_tree(vol, claimed, &vol->ext, 0) == 0 &&
+                scavenge_tree(vol, claimed, &vol->cat, 1) == 0;
     vol->vbm = original;
+    free(claimed);
     if (!valid) {
         free(working);
         return -1;

@@ -21,6 +21,7 @@
 #include "WindowsMoveUndo.h"
 #include "NdifImage.h"
 #include <cstdio>
+#include <fcntl.h>
 #include <vector>
 extern "C" {
 #include "hfs/ClassicHfs.h"
@@ -2554,6 +2555,53 @@ int RunClassicSiblingRecoveryTest(const char* directory)
     return result;
 }
 
+namespace {
+void OverlappingRecovery(const CString& root,const Bytes& original,FILE* report)
+{
+    const auto be16=[](const Bytes& b,size_t at){return unsigned(b.at(at))*256+b.at(at+1);};
+    const auto be32=[&](const Bytes& b,size_t at){return uint32_t(be16(b,at))<<16|be16(b,at+2);};
+    auto damaged=original;
+    const size_t allocation=be16(damaged,1024+28)*512;
+    const size_t blockSize=be32(damaged,1024+20);
+    const size_t catalog=allocation+be16(damaged,1024+150)*blockSize;
+    bool changed=false;
+    for(size_t n=0;n<be16(damaged,1024+152)*blockSize;n+=512){
+        const size_t node=catalog+n;
+        if(damaged.at(node+8)!=255)continue;
+        for(unsigned i=0;i<be16(damaged,node+10);++i){
+            const auto start=node+be16(damaged,node+512-2*(i+1));
+            const auto data=start+((unsigned(damaged.at(start))+2)&~1u);
+            if(damaged.at(data)!=2)continue;
+            Check(be16(damaged,data+76)>0&&be16(damaged,data+88)>0,"overlap seed needs two nonempty forks");
+            // Point the resource fork at a block already owned by the data fork.
+            damaged.at(data+86)=damaged.at(data+74);
+            damaged.at(data+87)=damaged.at(data+75);
+            changed=true;
+            break;
+        }
+        if(changed)break;
+    }
+    Check(changed,"find catalog file for overlap fixture");
+    damaged.at(1024+10)&=uint8_t(~1u); // Clear the clean-unmount bit (0x0100).
+    for(bool bitmapSet:{true,false}){
+        auto bytes=damaged;
+        if(!bitmapSet){
+            // Every existing allocation bit may be missing; claims must still collide.
+            const auto bitmap=be16(bytes,1024+14)*512;
+            memset(bytes.data()+bitmap,0,(be16(bytes,1024+18)+7)/8);
+        }
+        CString image=root+(bitmapSet?"\\overlap-set.dsk":"\\overlap-clear.dsk");
+        Save(image,bytes);
+        auto* volume=hfs_mount(image.GetBuffer(),1,O_RDWR);
+        image.ReleaseBuffer();
+        const bool refused=volume==nullptr;
+        if(volume)hfs_umount(volume);
+        Check(refused&&Load(image)==bytes,"overlapping fork recovery accepted a writable mount or changed the image");
+    }
+    fprintf(report,"PASS: overlapping allocation claims refuse writable recovery and preserve every image byte with set or missing bitmap bits.\n");
+}
+}
+
 int RunClassicRecoveryTest(const char* directory)
 {
     if(!CreateDirectoryA(directory,nullptr))return 2;
@@ -2579,6 +2627,7 @@ int RunClassicRecoveryTest(const char* directory)
             volume->Close();
         }
         const auto original=Load(seed);
+        OverlappingRecovery(root,original,report);
         for(unsigned phase:{1u,4u,2u,3u}){
             CString image;
             image.Format("%s\\crash-%u.dsk",root.GetString(),phase);
