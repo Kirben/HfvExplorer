@@ -70,6 +70,7 @@ HANDLE ImageHandle(int fd)
 struct JournalPath {
     std::wstring name;
     bool sibling=false;
+    bool matchedHeader=false;
 
     DWORD OpenFlags() const {
         return sibling?FILE_FLAG_OPEN_REPARSE_POINT:0;
@@ -105,10 +106,7 @@ JournalPath LocateJournal(HANDLE image,const wchar_t* stream,const wchar_t* sibl
     path+=sibling?siblingName:stream;
     return {std::move(path),sibling};
 }
-JournalPath LocateJournal(HANDLE image,bool ndif)
-{
-    return LocateJournal(image,ndif?NdifStream:Stream,ndif?NdifSibling:Sibling);
-}
+JournalPath LocateJournal(HANDLE image,bool ndif);
 JournalPath LocateMfsUndo(HANDLE image)
 {
     return LocateJournal(image,L":HFVExplorer.MfsUndo",L".hfv-mfs-undo");
@@ -177,6 +175,45 @@ bool Missing(DWORD error)
 {
     return error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND||
            error==ERROR_INVALID_NAME||error==ERROR_NOT_SUPPORTED;
+}
+// A sibling's name may lag a same-directory image rename. Only a complete,
+// checksummed header with this open image's identity can claim the journal.
+JournalPath LocateJournal(HANDLE image,bool ndif)
+{
+    auto direct=LocateJournal(image,ndif?NdifStream:Stream,ndif?NdifSibling:Sibling);
+    if(!direct.sibling)return direct;
+    const auto expected=Identify(image);
+    const auto folder=direct.name.substr(0,direct.name.find_last_of(L"\\/")+1);
+    const auto pattern=folder+L"*"+(ndif?NdifSibling:Sibling);
+    WIN32_FIND_DATAW data{};
+    const auto search=FindFirstFileW(pattern.c_str(),&data);
+    if(search==INVALID_HANDLE_VALUE){
+        Check(GetLastError()==ERROR_FILE_NOT_FOUND,"Cannot search for pending classic HFS recovery journals");
+        return direct;
+    }
+    struct Search { HANDLE value; ~Search(){FindClose(value);} } close{search};
+    std::wstring match;
+    do{
+        if(data.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))continue;
+        const auto candidate=folder+data.cFileName;
+        Handle file(CreateFileW(candidate.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                                nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+        Check(bool(file),"Cannot inspect a sibling classic HFS recovery journal");
+        if(Length(file.value)<sizeof(Header))continue;
+        Header header{};
+        ReadAt(file.value,0,&header,sizeof(header));
+        auto identity=expected;
+        if(memcmp(header.magic,MoveMagic,sizeof(MoveMagic))==0){
+            memcpy(identity.magic,MoveMagic,sizeof(MoveMagic));
+            identity.crc=Crc(&identity,offsetof(Header,crc));
+        }
+        if(memcmp(&header,&identity,sizeof(header))!=0)continue;
+        CheckJournalFile(file.value,expected,true);
+        Check(match.empty(),"Multiple classic HFS recovery journals claim this image");
+        match=candidate;
+    }while(FindNextFileW(search,&data));
+    Check(GetLastError()==ERROR_NO_MORE_FILES,"Cannot finish searching for classic HFS recovery journals");
+    return match.empty()?direct:JournalPath{std::move(match),true,true};
 }
 std::wstring DecisionPath(const std::string& id,bool create=false)
 {
@@ -252,7 +289,7 @@ struct Journal {
     bool committing=false;
     Journal(int imageFd,HANDLE imageHandle,const JournalPath& path,const ImageRange* ndif,const std::string& moveId)
         : fd(imageFd),image(imageHandle),
-          stream(CreateFileW(path.name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_ALWAYS,path.OpenFlags(),nullptr)),
+          stream(CreateFileW(path.name.c_str(),GENERIC_READ|GENERIC_WRITE,path.sibling?FILE_SHARE_READ:0,nullptr,OPEN_ALWAYS,path.OpenFlags(),nullptr)),
           header(Identify(image)),range(CheckedRange(image,header.size,ndif)),move(moveId)
     {
         Check(bool(stream),"Cannot open the classic HFS recovery journal");
@@ -322,11 +359,12 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
     if (path.name.empty()) return 0;
     Handle stream(CreateFileW(path.name.c_str(),GENERIC_READ|(writable?GENERIC_WRITE:0),
                               writable?0:(FILE_SHARE_READ|FILE_SHARE_WRITE),nullptr,OPEN_EXISTING,path.OpenFlags(),nullptr));
-    if (!stream && (path.sibling?GetLastError()==ERROR_FILE_NOT_FOUND:Missing(GetLastError()))) return 0;
+    if (!stream && !path.matchedHeader && (path.sibling?GetLastError()==ERROR_FILE_NOT_FOUND:Missing(GetLastError()))) return 0;
     Check(bool(stream),"Cannot open pending classic HFS recovery journal");
     auto identity=Identify(image);
     CheckJournalFile(stream.value,identity,path.sibling);
     const auto size=Length(stream.value);
+    if(path.matchedHeader)Check(size>=sizeof(Header),"The pending classic HFS recovery journal changed during discovery");
     if (!size) return 0;
     auto range=CheckedRange(image,identity.size,ndif);
     Header header{};
@@ -427,6 +465,7 @@ Transaction::Transaction(int fd,const ImageRange* ndif,const std::string& move)
     const auto image=ndif?reinterpret_cast<HANDLE>(ndif->handle):ImageHandle(fd);
     const auto path=LocateJournal(image,ndif!=nullptr);
     if (path.name.empty()) return;
+    Check(!path.matchedHeader,"A classic HFS operation already needs recovery");
     Check(!ForFd(fd),"A classic HFS recovery transaction is already active");
     state_=std::make_unique<State>(fd,image,path,ndif,move);
     state_->previous=active;
@@ -516,6 +555,7 @@ template<class Locate>
 bool PendingJournal(HANDLE image,Locate locate)
 {
     const auto journal=locate(image);
+    if(journal.matchedHeader)return true;
     if(journal.name.empty())return false;
     Handle stream(CreateFileW(journal.name.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
                               nullptr,OPEN_EXISTING,journal.OpenFlags(),nullptr));

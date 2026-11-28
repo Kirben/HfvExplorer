@@ -1579,6 +1579,49 @@ void SiblingRawRecovery(const CString& root,FILE* report)
         }
     }
 
+    for(unsigned phase:{1u,2u,3u}){
+        CString image,renamed;
+        image.Format("%s\\before-rename-%u.dsk",root.GetString(),phase);
+        renamed.Format("%s\\after-rename-%u.dsk",root.GetString(),phase);
+        Save(image,original);
+        CrashChild(image,phase);
+        const CString journal=image+".hfv-classic-undo";
+        const CString decoy=root+"\\unrelated.hfv-classic-undo";
+        const CString other=root+"\\other-image.dsk";
+        Save(other,original);
+        CrashChild(other,2);
+        const CString otherJournal=other+".hfv-classic-undo";
+        const auto otherBytes=Load(other),otherUndo=Load(otherJournal);
+        const Bytes junk{1,3,5,7,9};
+        Save(decoy,junk);
+        Check(MoveFileA(image,renamed)!=FALSE,"rename interrupted image within its directory");
+        const auto path=VolumeCoord::Wide(renamed.GetString());
+        Check(ClassicHfsRecovery::Pending(path),"renamed image lost its pending sibling journal");
+        const CString duplicate=renamed+".hfv-classic-undo";
+        const auto interrupted=Load(renamed),undo=Load(journal);
+        Save(duplicate,undo);
+        bool ambiguous=false;
+        try{auto volume=MacBrowser::OpenImage(path);}catch(const HfsPlus::Error&){ambiguous=true;}
+        Check(ambiguous&&Load(renamed)==interrupted&&Load(duplicate)==undo&&Load(journal)==undo,
+              "ambiguous sibling recovery changed an image or journal");
+        Check(DeleteFileA(duplicate),"remove ambiguous disposable journal");
+        {
+            auto volume=MacBrowser::OpenBrowserImage(path);
+            Check(volume&&volume->Writable(),"recover renamed image writable");
+            VerifyFile(*volume,2,u"Document",phase==3);
+            VerifyFile(*volume,2,u"Unrelated",true);
+            volume->Close();
+        }
+        Check(!ClassicHfsRecovery::Pending(path)&&Load(journal).empty(),"renamed image left its old sibling journal pending");
+        if(phase!=3)Check(Load(renamed)==original,"renamed image rollback did not restore all bytes");
+        Check(Load(decoy)==junk&&Load(other)==otherBytes&&Load(otherJournal)==otherUndo,
+              "rename recovery altered unrelated siblings");
+        // Resolve the independently interrupted neighbor before the next iteration.
+        auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(other.GetString()));
+        volume->Close();
+    }
+    fprintf(report,"PASS: same-directory image renames recover pending sibling undo before and after commit and preserve unrelated files and journals.\n");
+
     const CString image=root+"\\replaced.dsk",replacement=root+"\\replacement.dsk";
     const auto path=VolumeCoord::Wide(image.GetString());
     Save(image,original);
