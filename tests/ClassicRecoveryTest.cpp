@@ -2637,6 +2637,43 @@ void OverlappingRecovery(const CString& root,const Bytes& original,FILE* report)
 {
     const auto be16=[](const Bytes& b,size_t at){return unsigned(b.at(at))*256+b.at(at+1);};
     const auto be32=[&](const Bytes& b,size_t at){return uint32_t(be16(b,at))<<16|be16(b,at+2);};
+    const CString skipped=root+"\\skipped-leaf.dsk";
+    Save(skipped,original);
+    CString mountPath=skipped;
+    auto* treeVolume=hfs_mount(mountPath.GetBuffer(),1,O_RDWR);
+    mountPath.ReleaseBuffer();
+    Check(treeVolume!=nullptr,"mount disposable catalog fixture");
+    for(unsigned i=0;i<20;++i){
+        char name[32],type[]="TEXT",creator[]="TEST";
+        sprintf_s(name,":LeafFixture%02u",i);
+        Check(hfs_create(treeVolume,name,type,creator)==0,"grow disposable catalog");
+    }
+    Check(hfs_umount(treeVolume)==0,"close disposable catalog");
+    auto tree=Load(skipped);
+    const size_t base=be16(tree,1052)*512+be16(tree,1174)*be32(tree,1044);
+    const auto leafOffset=[&](unsigned n){
+        Check(n&&size_t(n)*512<be16(tree,1176)*be32(tree,1044),"expected leaf in first catalog extent");
+        return base+size_t(n)*512;
+    };
+    const auto first=leafOffset(be32(tree,base+24));
+    const auto middle=leafOffset(be32(tree,first));
+    const auto last=leafOffset(be32(tree,middle));
+    tree.at(1034)&=uint8_t(~1u);
+    Save(skipped,tree);
+    treeVolume=hfs_mount(mountPath.GetBuffer(),1,O_RDWR);
+    mountPath.ReleaseBuffer();
+    Check(treeVolume&&hfs_umount(treeVolume)==0,"recover valid multi-leaf disposable catalog");
+    memcpy(tree.data()+first,tree.data()+middle,4);
+    memcpy(tree.data()+last+4,tree.data()+middle+4,4);
+    // Even a forged header count must not hide an indexed leaf.
+    const auto count=be32(tree,base+20)-be16(tree,middle+10);
+    for(unsigned i=0;i<4;++i)tree.at(base+20+i)=uint8_t(count>>(24-8*i));
+    Save(skipped,tree);
+    treeVolume=hfs_mount(mountPath.GetBuffer(),1,O_RDWR);
+    mountPath.ReleaseBuffer();
+    const bool skippedRejected=!treeVolume;
+    if(treeVolume)hfs_umount(treeVolume);
+    Check(skippedRejected&&Load(skipped)==tree,"skipped indexed leaf allowed recovery or changed image");
     auto damaged=original;
     const size_t allocation=be16(damaged,1024+28)*512;
     const size_t blockSize=be32(damaged,1024+20);

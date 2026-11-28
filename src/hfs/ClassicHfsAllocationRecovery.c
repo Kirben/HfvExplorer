@@ -58,10 +58,58 @@ int ClassicHfsRecoveryLeafValid(const node *leaf, unsigned long previous)
          leaf->nd.ndNHeight == 1 && leaf->nd.ndBLink == previous;
 }
 
+/* Walk the index in order. Its leaves and the sibling chain must describe
+   exactly the same records before recovery trusts either for block ownership. */
+static int check_index(btree *tree, uint32_t number, unsigned height,
+                       uint32_t *next_leaf, uint32_t *records, uint32_t *budget)
+{
+  node current;
+  unsigned i;
+  if (!number || !*budget || !height || height > 127)
+    return -1;
+  --*budget;
+  current.bt = tree;
+  current.nnum = number;
+  if (ClassicHfsReadTreeNode(&current) < 0 || current.nd.ndNHeight != height ||
+      !current.nd.ndNRecs)
+    return -1;
+  if (height == 1)
+    {
+      if ((unsigned char)current.nd.ndType != ndLeafNode || number != *next_leaf ||
+          current.nd.ndNRecs > *records)
+        return -1;
+      *next_leaf = current.nd.ndFLink;
+      *records -= current.nd.ndNRecs;
+      return 0;
+    }
+  if (current.nd.ndType != ndIndxNode)
+    return -1;
+  for (i = 0; i < current.nd.ndNRecs; ++i)
+    {
+      const unsigned char *key = current.data + current.roff[i];
+      unsigned width = HFS_RECKEYSKIP(key);
+      if (!key[0] || width + 4 != (unsigned)(current.roff[i+1] - current.roff[i]) ||
+          check_index(tree, ClassicHfsRead32(key + width), height - 1,
+                      next_leaf, records, budget) < 0)
+        return -1;
+    }
+  return 0;
+}
+
 static int scavenge_tree(hfsvol *vol, block *claimed, btree *tree, int catalog)
 {
   unsigned long previous = 0;
   node leaf;
+  uint32_t next_leaf = tree->hdr.bthFNode, records = tree->hdr.bthNRecs;
+  uint32_t budget = tree->hdr.bthNNodes;
+  int root = ClassicHfsCheckSearchRoot(&tree->hdr);
+  if (root < 0 || (root && check_index(tree, tree->hdr.bthRoot, tree->hdr.bthDepth,
+                                      &next_leaf, &records, &budget) < 0) ||
+      next_leaf || records)
+    {
+      ERROR(EIO, "inconsistent B-tree index and leaf chain during HFS recovery");
+      return -1;
+    }
   leaf.bt = tree;
 
   for (leaf.nnum = tree->hdr.bthFNode; leaf.nnum; leaf.nnum = leaf.nd.ndFLink)
