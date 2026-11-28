@@ -7,10 +7,16 @@
 #include <errno.h>
 #include "ReadOnlyCd.h"
 #include "ReadOnlyCdBackend.h"
+#include "ClassicHfsRecovery.h"
 extern "C" {
 #include "hfs/ClassicHfs.h"
 #include "floppy.h"
 }
+
+// Physical CDs have no image journal. Refuse writable mounts and sector writes.
+extern "C" int hfv_hfs_recover_image(int, int writable) { return writable ? -1 : 0; }
+extern "C" int hfv_hfs_before_sector_write(int, unsigned long long) { return -1; }
+extern "C" void hfv_hfs_after_sector_write(int) {}
 
 static int fail(const char* operation, DWORD error) {
     char message[512] = {};
