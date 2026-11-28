@@ -1625,6 +1625,14 @@ void SiblingRawRecovery(const CString& root,FILE* report)
         Check(ClassicHfsRecovery::Pending(path),"renamed image lost its pending sibling journal");
         const CString duplicate=renamed+".hfv-classic-undo";
         const auto interrupted=Load(renamed),undo=Load(journal);
+        auto damaged=undo;
+        damaged.at(36)^=1; // Header checksum, after the image identity.
+        Save(journal,damaged);
+        bool rejected=false;
+        try{auto volume=MacBrowser::OpenImage(path);}catch(const HfsPlus::Error&){rejected=true;}
+        Check(rejected&&Load(renamed)==interrupted&&Load(journal)==damaged,
+              "damaged journal on a renamed image allowed mounting or changed recovery evidence");
+        Save(journal,undo);
         Save(duplicate,undo);
         bool ambiguous=false;
         try{auto volume=MacBrowser::OpenImage(path);}catch(const HfsPlus::Error&){ambiguous=true;}

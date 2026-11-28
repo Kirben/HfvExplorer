@@ -207,7 +207,11 @@ JournalPath LocateJournal(HANDLE image,bool ndif)
             memcpy(identity.magic,MoveMagic,sizeof(MoveMagic));
             identity.crc=Crc(&identity,offsetof(Header,crc));
         }
-        if(memcmp(&header,&identity,sizeof(header))!=0)continue;
+        if(header.serial!=identity.serial || header.fileHigh!=identity.fileHigh ||
+           header.fileLow!=identity.fileLow || CompareFileTime(&header.created,&identity.created)!=0)
+            continue;
+        Check(memcmp(&header,&identity,sizeof(header))==0,
+              "A sibling journal for this classic HFS image has a damaged header");
         CheckJournalFile(file.value,expected,true);
         Check(match.empty(),"Multiple classic HFS recovery journals claim this image");
         match=candidate;
