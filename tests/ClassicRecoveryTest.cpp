@@ -104,6 +104,30 @@ void Save(const CString& path,const Bytes& bytes)
     Check(file.Open(path,CFile::modeCreate|CFile::modeWrite)!=FALSE,"create a scratch recovery image");
     file.Write(bytes.data(),UINT(bytes.size()));
 }
+void RejectDuplicateJournal(const CString& image,const CString& journal,size_t prefix,
+                            const CString& participant=CString(),const CString& companion=CString())
+{
+    const auto valid=Load(journal),before=Load(image);
+    Check(valid.size()>=prefix+528,"duplicate fixture needs a complete undo record");
+    auto duplicate=valid;
+    // Preserve a valid checksum. With multiple records, also preserve the
+    // journal length so a size check alone cannot detect the missing sector.
+    if(valid.size()>=prefix+2*528)
+        std::copy_n(valid.begin()+prefix,528,duplicate.begin()+prefix+528);
+    else
+        duplicate.insert(duplicate.end(),valid.begin()+prefix,valid.begin()+prefix+528);
+    const auto host=participant.IsEmpty()?Bytes{}:Load(participant);
+    const auto metadata=companion.IsEmpty()?Bytes{}:Load(companion);
+    Save(journal,duplicate);
+    bool rejected=false;
+    try{auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(image.GetString()));}
+    catch(const HfsPlus::Error&){rejected=true;}
+    Check(rejected&&Load(image)==before&&Load(journal)==duplicate&&
+          (participant.IsEmpty()||Load(participant)==host)&&
+          (companion.IsEmpty()||Load(companion)==metadata),
+          "duplicate sector offsets changed the image, journal or move participant before rejection");
+    Save(journal,valid);
+}
 void CrashChild(const CString& image,unsigned phase,const wchar_t* action=L"overwrite")
 {
     wchar_t executable[MAX_PATH]{};
@@ -240,6 +264,8 @@ void WindowsMoveRecovery(const CString& root,const Bytes& blank,FILE* report)
                 const CString journal=image+":HFVExplorer.ClassicUndo";
                 const CString published=image+".windows\\Tree\\Document";
                 const CString companion=image+".windows\\Tree\\%Document";
+                RejectDuplicateJournal(image,journal,40+ClassicHfsRecovery::MoveIdSize+4,published,companion);
+                fprintf(report,"PASS: duplicate move undo offsets preserve the image, journal and both Windows forks.\n");
                 const auto validJournal=Load(journal);
                 const auto movedData=Load(published),movedResource=Load(companion),movedImage=Load(image);
                 Check(!validJournal.empty(),"interrupted move has no HFS undo data");
@@ -2683,6 +2709,10 @@ int RunClassicRecoveryTest(const char* directory)
                 try { MacBrowser::OpenClassicImage(path,false,VolumeCoord::ImageKey(path)); }
                 catch(const HfsPlus::Error&){ rejected=true; }
                 Check(rejected&&ClassicHfsRecovery::Pending(path),"read-only open consumed pending rollback");
+            }
+            if(phase==1){
+                RejectDuplicateJournal(image,image+":HFVExplorer.ClassicUndo",40);
+                fprintf(report,"PASS: duplicate undo offsets are rejected with image and journal byte-for-byte preserved.\n");
             }
             if(phase==4)CrashChild(image,5);
             if(phase==2){

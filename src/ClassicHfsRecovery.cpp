@@ -422,6 +422,7 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
     const auto count=(size-prefix)/sizeof(Record);
     Check(count<=range.length/Sector+1,"Classic HFS recovery contains too many sector records");
     bool committed=sharedCommit;
+    std::unordered_set<uint64_t> offsets;
     for (uint64_t i=0;i<count;++i) {
         Record record{};
         ReadAt(stream.value,prefix+i*sizeof(record),&record,sizeof(record));
@@ -432,6 +433,7 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
             committed=true;
         } else {
             Check(ValidSector(record.offset,range),"Classic HFS recovery sector lies outside the image");
+            Check(offsets.insert(record.offset).second,"Classic HFS recovery contains duplicate sector offsets");
         }
     }
     if (committed && !writable) return 0;
