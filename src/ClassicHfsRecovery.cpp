@@ -383,14 +383,7 @@ int Recover(HANDLE image,bool writable,const ImageRange* ndif=nullptr,bool keepJ
         }
         Check(memcmp(&identity,&header,sizeof(header))==0,"Classic HFS recovery header or image identity is invalid");
     }else if(path.sibling){
-        // An interrupted initial header can only be discarded if its
-        // written prefix belongs to this image.
-        ReadAt(stream.value,0,&header,DWORD(size));
-        if(size>=sizeof(MoveMagic)&&memcmp(header.magic,MoveMagic,sizeof(MoveMagic))==0){
-            memcpy(identity.magic,MoveMagic,sizeof(MoveMagic));
-            identity.crc=Crc(&identity,offsetof(Header,crc));
-        }
-        Check(memcmp(&identity,&header,size_t(size))==0,"Invalid classic HFS recovery sibling header");
+        throw HfsPlus::Error("Incomplete classic HFS sibling journal header; ownership cannot be verified");
     }
     if (size<prefix) {
         // No image write can occur while the initial header is incomplete.

@@ -1672,14 +1672,15 @@ void SiblingRawRecovery(const CString& root,FILE* report)
           "stale sibling undo was applied to a replacement image or erased");
     const CString collision=root+"\\collision.dsk";
     const CString unrelated=collision+".hfv-classic-undo";
-    const Bytes unrelatedBytes{0x12,0x34,0x56};
     Save(collision,original);
-    Save(unrelated,unrelatedBytes);
-    rejected=false;
-    try{auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(collision.GetString()));rejected=!volume;}
-    catch(const HfsPlus::Error&){rejected=true;}
-    Check(rejected&&Load(collision)==original&&Load(unrelated)==unrelatedBytes,
-          "an unrelated file at the sibling path was altered or accepted");
+    for(const Bytes& prefix:{Bytes{0x12,0x34,0x56},Bytes{'H'},Bytes(stale.begin(),stale.begin()+8)}){
+        Save(unrelated,prefix);
+        rejected=false;
+        try{auto volume=MacBrowser::OpenImage(VolumeCoord::Wide(collision.GetString()));rejected=!volume;}
+        catch(const HfsPlus::Error&){rejected=true;}
+        Check(rejected&&Load(collision)==original&&Load(unrelated)==prefix,
+              "an unidentifiable sibling journal was altered or accepted");
+    }
     fprintf(report,"PASS: sibling undo recovers raw overwrites and deletes before and after commit, retries interrupted replay, and rejects stale and unrelated sibling files.\n");
 }
 
